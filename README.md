@@ -263,6 +263,26 @@ with `--root`. Installed via Homebrew the binary is already on your `PATH` (use
 cargo build --release -p ctx-mcp   # -> target/release/ctx-mcp
 ```
 
+### Automatic setup (recommended)
+
+From a project directory, register `ctx-mcp` in Claude Code and/or Codex in one
+command:
+
+```bash
+ctx-mcp install              # configure both; root = current directory
+ctx-mcp install --claude     # Claude Code only
+ctx-mcp install --codex      # Codex only
+ctx-mcp install --dry-run    # print the commands instead of running them
+```
+
+It calls `claude mcp add` / `codex mcp add` for you (idempotent — safe to re-run),
+writes an absolute `--root`, and on Homebrew uses the stable `bin/ctx-mcp` path so
+the config survives upgrades. Useful flags: `--root <path>` and
+`--workspace name=path` (both repeatable), `--name <server>` (default
+`context-engine`), `--scope local|user|project` (Claude Code).
+
+### Manual setup
+
 **Claude Code** — `.mcp.json` (or `claude mcp add`):
 
 ```json
