@@ -107,9 +107,9 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   cargo build --release -p ctx-mcp
   STAGE="$TMP/stage"; mkdir -p "$STAGE"
   cp "target/release/$BIN" "$STAGE/$BIN"
-  strip "$STAGE/$BIN" 2>/dev/null || true
-  # strip drops the linker's ad-hoc signature; re-sign or the binary is SIGKILLed on Apple Silicon
-  codesign --sign - --force "$STAGE/$BIN"
+  # [profile.release] strip = true strips at link time and keeps a valid ad-hoc linker
+  # signature. Do NOT run external strip/codesign here — that corrupts the Mach-O and the
+  # binary gets SIGKILLed on Apple Silicon even after a verifying re-sign.
   "$STAGE/$BIN" --version >/dev/null # smoke test: abort the release if the binary cannot run
   MAC_TARBALL="$TMP/${BIN}-${NEW}-aarch64-apple-darwin.tar.gz"
   tar -czf "$MAC_TARBALL" -C "$STAGE" "$BIN"

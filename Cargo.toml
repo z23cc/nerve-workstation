@@ -3,6 +3,9 @@ members = ["crates/ctx-core", "crates/ctx-mcp", "crates/ctx-ffi", "crates/ctx-wa
 exclude = ["fuzz"]
 resolver = "3"
 
+[profile.release]
+strip = true
+
 [workspace.package]
 version = "0.0.3"
 edition = "2024"
