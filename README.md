@@ -8,7 +8,11 @@ A minimal, runnable Rust vertical slice of a snapshot-centered context engine.
   `CatalogProvider` port trait, fail-closed root policy, path/content search,
   `read_file`, and `get_file_tree`.
 - `crates/ctx-mcp` — binary crate exposing the engine over a synchronous stdio
-  JSON-RPC loop plus small CLI commands.
+  JSON-RPC loop plus small CLI commands (`serve`, `doctor`, `config`, `install`).
+- `crates/ctx-ffi` — C ABI (`cdylib`/`staticlib`) for embedding the engine in
+  native hosts, with a cancellation surface.
+- `crates/ctx-wasm` — `wasm32` bindings exposing the same dispatch surface to
+  browser/edge hosts via an in-memory catalog.
 
 The design keeps the engine centered on immutable `CatalogSnapshot` values. File
 system access is behind the `CatalogProvider` port, so the core does not depend
@@ -23,9 +27,10 @@ brew install z23cc/tap/ctx-mcp
 ctx-mcp --version
 ```
 
-Builds `ctx-mcp` from source (Homebrew pulls a temporary Rust toolchain) and puts
-it on your `PATH`. See [`packaging/homebrew`](packaging/homebrew/README.md) for how
-releases and versioning work.
+On supported macOS this pours a prebuilt **bottle** (instant, no compiler); other
+platforms build from source via a temporary Rust toolchain. Either way `ctx-mcp`
+lands on your `PATH`. See [`packaging/homebrew`](packaging/homebrew/README.md) for
+how bottles, releases, and versioning work.
 
 ### From source
 
@@ -62,8 +67,9 @@ that need mid-request interruption should use the C ABI cancellation surface.
   relevance ranking, ripgrep-style smart-case, optional `whole_word`,
   binary-file skipping for content search, and real content file/byte budget
   limits (`max_content_files`, `max_content_bytes`).
-- `read_file` — read a file from an allowed root with optional line range or
-  `start_line` + `limit`, preserving selected trailing newlines and returning
+- `read_file` — read a file from an allowed root with an optional line range
+  (`start_line`/`end_line`, or `start_line` + `limit`; `offset` is accepted as an
+  alias for `start_line`), preserving selected trailing newlines and returning
   `first_line` / `last_line` plus root-prefixed `display_path`.
 - `get_file_tree` — compact JSON tree plus token-efficient ASCII `tree`,
   `roots_count`, `was_truncated`, and `uses_legend` fields from the current
@@ -80,8 +86,13 @@ that need mid-request interruption should use the C ABI cancellation surface.
 - `build_context` — deterministic query-focused context builder that combines
   search, personalized repo-map ranking, greedy token-budget mode selection, and
   `workspace_context` assembly without mutating the persistent selection.
+- `manage_workspaces` — add / remove / list named workspaces in the running
+  server so tool calls can target a specific project by `workspace` name
+  (multi-project routing).
 
-No roots means fail-closed: catalog/read/search operations are refused.
+No roots means fail-closed: catalog/read/search operations are refused. Numeric
+tool parameters accept integers or integer-valued strings (e.g. `"limit": "120"`),
+tolerating clients that stringify numbers.
 
 ## Embedded C ABI and cancellation
 
@@ -255,7 +266,7 @@ native dispatch. Runnable example: `crates/ctx-wasm/examples/node-smoke.js`.
 ## Use with Claude Code / Codex (MCP)
 
 `ctx-mcp` is an MCP server over stdio (JSON-RPC 2.0: `initialize` / `tools/list` /
-`tools/call`). It exposes all 8 tools and is **fail-closed** — pass the project root
+`tools/call`). It exposes all 9 tools and is **fail-closed** — pass the project root
 with `--root`. Installed via Homebrew the binary is already on your `PATH` (use
 `"command": "ctx-mcp"`); otherwise build it first:
 
@@ -289,7 +300,7 @@ the config survives upgrades. Useful flags: `--root <path>` and
 {
   "mcpServers": {
     "context-engine": {
-      "command": "/abs/path/to/target/release/ctx-mcp",
+      "command": "ctx-mcp",
       "args": ["serve", "--root", "/abs/path/to/your/project"]
     }
   }
@@ -300,11 +311,12 @@ the config survives upgrades. Useful flags: `--root <path>` and
 
 ```toml
 [mcp_servers.context-engine]
-command = "/abs/path/to/target/release/ctx-mcp"
+command = "ctx-mcp"
 args = ["serve", "--root", "/abs/path/to/your/project"]
 ```
 
 Tools: `file_search`, `read_file`, `get_file_tree`, `get_code_structure`,
-`get_repo_map`, `manage_selection`, `workspace_context`, `build_context`.
+`get_repo_map`, `manage_selection`, `manage_workspaces`, `workspace_context`,
+`build_context`.
 Pins MCP `protocolVersion` `2024-11-05` (clients negotiate accordingly). Codemap
 covers Rust/Python/JS. Pure Rust, no C toolchain required.
