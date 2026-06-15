@@ -172,7 +172,7 @@ if [[ "$mode" == "bottle-only" ]]; then
     ' "$FRM" >"$FRM.tmp" && mv "$FRM.tmp" "$FRM"
   fi
 
-  brew style "$FRM" >/dev/null 2>&1 || echo ">> warn: brew style reported issues (continuing)"
+  brew style --fix "$FRM" >/dev/null 2>&1 || true # auto-align multi-bottle digests
   git -C "$TAPDIR" add "Formula/${FORMULA}.rb"
   if git -C "$TAPDIR" diff --cached --quiet; then
     echo ">> $BTAG bottle already current in the formula; nothing to push"; exit 0
