@@ -91,6 +91,23 @@ pub fn tool_specs() -> Value {
             }
         }),
         json!({
+            "name": "git",
+            "description": "Read-only git in the workspace root: op = status | diff | log | blame | show. diff takes optional path + staged; log takes count + path; blame takes path (+ lines L-range); show takes ref.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["op"],
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "op": { "type": "string", "enum": ["status", "diff", "log", "blame", "show"] },
+                    "path": { "type": "string" },
+                    "staged": { "type": "boolean", "description": "diff: staged vs HEAD." },
+                    "ref": { "type": "string", "description": "show: commit/ref." },
+                    "count": { "type": "integer", "description": "log: number of commits (default 20)." },
+                    "lines": { "type": "string", "description": "blame: line range, e.g. 10,20." }
+                }
+            }
+        }),
+        json!({
             "name": "build_context",
             "description": "Build a deterministic query-focused context within a token budget.",
             "inputSchema": {
@@ -415,6 +432,7 @@ where
         }
         "write" => {
             let args: WriteArgs = serde_json::from_value(arguments)?;
+            let old = read_old(provider, &args.path);
             provider.write_text(Path::new(&args.path), &args.content)?;
             return tool_response_text(&EditResult {
                 files: vec![EditedFile::with_content(
@@ -422,6 +440,7 @@ where
                     args.path,
                     None,
                     &args.content,
+                    &old,
                 )],
             });
         }
@@ -435,6 +454,7 @@ where
                     moved_to: None,
                     tag: None,
                     view: None,
+                    diff: None,
                     diagnostics: Vec::new(),
                 }],
             });
@@ -449,6 +469,7 @@ where
                     moved_to: Some(args.to),
                     tag: None,
                     view: None,
+                    diff: None,
                     diagnostics: Vec::new(),
                 }],
             });
@@ -537,9 +558,23 @@ where
             provider.write_text(Path::new(&args.path), &rewritten)?;
             return tool_response_text(&EditResult {
                 files: vec![EditedFile::with_content(
-                    "ast_edit", args.path, None, &rewritten,
+                    "ast_edit", args.path, None, &rewritten, &source,
                 )],
             });
+        }
+        "git" => {
+            let args: GitArgs = serde_json::from_value(arguments)?;
+            let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+            let root = snapshot
+                .roots
+                .first()
+                .map(|root| root.path.clone())
+                .ok_or(DispatchError::Core(CtxError::NoRoots))?;
+            let output = run_git(&root, &args)?;
+            return Ok(json!({
+                "content": [{ "type": "text", "text": output }],
+                "structuredContent": { "op": args.op },
+            }));
         }
         "get_file_tree" => {
             let args: FileTreeArgs = serde_json::from_value(arguments)?;
@@ -1006,6 +1041,106 @@ struct AstEditArgs {
     replacement: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitArgs {
+    op: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    staged: bool,
+    #[serde(default, rename = "ref")]
+    reference: Option<String>,
+    #[serde(default = "default_git_count")]
+    count: usize,
+    #[serde(default)]
+    lines: Option<String>,
+}
+
+fn default_git_count() -> usize {
+    20
+}
+
+/// Run a read-only git subcommand in `root` and return its stdout (capped).
+fn run_git(root: &Path, args: &GitArgs) -> Result<String, DispatchError> {
+    let bad = |detail: String| {
+        DispatchError::Edit(edit::EditError::Parse {
+            mode: "git",
+            detail,
+        })
+    };
+    if let Some(path) = &args.path
+        && path.split(['/', '\\']).any(|segment| segment == "..")
+    {
+        return Err(bad("path traversal is not allowed".to_string()));
+    }
+    let mut git: Vec<String> = Vec::new();
+    match args.op.as_str() {
+        "status" => git.extend(["status", "--short", "--branch"].map(String::from)),
+        "diff" => {
+            git.push("diff".to_string());
+            if args.staged {
+                git.push("--staged".to_string());
+            }
+            if let Some(path) = &args.path {
+                git.push("--".to_string());
+                git.push(path.clone());
+            }
+        }
+        "log" => {
+            git.extend(["log", "--oneline"].map(String::from));
+            git.push("-n".to_string());
+            git.push(args.count.to_string());
+            if let Some(path) = &args.path {
+                git.push("--".to_string());
+                git.push(path.clone());
+            }
+        }
+        "blame" => {
+            let path = args
+                .path
+                .as_ref()
+                .ok_or_else(|| bad("blame requires a path".to_string()))?;
+            git.push("blame".to_string());
+            if let Some(lines) = &args.lines {
+                git.push("-L".to_string());
+                git.push(lines.clone());
+            }
+            git.push("--".to_string());
+            git.push(path.clone());
+        }
+        "show" => {
+            let reference = args
+                .reference
+                .as_ref()
+                .ok_or_else(|| bad("show requires a ref".to_string()))?;
+            git.push("show".to_string());
+            git.push(reference.clone());
+        }
+        other => return Err(bad(format!("unknown git op: {other}"))),
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(&git)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|err| bad(format!("could not run git: {err}")))?;
+    if !output.status.success() {
+        return Err(bad(format!(
+            "git {} failed: {}",
+            args.op,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.chars().count() > 20_000 {
+        let capped: String = text.chars().take(20_000).collect();
+        Ok(format!("{capped}\n\u{2026} (output truncated)\n"))
+    } else {
+        Ok(text.into_owned())
+    }
+}
+
 #[derive(serde::Serialize)]
 struct AstFileMatch {
     path: String,
@@ -1065,6 +1200,8 @@ struct EditedFile {
     tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     view: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     diagnostics: Vec<crate::codemap::SyntaxIssue>,
 }
@@ -1075,12 +1212,15 @@ impl EditedFile {
         path: String,
         moved_to: Option<String>,
         content: &str,
+        old: &str,
     ) -> Self {
         let display = moved_to.clone().unwrap_or_else(|| path.clone());
+        let diff = (old != content).then(|| unified_diff(&display, old, content));
         Self {
             action,
             tag: Some(edit::snapshot_tag(content)),
             view: Some(edit::hashline_view(&display, content)),
+            diff,
             diagnostics: crate::codemap::syntax_diagnostics(&display, content),
             path,
             moved_to,
@@ -1111,9 +1251,9 @@ impl ToolText for EditResult {
             }
         }
         for file in &self.files {
-            if let Some(view) = &file.view {
+            if let Some(diff) = &file.diff {
                 out.push('\n');
-                out.push_str(view);
+                out.push_str(diff);
             }
         }
         out
@@ -1129,11 +1269,12 @@ fn apply_changes<P: CatalogProvider + ?Sized>(
         let edited = match change {
             FileChange::Create { path, content } => {
                 provider.write_text(Path::new(&path), &content)?;
-                EditedFile::with_content("create", path, None, &content)
+                EditedFile::with_content("create", path, None, &content, "")
             }
             FileChange::Update { path, content } => {
+                let old = read_old(provider, &path);
                 provider.write_text(Path::new(&path), &content)?;
-                EditedFile::with_content("update", path, None, &content)
+                EditedFile::with_content("update", path, None, &content, &old)
             }
             FileChange::Delete { path } => {
                 provider.delete_file(Path::new(&path))?;
@@ -1143,18 +1284,45 @@ fn apply_changes<P: CatalogProvider + ?Sized>(
                     moved_to: None,
                     tag: None,
                     view: None,
+                    diff: None,
                     diagnostics: Vec::new(),
                 }
             }
             FileChange::Rename { from, to, content } => {
+                let old = read_old(provider, &from);
                 provider.rename_file(Path::new(&from), Path::new(&to))?;
                 provider.write_text(Path::new(&to), &content)?;
-                EditedFile::with_content("rename", from, Some(to), &content)
+                EditedFile::with_content("rename", from, Some(to), &content, &old)
             }
         };
         files.push(edited);
     }
     Ok(EditResult { files })
+}
+
+/// Current text of `path`, or empty if it does not exist / is unreadable.
+fn read_old<P: CatalogProvider + ?Sized>(provider: &P, path: &str) -> String {
+    provider
+        .read_bytes(Path::new(path))
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
+}
+
+/// A compact unified diff (old -> new) for the edit response.
+fn unified_diff(path: &str, old: &str, new: &str) -> String {
+    let text_diff = similar::TextDiff::from_lines(old, new);
+    let mut builder = text_diff.unified_diff();
+    builder
+        .context_radius(3)
+        .header(&format!("a/{path}"), &format!("b/{path}"));
+    let rendered = builder.to_string();
+    if rendered.chars().count() > 6000 {
+        let capped: String = rendered.chars().take(6000).collect();
+        format!("{capped}\n\u{2026} (diff truncated)\n")
+    } else {
+        rendered
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1544,6 +1712,77 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("a.rs")).expect("read"),
             "fn main() { done(); done(); }\n"
+        );
+    }
+
+    #[test]
+    fn git_tool_and_per_edit_diff() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // git not installed; skip
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        fs::write(dir.path().join("a.txt"), "one\ntwo\n").expect("seed");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        let provider = provider_for(dir.path());
+
+        // edit response carries a unified diff of exactly this change
+        let res = handle_tool_call(
+            &provider,
+            &json!({ "name": "edit", "arguments": { "mode": "replace", "path": "a.txt",
+                "edits": [{ "old_text": "two", "new_text": "TWO" }] } }),
+        )
+        .expect("edit");
+        let diff = res["structuredContent"]["files"][0]["diff"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            diff.contains("-two") && diff.contains("+TWO"),
+            "diff: {diff}"
+        );
+
+        // git diff sees the working-tree change
+        let g = handle_tool_call(
+            &provider,
+            &json!({ "name": "git", "arguments": { "op": "diff" } }),
+        )
+        .expect("git diff");
+        assert!(
+            g["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("+TWO"),
+            "git diff output"
+        );
+
+        // git status lists the modified file
+        let s = handle_tool_call(
+            &provider,
+            &json!({ "name": "git", "arguments": { "op": "status" } }),
+        )
+        .expect("git status");
+        assert!(
+            s["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("a.txt")
         );
     }
 
