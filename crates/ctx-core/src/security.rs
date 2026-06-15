@@ -59,6 +59,55 @@ impl RootPolicy {
             Err(CtxError::OutsideRoots(canonical))
         }
     }
+
+    /// Resolve a path for writing. If it already exists this matches
+    /// [`Self::resolve_allowed`]; otherwise the parent directory must exist and
+    /// be within an allowed root, and the would-be canonical path is returned.
+    /// Used for create and move-destination targets.
+    pub fn resolve_for_write(&self, path: &Path) -> Result<PathBuf, CtxError> {
+        if self.roots.is_empty() {
+            return Err(CtxError::NoRoots);
+        }
+        reject_traversal(path)?;
+
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.roots[0].path.join(path)
+        };
+
+        if let Ok(canonical) = candidate.canonicalize() {
+            return if self
+                .roots
+                .iter()
+                .any(|root| canonical.starts_with(&root.path))
+            {
+                Ok(canonical)
+            } else {
+                Err(CtxError::OutsideRoots(canonical))
+            };
+        }
+
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| CtxError::OutsideRoots(candidate.clone()))?;
+        let file_name = candidate
+            .file_name()
+            .ok_or_else(|| CtxError::OutsideRoots(candidate.clone()))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|err| CtxError::io(parent.to_path_buf(), err))?;
+        let resolved = canonical_parent.join(file_name);
+        if self
+            .roots
+            .iter()
+            .any(|root| resolved.starts_with(&root.path))
+        {
+            Ok(resolved)
+        } else {
+            Err(CtxError::OutsideRoots(resolved))
+        }
+    }
 }
 
 fn reject_traversal(path: &Path) -> Result<(), CtxError> {

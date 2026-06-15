@@ -30,6 +30,29 @@ impl FileReader for BTreeMap<String, String> {
     }
 }
 
+/// The 4-hex hashline snapshot tag for `content`. Surfaced by read views and the
+/// `edit` response so a model can author hashline patches and chain edits.
+pub fn snapshot_tag(content: &str) -> String {
+    text::content_hash(&text::normalize(content))
+}
+
+/// Render `content` as the hashline read view a model anchors edits on: a
+/// `[PATH#TAG]` header, then 1-based `N:LINE` rows. The trailing newline's empty
+/// segment is dropped so line numbers match the file's real lines.
+pub fn hashline_view(path: &str, content: &str) -> String {
+    let normalized = text::normalize(content);
+    let tag = text::content_hash(&normalized);
+    let mut lines: Vec<&str> = normalized.split('\n').collect();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    let mut out = format!("[{path}#{tag}]\n");
+    for (number, line) in lines.iter().enumerate() {
+        out.push_str(&format!("{}:{}\n", number + 1, line));
+    }
+    out
+}
+
 /// A change the caller must persist to realize a planned edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileChange {

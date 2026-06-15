@@ -609,6 +609,34 @@ impl CatalogProvider for FsCatalogProvider {
         fs::read(&allowed).map_err(|err| CtxError::io(allowed, err))
     }
 
+    fn write_text(&self, path: &Path, content: &str) -> Result<(), CtxError> {
+        let target = self.policy.resolve_for_write(path)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| CtxError::io(parent.to_path_buf(), err))?;
+        }
+        fs::write(&target, content).map_err(|err| CtxError::io(target.clone(), err))?;
+        FsCatalogProvider::invalidate(self);
+        Ok(())
+    }
+
+    fn delete_file(&self, path: &Path) -> Result<(), CtxError> {
+        let target = self.policy.resolve_allowed(path)?;
+        fs::remove_file(&target).map_err(|err| CtxError::io(target.clone(), err))?;
+        FsCatalogProvider::invalidate(self);
+        Ok(())
+    }
+
+    fn rename_file(&self, from: &Path, to: &Path) -> Result<(), CtxError> {
+        let source = self.policy.resolve_allowed(from)?;
+        let destination = self.policy.resolve_for_write(to)?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|err| CtxError::io(parent.to_path_buf(), err))?;
+        }
+        fs::rename(&source, &destination).map_err(|err| CtxError::io(destination.clone(), err))?;
+        FsCatalogProvider::invalidate(self);
+        Ok(())
+    }
+
     fn code_symbols_for_path(
         &self,
         path: &Path,

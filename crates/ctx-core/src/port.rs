@@ -45,6 +45,21 @@ pub trait CatalogProvider {
 
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CtxError>;
 
+    /// Write `content` to `path`, creating or overwriting it. Default: unsupported.
+    fn write_text(&self, _path: &Path, _content: &str) -> Result<(), CtxError> {
+        Err(CtxError::WritesUnsupported)
+    }
+
+    /// Delete the file at `path`. Default: unsupported.
+    fn delete_file(&self, _path: &Path) -> Result<(), CtxError> {
+        Err(CtxError::WritesUnsupported)
+    }
+
+    /// Move/rename `from` to `to`. Default: unsupported.
+    fn rename_file(&self, _from: &Path, _to: &Path) -> Result<(), CtxError> {
+        Err(CtxError::WritesUnsupported)
+    }
+
     fn code_symbols_for_path(
         &self,
         path: &Path,

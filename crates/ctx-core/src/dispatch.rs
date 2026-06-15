@@ -1,5 +1,6 @@
 //! Transport-neutral MCP tool dispatch for the context engine.
 
+use crate::edit::{self, EditRequest, FileChange};
 use crate::{
     CancelToken, CatalogProvider, CtxError, ReadFileRequest, RepoMapRequest, SearchMode,
     SearchRequest, SingletonWorkspaceResolver, WorkspaceResolver, build_context_cancellable,
@@ -8,7 +9,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Errors produced while decoding or dispatching a tool call.
 #[derive(Debug, thiserror::Error)]
@@ -21,12 +22,45 @@ pub enum DispatchError {
     Core(#[from] crate::CtxError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Edit(#[from] edit::EditError),
 }
 
 /// Return the MCP tool specifications supported by the engine.
 #[must_use]
 pub fn tool_specs() -> Value {
     let tools = vec![
+        json!({
+            "name": "edit",
+            "description": "Edit an existing file in one of four modes. For hashline, first call read_file with view=\"hashline\" to get the [PATH#TAG] header and line numbers.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "mode": { "type": "string", "enum": ["replace", "patch", "apply_patch", "hashline"], "description": "replace: fuzzy string replace (path+edits). patch: anchored diff hunks (path+entries). apply_patch: Codex '*** Begin Patch' envelope (patch). hashline: [PATH#TAG] line-anchored ops (patch)." },
+                    "path": { "type": "string", "description": "Target file for replace/patch modes." },
+                    "edits": { "type": "array", "description": "replace mode.", "items": { "type": "object", "required": ["old_text", "new_text"], "properties": { "old_text": {"type": "string"}, "new_text": {"type": "string"}, "all": {"type": "boolean"} } } },
+                    "entries": { "type": "array", "description": "patch mode: {op: update|create|delete, diff?, rename?}.", "items": { "type": "object" } },
+                    "patch": { "type": "string", "description": "Full patch text for apply_patch / hashline modes." }
+                }
+            }
+        }),
+        json!({
+            "name": "write",
+            "description": "Create or overwrite a file with exact content (within allowed roots).",
+            "inputSchema": { "type": "object", "required": ["path", "content"], "properties": { "workspace": workspace_schema(), "path": {"type": "string"}, "content": {"type": "string"} } }
+        }),
+        json!({
+            "name": "delete",
+            "description": "Delete a file (within allowed roots).",
+            "inputSchema": { "type": "object", "required": ["path"], "properties": { "workspace": workspace_schema(), "path": {"type": "string"} } }
+        }),
+        json!({
+            "name": "move",
+            "description": "Move or rename a file (within allowed roots).",
+            "inputSchema": { "type": "object", "required": ["from", "to"], "properties": { "workspace": workspace_schema(), "from": {"type": "string"}, "to": {"type": "string"} } }
+        }),
         json!({
             "name": "build_context",
             "description": "Build a deterministic query-focused context within a token budget.",
@@ -139,7 +173,8 @@ pub fn tool_specs() -> Value {
                     "path": { "type": "string" },
                     "start_line": { "type": "integer", "description": "1-based line to start from (alias: offset)." },
                     "end_line": { "type": "integer", "description": "1-based inclusive end line." },
-                    "limit": { "type": "integer", "description": "Max lines to return from start_line; overrides end_line." }
+                    "limit": { "type": "integer", "description": "Max lines to return from start_line; overrides end_line." },
+                    "view": { "type": "string", "enum": ["raw", "hashline"], "description": "hashline: return the whole file as a [PATH#TAG] header + 1-based N:LINE rows, for authoring hashline edits." }
                 }
             }
         }),
@@ -317,9 +352,75 @@ where
         "read_file" => {
             cancel.check_cancelled()?;
             let args: ReadFileArgs = serde_json::from_value(arguments)?;
-            let response = read_file(provider, &args.into_request())?;
+            let hashline = args.view.as_deref() == Some("hashline");
+            let mut request = args.into_request();
+            if hashline {
+                // Whole-file view: line numbers are absolute and the tag covers
+                // the entire file the model anchors hashline edits against.
+                request.start_line = None;
+                request.end_line = None;
+                request.limit = None;
+            }
+            let response = read_file(provider, &request)?;
             cancel.check_cancelled()?;
+            if hashline {
+                let view = edit::hashline_view(&response.display_path, &response.content);
+                return Ok(json!({
+                    "content": [{ "type": "text", "text": view }],
+                    "structuredContent": {
+                        "path": response.display_path,
+                        "hashline_tag": edit::snapshot_tag(&response.content),
+                        "total_lines": response.total_lines,
+                    },
+                }));
+            }
             return tool_response_text(&response);
+        }
+        "edit" => {
+            cancel.check_cancelled()?;
+            let args: EditArgs = serde_json::from_value(arguments)?;
+            let request = args.into_request()?;
+            let changes = edit::apply(&request, &ProviderReader { provider })?;
+            cancel.check_cancelled()?;
+            return tool_response_text(&apply_changes(provider, changes)?);
+        }
+        "write" => {
+            let args: WriteArgs = serde_json::from_value(arguments)?;
+            provider.write_text(Path::new(&args.path), &args.content)?;
+            return tool_response_text(&EditResult {
+                files: vec![EditedFile::with_content(
+                    "write",
+                    args.path,
+                    None,
+                    &args.content,
+                )],
+            });
+        }
+        "delete" => {
+            let args: DeleteArgs = serde_json::from_value(arguments)?;
+            provider.delete_file(Path::new(&args.path))?;
+            return tool_response_text(&EditResult {
+                files: vec![EditedFile {
+                    action: "delete",
+                    path: args.path,
+                    moved_to: None,
+                    tag: None,
+                    view: None,
+                }],
+            });
+        }
+        "move" => {
+            let args: MoveArgs = serde_json::from_value(arguments)?;
+            provider.rename_file(Path::new(&args.from), Path::new(&args.to))?;
+            return tool_response_text(&EditResult {
+                files: vec![EditedFile {
+                    action: "move",
+                    path: args.from,
+                    moved_to: Some(args.to),
+                    tag: None,
+                    view: None,
+                }],
+            });
         }
         "get_file_tree" => {
             let args: FileTreeArgs = serde_json::from_value(arguments)?;
@@ -599,6 +700,7 @@ pub fn dispatch_error_kind(err: &DispatchError) -> &'static str {
         ) => "workspace",
         DispatchError::Core(_) => "core",
         DispatchError::Json(_) => "json",
+        DispatchError::Edit(_) => "edit",
     }
 }
 
@@ -683,6 +785,8 @@ struct ReadFileArgs {
     end_line: Option<usize>,
     #[serde(default, deserialize_with = "lenient_opt_usize")]
     limit: Option<usize>,
+    #[serde(default)]
+    view: Option<String>,
 }
 
 impl ReadFileArgs {
@@ -694,6 +798,177 @@ impl ReadFileArgs {
             limit: self.limit,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct EditArgs {
+    mode: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    edits: Vec<edit::ReplaceEdit>,
+    #[serde(default)]
+    entries: Vec<edit::PatchEntry>,
+    #[serde(default)]
+    patch: Option<String>,
+}
+
+impl EditArgs {
+    fn into_request(self) -> Result<EditRequest, DispatchError> {
+        let EditArgs {
+            mode,
+            path,
+            edits,
+            entries,
+            patch,
+        } = self;
+        let err = |detail: String| {
+            DispatchError::Edit(edit::EditError::Parse {
+                mode: "edit",
+                detail,
+            })
+        };
+        match mode.as_str() {
+            "replace" => Ok(EditRequest::Replace {
+                path: path.ok_or_else(|| err("mode `replace` requires `path`".to_string()))?,
+                edits,
+            }),
+            "patch" => Ok(EditRequest::Patch {
+                path: path.ok_or_else(|| err("mode `patch` requires `path`".to_string()))?,
+                entries,
+            }),
+            "apply_patch" | "apply-patch" => Ok(EditRequest::ApplyPatch {
+                patch: patch
+                    .ok_or_else(|| err("mode `apply_patch` requires `patch`".to_string()))?,
+            }),
+            "hashline" => Ok(EditRequest::Hashline {
+                patch: patch.ok_or_else(|| err("mode `hashline` requires `patch`".to_string()))?,
+            }),
+            other => Err(err(format!("unknown edit mode: {other}"))),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteArgs {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MoveArgs {
+    from: String,
+    to: String,
+}
+
+/// Adapts a [`CatalogProvider`] into an [`edit::FileReader`]; reads are
+/// containment-checked by the provider's root policy.
+struct ProviderReader<'a, P: CatalogProvider + ?Sized> {
+    provider: &'a P,
+}
+
+impl<P: CatalogProvider + ?Sized> edit::FileReader for ProviderReader<'_, P> {
+    fn read_text(&self, path: &str) -> Option<String> {
+        self.provider
+            .read_bytes(Path::new(path))
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct EditedFile {
+    action: &'static str,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<String>,
+}
+
+impl EditedFile {
+    fn with_content(
+        action: &'static str,
+        path: String,
+        moved_to: Option<String>,
+        content: &str,
+    ) -> Self {
+        let display = moved_to.clone().unwrap_or_else(|| path.clone());
+        Self {
+            action,
+            tag: Some(edit::snapshot_tag(content)),
+            view: Some(edit::hashline_view(&display, content)),
+            path,
+            moved_to,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct EditResult {
+    files: Vec<EditedFile>,
+}
+
+impl ToolText for EditResult {
+    fn tool_text(&self) -> String {
+        let mut out = String::new();
+        for file in &self.files {
+            match &file.moved_to {
+                Some(to) => out.push_str(&format!("{} {} -> {}\n", file.action, file.path, to)),
+                None => out.push_str(&format!("{} {}\n", file.action, file.path)),
+            }
+        }
+        for file in &self.files {
+            if let Some(view) = &file.view {
+                out.push('\n');
+                out.push_str(view);
+            }
+        }
+        out
+    }
+}
+
+fn apply_changes<P: CatalogProvider + ?Sized>(
+    provider: &P,
+    changes: Vec<FileChange>,
+) -> Result<EditResult, DispatchError> {
+    let mut files = Vec::with_capacity(changes.len());
+    for change in changes {
+        let edited = match change {
+            FileChange::Create { path, content } => {
+                provider.write_text(Path::new(&path), &content)?;
+                EditedFile::with_content("create", path, None, &content)
+            }
+            FileChange::Update { path, content } => {
+                provider.write_text(Path::new(&path), &content)?;
+                EditedFile::with_content("update", path, None, &content)
+            }
+            FileChange::Delete { path } => {
+                provider.delete_file(Path::new(&path))?;
+                EditedFile {
+                    action: "delete",
+                    path,
+                    moved_to: None,
+                    tag: None,
+                    view: None,
+                }
+            }
+            FileChange::Rename { from, to, content } => {
+                provider.rename_file(Path::new(&from), Path::new(&to))?;
+                provider.write_text(Path::new(&to), &content)?;
+                EditedFile::with_content("rename", from, Some(to), &content)
+            }
+        };
+        files.push(edited);
+    }
+    Ok(EditResult { files })
 }
 
 #[derive(Debug, Deserialize)]
@@ -951,6 +1226,83 @@ mod tests {
             RootPolicy::new(vec![path.to_path_buf()]).expect("policy"),
             ScanOptions::default(),
         )
+    }
+
+    #[test]
+    fn edit_tools_modify_filesystem_within_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), "alpha\nbeta\n").expect("seed");
+        let provider = provider_for(dir.path());
+
+        handle_tool_call(
+            &provider,
+            &json!({ "name": "write", "arguments": { "path": "b.txt", "content": "hello\n" } }),
+        )
+        .expect("write");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("b.txt")).expect("b.txt"),
+            "hello\n"
+        );
+
+        handle_tool_call(
+            &provider,
+            &json!({ "name": "edit", "arguments": { "mode": "replace", "path": "a.txt",
+                "edits": [{ "old_text": "alpha", "new_text": "ALPHA" }] } }),
+        )
+        .expect("edit replace");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).expect("a.txt"),
+            "ALPHA\nbeta\n"
+        );
+
+        let view = handle_tool_call(
+            &provider,
+            &json!({ "name": "read_file", "arguments": { "path": "a.txt", "view": "hashline" } }),
+        )
+        .expect("read hashline");
+        let tag = view["structuredContent"]["hashline_tag"]
+            .as_str()
+            .expect("hashline_tag")
+            .to_string();
+        let patch = format!("*** Begin Patch\n[a.txt#{tag}]\nSWAP 2.=2:\n+BETA\n*** End Patch\n");
+        handle_tool_call(
+            &provider,
+            &json!({ "name": "edit", "arguments": { "mode": "hashline", "patch": patch } }),
+        )
+        .expect("edit hashline");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).expect("a.txt"),
+            "ALPHA\nBETA\n"
+        );
+
+        handle_tool_call(
+            &provider,
+            &json!({ "name": "move", "arguments": { "from": "b.txt", "to": "c.txt" } }),
+        )
+        .expect("move");
+        assert!(!dir.path().join("b.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("c.txt")).expect("c.txt"),
+            "hello\n"
+        );
+
+        handle_tool_call(
+            &provider,
+            &json!({ "name": "delete", "arguments": { "path": "c.txt" } }),
+        )
+        .expect("delete");
+        assert!(!dir.path().join("c.txt").exists());
+    }
+
+    #[test]
+    fn write_outside_roots_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = provider_for(dir.path());
+        let result = handle_tool_call(
+            &provider,
+            &json!({ "name": "write", "arguments": { "path": "../escape.txt", "content": "x" } }),
+        );
+        assert!(result.is_err(), "writes outside roots must be rejected");
     }
 
     #[test]

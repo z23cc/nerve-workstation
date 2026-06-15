@@ -55,6 +55,8 @@ pub enum CtxError {
         #[source]
         source: std::io::Error,
     },
+    #[error("filesystem writes are not supported by this provider")]
+    WritesUnsupported,
 }
 
 impl CtxError {
