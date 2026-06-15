@@ -26,6 +26,7 @@ oxc_allocator.workspace = true
 ruff_python_parser.workspace = true
 ruff_python_ast.workspace = true
 ruff_text_size.workspace = true
+tiktoken-rs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

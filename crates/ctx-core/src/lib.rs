@@ -3,6 +3,7 @@
 //! The core is intentionally host-agnostic: callers provide catalog data through
 //! a port trait, then search/read/tree operations run against immutable snapshots.
 
+pub mod build_context;
 pub mod cancel;
 pub mod catalog;
 pub mod codemap;
@@ -13,9 +14,15 @@ pub mod read;
 pub mod repomap;
 pub mod search;
 pub mod security;
+pub mod selection;
 pub mod snapshot;
+pub mod token;
 pub mod tree;
+pub mod workspace_context;
 
+pub use build_context::{
+    BuildContextRequest, BuildContextResponse, build_context, build_context_cancellable,
+};
 pub use cancel::CancelToken;
 pub use catalog::{FsCatalogProvider, ScanOptions};
 pub use codemap::get_code_structure;
@@ -30,8 +37,17 @@ pub use read::read_file;
 pub use repomap::{RepoMapRequest, get_repo_map, get_repo_map_cancellable};
 pub use search::{search_snapshot, search_snapshot_cancellable};
 pub use security::RootPolicy;
+pub use selection::{
+    LineRange, ManageSelectionMode, ManageSelectionOp, ManageSelectionRequest,
+    ManageSelectionResponse, Selection, SelectionMode, SelectionSliceArg, manage_selection,
+};
 pub use snapshot::CatalogSnapshot;
+pub use token::count_tokens;
 pub use tree::get_file_tree;
+pub use workspace_context::{
+    WorkspaceContextInclude, WorkspaceContextRequest, WorkspaceContextResponse, workspace_context,
+    workspace_context_for_selection,
+};
 
 #[cfg(fuzzing)]
 #[doc(hidden)]

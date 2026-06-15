@@ -1,0 +1,29 @@
+---
+source: crates/ctx-core/tests/golden.rs
+expression: response
+---
+{
+  "context": "<file_map>\n- fixtures/alpha.rs [codemap_only]\n</file_map>\n\n<file path=\"fixtures/alpha.rs\" mode=\"codemap_only\">\n```text\nlanguage: rust\n- struct Alpha @ line 1\n- enum Mode @ line 5\n- trait Runnable @ line 10\n- impl Alpha @ line 14\n- impl Runnable for Alpha @ line 20\n- function alpha_needle @ line 24\n```\n</file>",
+  "manifest": {
+    "query": "Alpha",
+    "token_budget": 120,
+    "token_used": 97,
+    "included": [
+      {
+        "path": "alpha.rs",
+        "display_path": "fixtures/alpha.rs",
+        "mode": "codemap_only",
+        "tokens": 79,
+        "score": "1.000000"
+      }
+    ],
+    "excluded": [
+      {
+        "path": "gamma.py",
+        "display_path": "fixtures/gamma.py",
+        "score": "0.583387",
+        "reason": "over_budget"
+      }
+    ]
+  }
+}

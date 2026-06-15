@@ -6,6 +6,7 @@ use crate::{
     models::*,
     port::{CatalogProvider, CodeSymbolsResult},
     security::RootPolicy,
+    selection::Selection,
     snapshot::CatalogSnapshot,
 };
 use ignore::WalkBuilder;
@@ -57,6 +58,7 @@ impl fmt::Debug for FsCatalogProvider {
 struct ProviderCache {
     snapshot: RwLock<Option<CachedSnapshot>>,
     codemap: RwLock<HashMap<PathBuf, CachedCodeSymbols>>,
+    selection: RwLock<Selection>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +300,14 @@ impl CatalogProvider for FsCatalogProvider {
 
     fn invalidate(&self) {
         FsCatalogProvider::invalidate(self);
+    }
+
+    fn selection(&self) -> Selection {
+        self.cache.selection.read().expect("selection lock").clone()
+    }
+
+    fn set_selection(&self, selection: Selection) {
+        *self.cache.selection.write().expect("selection lock") = selection;
     }
 
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CtxError> {

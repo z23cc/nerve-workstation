@@ -1,7 +1,9 @@
 use ctx_core::{
-    CatalogProvider, FsCatalogProvider, ReadFileRequest, RepoMapRequest, RootPolicy, ScanOptions,
-    SearchMode, SearchRequest, get_code_structure, get_file_tree, get_repo_map, handle_tool_call,
-    read_file, search_snapshot, tool_specs,
+    BuildContextRequest, CatalogProvider, FsCatalogProvider, LineRange, ManageSelectionMode,
+    ManageSelectionOp, ManageSelectionRequest, ReadFileRequest, RepoMapRequest, RootPolicy,
+    ScanOptions, SearchMode, SearchRequest, SelectionSliceArg, WorkspaceContextInclude,
+    WorkspaceContextRequest, build_context, get_code_structure, get_file_tree, get_repo_map,
+    handle_tool_call, manage_selection, read_file, search_snapshot, tool_specs, workspace_context,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -201,6 +203,80 @@ fn golden_get_repo_map() {
         },
     )
     .expect("repo map");
+    insta::assert_json_snapshot!(response);
+}
+
+#[test]
+fn golden_workspace_context() {
+    let (provider, snapshot) = snapshot();
+    manage_selection(
+        &provider,
+        &snapshot,
+        &ManageSelectionRequest {
+            op: ManageSelectionOp::Set,
+            paths: vec![PathBuf::from("notes.txt")],
+            mode: Some(ManageSelectionMode::Full),
+            slices: Vec::new(),
+        },
+    )
+    .expect("select full");
+    manage_selection(
+        &provider,
+        &snapshot,
+        &ManageSelectionRequest {
+            op: ManageSelectionOp::Add,
+            paths: Vec::new(),
+            mode: Some(ManageSelectionMode::Slices),
+            slices: vec![SelectionSliceArg {
+                path: PathBuf::from("nested/beta.rs"),
+                ranges: vec![LineRange {
+                    start_line: 1,
+                    end_line: 2,
+                }],
+            }],
+        },
+    )
+    .expect("select slices");
+    manage_selection(
+        &provider,
+        &snapshot,
+        &ManageSelectionRequest {
+            op: ManageSelectionOp::Add,
+            paths: vec![PathBuf::from("alpha.rs")],
+            mode: Some(ManageSelectionMode::CodemapOnly),
+            slices: Vec::new(),
+        },
+    )
+    .expect("select codemap");
+
+    let response = workspace_context(
+        &provider,
+        &snapshot,
+        &WorkspaceContextRequest {
+            include: vec![
+                WorkspaceContextInclude::FileMap,
+                WorkspaceContextInclude::Contents,
+            ],
+            instructions: Some("Answer from selected files only.".to_string()),
+        },
+    )
+    .expect("workspace context");
+    insta::assert_json_snapshot!(response);
+}
+
+#[test]
+fn golden_build_context() {
+    let (provider, snapshot) = snapshot();
+    let response = build_context(
+        &provider,
+        &snapshot,
+        &BuildContextRequest {
+            query: "Alpha".to_string(),
+            token_budget: 120,
+            max_files: Some(4),
+        },
+    )
+    .expect("build context");
     insta::assert_json_snapshot!(response);
 }
 

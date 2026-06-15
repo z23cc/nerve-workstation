@@ -4,6 +4,7 @@ use crate::{
     cancel::CancelToken,
     codemap::{CodeSymbol, symbols_for_path},
     models::CtxError,
+    selection::Selection,
     snapshot::CatalogSnapshot,
 };
 use std::{path::Path, sync::Arc};
@@ -33,6 +34,14 @@ pub trait CatalogProvider {
     }
 
     fn invalidate(&self) {}
+
+    fn selection(&self) -> Selection {
+        Selection::default()
+    }
+
+    fn set_selection(&self, selection: Selection) {
+        let _ = selection;
+    }
 
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CtxError>;
 

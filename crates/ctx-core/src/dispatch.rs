@@ -2,8 +2,9 @@
 
 use crate::{
     CancelToken, CatalogProvider, CtxError, ReadFileRequest, RepoMapRequest, SearchMode,
-    SearchRequest, get_code_structure, get_file_tree, get_repo_map_cancellable, read_file,
-    search_snapshot_cancellable,
+    SearchRequest, build_context_cancellable, get_code_structure, get_file_tree,
+    get_repo_map_cancellable, manage_selection, read_file, search_snapshot_cancellable,
+    workspace_context,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -26,6 +27,85 @@ pub enum DispatchError {
 #[must_use]
 pub fn tool_specs() -> Value {
     Value::Array(vec![
+        json!({
+            "name": "build_context",
+            "description": "Build a deterministic query-focused context within a token budget.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query", "token_budget"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query used for file ranking and repo-map personalization."
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Maximum assembled context tokens."
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Maximum number of files to include."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "workspace_context",
+            "description": "Assemble the current persistent selection into context text with token breakdowns.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["file-map", "contents", "tokens"] },
+                        "description": "Optional text sections to include. Empty means file-map and contents."
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Optional notes/instructions to include in the context snapshot."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "manage_selection",
+            "description": "Persist and summarize the selected file set with token estimates.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["op"],
+                "properties": {
+                    "op": { "type": "string", "enum": ["get", "add", "remove", "set", "clear"] },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File or directory paths relative to an allowed root, or in-root absolute paths."
+                    },
+                    "mode": { "type": "string", "enum": ["full", "slices", "codemap_only"], "default": "full" },
+                    "slices": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["path"],
+                            "properties": {
+                                "path": { "type": "string" },
+                                "ranges": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["start_line", "end_line"],
+                                        "properties": {
+                                            "start_line": { "type": "integer" },
+                                            "end_line": { "type": "integer" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }),
         json!({
             "name": "file_search",
             "description": "Search allowed roots by path and/or file content.",
@@ -128,6 +208,30 @@ where
         .cloned()
         .unwrap_or_else(|| json!({}));
     let structured = match name {
+        "manage_selection" => {
+            let args: crate::ManageSelectionRequest = serde_json::from_value(arguments)?;
+            let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+            cancel.check_cancelled()?;
+            let response = manage_selection(provider, &snapshot, &args)?;
+            cancel.check_cancelled()?;
+            serde_json::to_value(response)?
+        }
+        "workspace_context" => {
+            let args: crate::WorkspaceContextRequest = serde_json::from_value(arguments)?;
+            let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+            cancel.check_cancelled()?;
+            let response = workspace_context(provider, &snapshot, &args)?;
+            cancel.check_cancelled()?;
+            serde_json::to_value(response)?
+        }
+        "build_context" => {
+            let args: crate::BuildContextRequest = serde_json::from_value(arguments)?;
+            let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+            cancel.check_cancelled()?;
+            let response = build_context_cancellable(provider, &snapshot, &args, cancel)?;
+            cancel.check_cancelled()?;
+            serde_json::to_value(response)?
+        }
         "file_search" => {
             let args: FileSearchArgs = serde_json::from_value(arguments)?;
             let snapshot = provider.snapshot_arc_cancellable(cancel)?;
@@ -352,5 +456,160 @@ mod tests {
         .expect("cancelled dispatch is encoded as JSON");
         let value: Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["error"]["kind"], "cancelled");
+    }
+
+    #[test]
+    fn manage_selection_is_listed_dispatches_and_persists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("text.txt"), "one\ntwo\n").expect("write");
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+            ScanOptions::default(),
+        );
+
+        let specs = tool_specs();
+        let tool_names: Vec<_> = specs
+            .as_array()
+            .expect("tool specs array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(tool_names.contains(&"manage_selection"));
+
+        let set_response = handle_tool_call(
+            &provider,
+            &json!({
+                "name": "manage_selection",
+                "arguments": {
+                    "op": "set",
+                    "paths": ["text.txt"],
+                    "mode": "full"
+                }
+            }),
+        )
+        .expect("selection dispatch");
+        assert_eq!(
+            set_response["structuredContent"]["files"][0]["path"],
+            Value::String("text.txt".to_string())
+        );
+        assert!(
+            set_response["structuredContent"]["files"][0]["token_estimate"]
+                .as_u64()
+                .expect("token count")
+                > 0
+        );
+
+        let get_response = handle_tool_call(
+            &provider,
+            &json!({
+                "name": "manage_selection",
+                "arguments": { "op": "get" }
+            }),
+        )
+        .expect("selection get");
+        assert_eq!(
+            get_response["structuredContent"]["files"][0]["path"],
+            Value::String("text.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn workspace_context_is_listed_and_dispatches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("text.txt"), "one\ntwo\n").expect("write");
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+            ScanOptions::default(),
+        );
+
+        let specs = tool_specs();
+        let tool_names: Vec<_> = specs
+            .as_array()
+            .expect("tool specs array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(tool_names.contains(&"workspace_context"));
+
+        handle_tool_call(
+            &provider,
+            &json!({
+                "name": "manage_selection",
+                "arguments": {
+                    "op": "set",
+                    "paths": ["text.txt"],
+                    "mode": "full"
+                }
+            }),
+        )
+        .expect("selection dispatch");
+
+        let response = handle_tool_call(
+            &provider,
+            &json!({
+                "name": "workspace_context",
+                "arguments": {
+                    "include": ["file-map", "contents", "tokens"],
+                    "instructions": "Use this context."
+                }
+            }),
+        )
+        .expect("workspace context dispatch");
+        let structured = &response["structuredContent"];
+        assert!(
+            structured["context"]
+                .as_str()
+                .expect("context")
+                .contains("<file_map>")
+        );
+        assert!(
+            structured["context"]
+                .as_str()
+                .expect("context")
+                .contains("<tokens>")
+        );
+        assert_eq!(
+            structured["tokens"]["files"][0]["path"],
+            Value::String("text.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn build_context_is_listed_dispatches_and_preserves_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("text.txt"), "needle\n").expect("write");
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+            ScanOptions::default(),
+        );
+        let before = provider.selection();
+
+        let specs = tool_specs();
+        let tool_names: Vec<_> = specs
+            .as_array()
+            .expect("tool specs array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(tool_names.contains(&"build_context"));
+
+        let response = handle_tool_call(
+            &provider,
+            &json!({
+                "name": "build_context",
+                "arguments": {
+                    "query": "needle",
+                    "token_budget": 100,
+                    "max_files": 1
+                }
+            }),
+        )
+        .expect("build context dispatch");
+        let structured = &response["structuredContent"];
+        assert_eq!(
+            structured["manifest"]["included"][0]["path"],
+            Value::String("text.txt".to_string())
+        );
+        assert_eq!(provider.selection(), before);
     }
 }

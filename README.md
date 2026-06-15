@@ -54,6 +54,13 @@ that need mid-request interruption should use the C ABI cancellation surface.
 - `get_repo_map` — pure-Rust deterministic PageRank repo-map that ranks files
   by cross-file symbol-reference relevance, with optional `query` and
   `seed_paths` personalization and a `max_files` file budget.
+- `manage_selection` — persistent engine-owned selection state with
+  `full` / `slices` / `codemap_only` modes and per-file token estimates.
+- `workspace_context` — assemble the current selection plus optional
+  instructions into file-map/content text with structured token breakdowns.
+- `build_context` — deterministic query-focused context builder that combines
+  search, personalized repo-map ranking, greedy token-budget mode selection, and
+  `workspace_context` assembly without mutating the persistent selection.
 
 No roots means fail-closed: catalog/read/search operations are refused.
 
@@ -148,10 +155,11 @@ behavior without adding tree-sitter, native `*-sys`, or C/C++ build dependencies
 ## Golden snapshots and parity ledger
 
 The fixed fixture corpus lives under `crates/ctx-core/tests/fixtures`. Golden
-snapshot tests cover `file_search`, `read_file`, `get_file_tree`, and
-`get_code_structure` using `insta`. The tests normalize volatile presentation
-fields such as the fixture root label before snapshotting; elapsed timing and
-absolute paths are not part of hard goldens.
+snapshot tests cover `file_search`, `read_file`, `get_file_tree`,
+`get_code_structure`, `get_repo_map`, `workspace_context`, and `build_context`
+using `insta`. The tests normalize volatile presentation fields such as the
+fixture root label before snapshotting; elapsed timing and absolute paths are
+not part of hard goldens.
 
 Update snapshots intentionally with:
 

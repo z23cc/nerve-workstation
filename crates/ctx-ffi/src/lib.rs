@@ -252,3 +252,45 @@ fn string_to_c(value: String) -> *mut c_char {
         Err(_) => ptr::null_mut(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::fs;
+
+    fn call(engine: *mut CtxEngine, request: &str) -> Value {
+        let request = CString::new(request).expect("request c string");
+        let response = unsafe { ctx_engine_handle_request(engine, request.as_ptr()) };
+        assert!(!response.is_null());
+        let text = unsafe { CStr::from_ptr(response) }
+            .to_str()
+            .expect("utf8 response")
+            .to_string();
+        unsafe { ctx_engine_free_string(response) };
+        serde_json::from_str(&text).expect("json response")
+    }
+
+    #[test]
+    fn handle_request_persists_selection_between_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("notes.txt"), "one\ntwo\n").expect("write");
+        let root = CString::new(dir.path().to_string_lossy().as_bytes()).expect("root");
+        let engine = unsafe { ctx_engine_new(root.as_ptr()) };
+        assert!(!engine.is_null());
+
+        let set = call(
+            engine,
+            r#"{"name":"manage_selection","arguments":{"op":"set","paths":["notes.txt"],"mode":"full"}}"#,
+        );
+        assert_eq!(set["structuredContent"]["files"][0]["path"], "notes.txt");
+
+        let get = call(
+            engine,
+            r#"{"name":"manage_selection","arguments":{"op":"get"}}"#,
+        );
+        assert_eq!(get["structuredContent"]["files"][0]["path"], "notes.txt");
+
+        unsafe { ctx_engine_free(engine) };
+    }
+}
