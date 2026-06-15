@@ -1,0 +1,53 @@
+name: windows
+
+# Builds and tests ctx-mcp on Windows and attaches ctx-mcp.exe to the release.
+# Fires when a release is published (e.g. by Scripts/release.sh) and can also be
+# dispatched manually against an existing tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach ctx-mcp.exe to (e.g. v0.0.9)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+
+      - name: Test
+        shell: bash
+        run: cargo test -p ctx-core -p ctx-mcp
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          cargo build --release -p ctx-mcp
+          ./target/release/ctx-mcp.exe --version
+
+      - name: Upload ctx-mcp.exe + sha256 to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          sha="$(sha256sum target/release/ctx-mcp.exe | cut -d' ' -f1)"
+          echo "$sha  ctx-mcp.exe" > ctx-mcp.exe.sha256
+          echo ">> ctx-mcp.exe sha256: $sha"
+          gh release upload "$tag" target/release/ctx-mcp.exe ctx-mcp.exe.sha256 \
+            -R z23cc/context-engine-rs --clobber
