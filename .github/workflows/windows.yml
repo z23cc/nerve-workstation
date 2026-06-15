@@ -55,3 +55,43 @@ jobs:
           else
             echo "no release for '$tag' — build/test verification only, skipping upload"
           fi
+
+      - name: Update scoop bucket
+        if: ${{ startsWith(github.event.release.tag_name || inputs.tag, 'v') }}
+        shell: bash
+        env:
+          SCOOP_DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          gh release view "$tag" -R z23cc/context-engine-rs >/dev/null 2>&1 || { echo "no release $tag; skipping scoop"; exit 0; }
+          ver="${tag#v}"
+          sha="$(sha256sum target/release/ctx-mcp.exe | cut -d' ' -f1)"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SCOOP_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git clone git@github.com:z23cc/scoop-bucket.git bucket-repo
+          mkdir -p bucket-repo/bucket
+          python - "$ver" "$tag" "$sha" >bucket-repo/bucket/ctx-mcp.json <<'PY'
+          import json, sys
+          ver, tag, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+          base = "https://github.com/z23cc/context-engine-rs/releases/download"
+          manifest = {
+              "version": ver,
+              "description": "Minimal snapshot-centered context engine (MCP server over stdio)",
+              "homepage": "https://github.com/z23cc/context-engine-rs",
+              "license": "MIT OR Apache-2.0",
+              "architecture": {"64bit": {"url": f"{base}/{tag}/ctx-mcp.exe", "hash": sha}},
+              "bin": "ctx-mcp.exe",
+              "checkver": "github",
+              "autoupdate": {"architecture": {"64bit": {"url": base + "/v$version/ctx-mcp.exe"}}},
+          }
+          print(json.dumps(manifest, indent=2))
+          PY
+          cd bucket-repo
+          git add bucket/ctx-mcp.json
+          git commit -m "ctx-mcp $ver" || { echo "no change"; exit 0; }
+          git branch -M main
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" git push -u origin main
