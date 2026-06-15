@@ -32,6 +32,19 @@ platforms build from source via a temporary Rust toolchain. Either way `ctx-mcp`
 lands on your `PATH`. See [`packaging/homebrew`](packaging/homebrew/README.md) for
 how bottles, releases, and versioning work.
 
+### Windows (Scoop)
+
+```powershell
+scoop bucket add z23cc https://github.com/z23cc/scoop-bucket
+scoop install ctx-mcp
+ctx-mcp --version
+```
+
+Or download `ctx-mcp.exe` straight from the
+[latest release](https://github.com/z23cc/context-engine-rs/releases/latest).
+Each release's Windows binary is built and tested on `windows-latest` by CI.
+(winget is not published yet — it needs a `microsoft/winget-pkgs` PR.)
+
 ### From source
 
 ```bash
