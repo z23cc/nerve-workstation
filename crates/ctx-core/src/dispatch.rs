@@ -505,6 +505,12 @@ impl ToolText for crate::codemap::CodeStructureResponse {
                         symbol.kind, symbol.name, symbol.line
                     )),
                 }
+                for member in &symbol.members {
+                    match &member.signature {
+                        Some(signature) => out.push_str(&format!("    - {signature}\n")),
+                        None => out.push_str(&format!("    - {}\n", member.name)),
+                    }
+                }
             }
         }
         if self.files.is_empty() {
@@ -893,6 +899,7 @@ mod tests {
                     name: "needle".to_string(),
                     line: 12,
                     signature: None,
+                    members: vec![],
                 }],
             }],
             diagnostics: vec![],

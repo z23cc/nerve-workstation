@@ -12,13 +12,29 @@ expression: response
           "kind": "class",
           "name": "Alpha",
           "line": 1,
-          "signature": "pub struct Alpha"
+          "signature": "pub struct Alpha",
+          "members": [
+            {
+              "name": "value",
+              "signature": "pub value: i32"
+            }
+          ]
         },
         {
           "kind": "class",
           "name": "Mode",
           "line": 5,
-          "signature": "pub enum Mode"
+          "signature": "pub enum Mode",
+          "members": [
+            {
+              "name": "Fast",
+              "signature": "Fast"
+            },
+            {
+              "name": "Slow",
+              "signature": "Slow"
+            }
+          ]
         },
         {
           "kind": "interface",

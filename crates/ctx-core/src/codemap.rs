@@ -20,6 +20,20 @@ pub struct CodeSymbol {
     /// `None` when extraction yields nothing useful.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Fields / properties / enum variants declared directly inside a type
+    /// (struct, class, interface, enum). Empty for non-container symbols.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<CodeMember>,
+}
+
+/// A field, property, or enum variant declared inside a container symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeMember {
+    pub name: String,
+    /// One-line declaration (e.g. `pub x: i32`), without any body. `None` when
+    /// nothing useful could be extracted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// An AST-derived reference occurrence used internally by repo-map.
@@ -160,6 +174,76 @@ impl Language {
         }
     }
 
+    /// Raw grammar handle for a second parse used by member extraction (the
+    /// tags API does not expose its tree).
+    fn ts_language(self) -> tree_sitter::Language {
+        match self {
+            Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Python => tree_sitter_python::LANGUAGE.into(),
+            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
+            Self::C => tree_sitter_c::LANGUAGE.into(),
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Self::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Self::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+        }
+    }
+
+    /// Node kinds that define a type whose members we expand. Empty disables
+    /// member extraction for the language.
+    fn member_containers(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["struct_item", "enum_item"],
+            Self::Python => &["class_definition"],
+            Self::JavaScript => &["class_declaration"],
+            Self::TypeScript | Self::Tsx => &["class_declaration", "interface_declaration"],
+            Self::Go => &["type_spec"],
+            Self::Java => &["class_declaration"],
+            Self::C => &["struct_specifier"],
+            Self::Cpp => &["class_specifier", "struct_specifier"],
+            Self::CSharp => &["class_declaration"],
+            Self::Php => &["class_declaration"],
+            Self::Ruby => &[],
+        }
+    }
+
+    /// Node kinds of member declarations inside a container's body list.
+    fn member_field_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["field_declaration", "enum_variant"],
+            Self::Python => &["expression_statement"],
+            Self::JavaScript => &["field_definition"],
+            Self::TypeScript | Self::Tsx => &["property_signature", "public_field_definition"],
+            Self::Go => &["field_declaration"],
+            Self::Java => &["field_declaration"],
+            Self::C => &["field_declaration"],
+            Self::Cpp => &["field_declaration"],
+            Self::CSharp => &["field_declaration", "property_declaration"],
+            Self::Php => &["property_declaration"],
+            Self::Ruby => &[],
+        }
+    }
+
+    /// Node kinds carrying a member's name; the first match in document order
+    /// wins. Python resolves its name separately (assignment target).
+    fn member_name_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["field_identifier", "identifier"],
+            Self::JavaScript => &["property_identifier", "private_property_identifier"],
+            Self::TypeScript | Self::Tsx => &["property_identifier"],
+            Self::Go => &["field_identifier"],
+            Self::Java => &["identifier"],
+            Self::C | Self::Cpp => &["field_identifier"],
+            Self::CSharp => &["identifier"],
+            Self::Php => &["variable_name"],
+            Self::Python | Self::Ruby => &[],
+        }
+    }
+
     /// Cached tags configuration (compiling a query is expensive).
     fn config(self) -> Option<&'static TagsConfiguration> {
         fn build(language: tree_sitter::Language, query: &str) -> Option<TagsConfiguration> {
@@ -249,6 +333,7 @@ fn code_facts_for_language(
         .generate_tags(config, bytes, None)
         .map_err(|err| format!("tags error: {err:?}"))?;
 
+    let members_by_def = members_by_definition(language, bytes);
     let mut symbols = Vec::new();
     let mut references = Vec::new();
     for tag in tags {
@@ -261,11 +346,16 @@ fn code_facts_for_language(
         let kind = config.syntax_type_name(tag.syntax_type_id).to_string();
         if tag.is_definition {
             let signature = signature_for(language, bytes, &tag);
+            let members = members_by_def
+                .get(&(name.clone(), line))
+                .cloned()
+                .unwrap_or_default();
             symbols.push(CodeSymbol {
                 kind,
                 name,
                 line,
                 signature,
+                members,
             });
         } else {
             references.push(CodeReference {
@@ -313,11 +403,16 @@ fn signature_for(language: Language, source: &[u8], tag: &tree_sitter_tags::Tag)
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.chars().count() > MAX_CHARS {
-        let capped: String = trimmed.chars().take(MAX_CHARS - 1).collect();
-        Some(format!("{capped}\u{2026}"))
+    Some(truncate_chars(trimmed, MAX_CHARS))
+}
+
+/// Cap a string at `max` characters on a char boundary, appending an ellipsis.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        let capped: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{capped}\u{2026}")
     } else {
-        Some(trimmed.to_string())
+        text.to_string()
     }
 }
 
@@ -338,6 +433,140 @@ fn signature_span_end(language: Language, node: &[u8]) -> Option<usize> {
             b';' if depth <= 0 => return Some(i),
             b':' if python && depth <= 0 => return Some(i),
             _ => {}
+        }
+    }
+    None
+}
+
+/// Map each container definition `(name, line)` to its declared members via a
+/// second tree-sitter parse (the tags API does not expose its tree). Returns an
+/// empty map for languages without member support.
+fn members_by_definition(
+    language: Language,
+    source: &[u8],
+) -> std::collections::HashMap<(String, usize), Vec<CodeMember>> {
+    let mut out: std::collections::HashMap<(String, usize), Vec<CodeMember>> =
+        std::collections::HashMap::new();
+    let containers = language.member_containers();
+    if containers.is_empty() {
+        return out;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&language.ts_language()).is_err() {
+        return out;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return out;
+    };
+
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if containers.contains(&node.kind())
+            && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(name) = name_node.utf8_text(source)
+        {
+            let line = name_node.start_position().row + 1;
+            let members = collect_members(language, node, source);
+            if !members.is_empty() {
+                out.entry((name.to_string(), line)).or_insert(members);
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+/// The node whose direct children are a container's member declarations.
+fn field_list_node<'a>(
+    language: Language,
+    container: tree_sitter::Node<'a>,
+) -> Option<tree_sitter::Node<'a>> {
+    if matches!(language, Language::Go) {
+        // type_spec -> (struct_type|interface_type) -> field_declaration_list
+        let ty = container.child_by_field_name("type")?;
+        let mut cursor = ty.walk();
+        return ty
+            .children(&mut cursor)
+            .find(|child| child.kind() == "field_declaration_list");
+    }
+    container.child_by_field_name("body")
+}
+
+fn collect_members(
+    language: Language,
+    container: tree_sitter::Node,
+    source: &[u8],
+) -> Vec<CodeMember> {
+    const MAX_MEMBERS: usize = 200;
+    let Some(list) = field_list_node(language, container) else {
+        return Vec::new();
+    };
+    let field_kinds = language.member_field_kinds();
+    let mut members = Vec::new();
+    let mut cursor = list.walk();
+    for child in list.children(&mut cursor) {
+        if !field_kinds.contains(&child.kind()) {
+            continue;
+        }
+        if let Some(member) = make_member(language, child, source) {
+            members.push(member);
+            if members.len() >= MAX_MEMBERS {
+                break;
+            }
+        }
+    }
+    members
+}
+
+fn make_member(language: Language, field: tree_sitter::Node, source: &[u8]) -> Option<CodeMember> {
+    let name = member_name(language, field, source)?;
+    let signature = member_signature(field, source);
+    Some(CodeMember { name, signature })
+}
+
+fn member_name(language: Language, field: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    if matches!(language, Language::Python) {
+        let assignment = field.named_child(0)?;
+        if assignment.kind() != "assignment" {
+            return None;
+        }
+        let left = assignment.child_by_field_name("left")?;
+        if left.kind() != "identifier" {
+            return None;
+        }
+        return left.utf8_text(source).ok().map(str::to_owned);
+    }
+    let node = first_descendant_kind(field, language.member_name_kinds())?;
+    node.utf8_text(source).ok().map(str::to_owned)
+}
+
+fn member_signature(field: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let text = field.utf8_text(source).ok()?;
+    let first_line = text.lines().next().unwrap_or(text);
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cut = collapsed.split('{').next().unwrap_or(collapsed.as_str());
+    let trimmed = cut.trim().trim_end_matches([';', ',']).trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(trimmed, 120))
+}
+
+/// First descendant (document order) whose kind is in `kinds`.
+fn first_descendant_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kinds: &[&str],
+) -> Option<tree_sitter::Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            return Some(child);
+        }
+        if let Some(found) = first_descendant_kind(child, kinds) {
+            return Some(found);
         }
     }
     None
@@ -460,6 +689,51 @@ mod tests {
             !signature.contains('{'),
             "signature must stop before the body: {signature}"
         );
+    }
+
+    #[test]
+    fn struct_fields_become_members() {
+        let parsed = parse(
+            "pub struct Point {\n    pub x: i32,\n    y: String,\n}\n",
+            "p.rs",
+        );
+        let point = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Point")
+            .expect("Point symbol");
+        let names: Vec<&str> = point.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["x", "y"]);
+        assert_eq!(point.members[0].signature.as_deref(), Some("pub x: i32"));
+        assert_eq!(point.members[1].signature.as_deref(), Some("y: String"));
+    }
+
+    #[test]
+    fn typescript_interface_fields_become_members() {
+        let parsed = parse(
+            "export interface User {\n  id: number;\n  name?: string;\n}\n",
+            "user.ts",
+        );
+        let user = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "User")
+            .expect("User symbol");
+        let names: Vec<&str> = user.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["id", "name"]);
+        assert_eq!(user.members[1].signature.as_deref(), Some("name?: string"));
+    }
+
+    #[test]
+    fn enum_variants_become_members() {
+        let parsed = parse("pub enum Mode {\n    Fast,\n    Slow(u8),\n}\n", "m.rs");
+        let mode = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Mode")
+            .expect("Mode symbol");
+        let names: Vec<&str> = mode.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Fast", "Slow"]);
     }
 
     #[test]
