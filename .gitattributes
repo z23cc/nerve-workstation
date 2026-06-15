@@ -1,0 +1,3 @@
+# Normalize line endings to LF on all platforms so golden snapshots (and shell
+# scripts) stay byte-identical when checked out on Windows CI.
+* text=auto eol=lf
