@@ -137,8 +137,9 @@ pub fn tool_specs() -> Value {
                 "properties": {
                     "workspace": workspace_schema(),
                     "path": { "type": "string" },
-                    "start_line": { "type": "integer" },
-                    "end_line": { "type": "integer" }
+                    "start_line": { "type": "integer", "description": "1-based line to start from (alias: offset)." },
+                    "end_line": { "type": "integer", "description": "1-based inclusive end line." },
+                    "limit": { "type": "integer", "description": "Max lines to return from start_line; overrides end_line." }
                 }
             }
         }),
@@ -458,13 +459,19 @@ struct FileSearchArgs {
     mode: String,
     #[serde(default)]
     regex: bool,
-    #[serde(default = "default_max_results")]
+    #[serde(default = "default_max_results", deserialize_with = "lenient_usize")]
     max_results: usize,
-    #[serde(default = "default_context_lines")]
+    #[serde(default = "default_context_lines", deserialize_with = "lenient_usize")]
     context_lines: usize,
-    #[serde(default = "default_max_content_files")]
+    #[serde(
+        default = "default_max_content_files",
+        deserialize_with = "lenient_usize"
+    )]
     max_content_files: usize,
-    #[serde(default = "default_max_content_bytes")]
+    #[serde(
+        default = "default_max_content_bytes",
+        deserialize_with = "lenient_u64"
+    )]
     max_content_bytes: u64,
     #[serde(default)]
     whole_word: bool,
@@ -492,8 +499,11 @@ impl FileSearchArgs {
 #[derive(Debug, Deserialize)]
 struct ReadFileArgs {
     path: PathBuf,
+    #[serde(default, alias = "offset", deserialize_with = "lenient_opt_usize")]
     start_line: Option<usize>,
+    #[serde(default, deserialize_with = "lenient_opt_usize")]
     end_line: Option<usize>,
+    #[serde(default, deserialize_with = "lenient_opt_usize")]
     limit: Option<usize>,
 }
 
@@ -510,6 +520,7 @@ impl ReadFileArgs {
 
 #[derive(Debug, Deserialize)]
 struct FileTreeArgs {
+    #[serde(default, deserialize_with = "lenient_opt_usize")]
     max_depth: Option<usize>,
 }
 
@@ -523,7 +534,10 @@ struct RepoMapArgs {
     query: Option<String>,
     #[serde(default)]
     seed_paths: Vec<PathBuf>,
-    #[serde(default = "default_repo_map_max_files")]
+    #[serde(
+        default = "default_repo_map_max_files",
+        deserialize_with = "lenient_usize"
+    )]
     max_files: usize,
 }
 
@@ -561,11 +575,109 @@ fn default_max_content_bytes() -> u64 {
     64 * 1024 * 1024
 }
 
+/// Coerce a JSON value into u64, accepting integers and integer-valued strings.
+/// LLM clients frequently emit numbers as strings (e.g. "130"); be forgiving.
+fn coerce_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|f| *f >= 0.0 && f.fract() == 0.0)
+                .map(|f| f as u64)
+        }),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            trimmed.parse::<u64>().ok().or_else(|| {
+                trimmed
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|f| *f >= 0.0 && f.fract() == 0.0)
+                    .map(|f| f as u64)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn coerce_usize(value: &Value) -> Option<usize> {
+    coerce_u64(value).and_then(|n| usize::try_from(n).ok())
+}
+
+/// Deserialize a usize, accepting an integer or an integer-valued string.
+fn lenient_usize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    coerce_usize(&value)
+        .ok_or_else(|| serde::de::Error::custom(format!("expected an integer, got {value}")))
+}
+
+/// Deserialize a u64, accepting an integer or an integer-valued string.
+fn lenient_u64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    coerce_u64(&value)
+        .ok_or_else(|| serde::de::Error::custom(format!("expected an integer, got {value}")))
+}
+
+/// Deserialize an Option<usize>, accepting null, an integer, or an integer string.
+fn lenient_opt_usize<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    coerce_usize(&value)
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom(format!("expected an integer, got {value}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{FsCatalogProvider, RootPolicy, ScanOptions, WorkspaceRegistry};
     use std::{fs, sync::Arc};
+
+    #[test]
+    fn read_file_args_accept_string_numbers() {
+        let args: ReadFileArgs =
+            serde_json::from_value(json!({ "path": "a.txt", "limit": "130" })).expect("parse");
+        assert_eq!(args.limit, Some(130));
+        assert_eq!(args.start_line, None);
+    }
+
+    #[test]
+    fn read_file_args_accept_numeric_and_offset_alias() {
+        let args: ReadFileArgs =
+            serde_json::from_value(json!({ "path": "a.txt", "offset": 5, "limit": 10 }))
+                .expect("parse");
+        assert_eq!(args.start_line, Some(5));
+        assert_eq!(args.limit, Some(10));
+    }
+
+    #[test]
+    fn read_file_args_treat_null_and_absent_as_none() {
+        let args: ReadFileArgs =
+            serde_json::from_value(json!({ "path": "a.txt", "start_line": null })).expect("parse");
+        assert_eq!(args.start_line, None);
+        assert_eq!(args.end_line, None);
+        assert_eq!(args.limit, None);
+    }
+
+    #[test]
+    fn read_file_args_reject_non_numeric_string() {
+        let parsed =
+            serde_json::from_value::<ReadFileArgs>(json!({ "path": "a.txt", "limit": "abc" }));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn file_search_args_accept_string_numbers_and_keep_defaults() {
+        let args: FileSearchArgs = serde_json::from_value(
+            json!({ "pattern": "x", "max_results": "10", "max_content_bytes": "2048" }),
+        )
+        .expect("parse");
+        assert_eq!(args.max_results, 10);
+        assert_eq!(args.max_content_bytes, 2048);
+        assert_eq!(args.context_lines, 2);
+    }
 
     fn provider_for(path: &std::path::Path) -> FsCatalogProvider {
         FsCatalogProvider::new(
