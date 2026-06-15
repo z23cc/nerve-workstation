@@ -39,8 +39,10 @@ pub use dispatch::{
 };
 pub use models::*;
 pub use navigate::{
-    DefinitionResponse, NavigateRequest, ReferenceLocation, ReferencesResponse, SymbolLocation,
-    find_references, find_references_cancellable, goto_definition, goto_definition_cancellable,
+    CallDirection, CallEdge, CallHierarchyRequest, CallHierarchyResponse, DefinitionResponse,
+    NavigateRequest, ReferenceLocation, ReferencesResponse, SymbolLocation, call_hierarchy,
+    call_hierarchy_cancellable, find_references, find_references_cancellable, goto_definition,
+    goto_definition_cancellable,
 };
 pub use port::CatalogProvider;
 pub use read::read_file;

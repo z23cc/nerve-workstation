@@ -292,6 +292,21 @@ pub fn tool_specs() -> Value {
             }
         }),
         json!({
+            "name": "call_hierarchy",
+            "description": "Build a name-based call hierarchy for a symbol (deterministic, tree-sitter; no language server). incoming = callers (each reference mapped to its enclosing definition); outgoing = callees (the symbol body's references resolved to definitions). Best-effort: name-based, not a scope/type resolver.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["symbol"],
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "symbol": { "type": "string", "description": "Exact symbol name (case-sensitive)." },
+                    "direction": { "type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both" },
+                    "language": { "type": "string", "description": "Optional display-language filter, e.g. rust, typescript, tsx, python." },
+                    "max_results": { "type": "integer", "default": 200 }
+                }
+            }
+        }),
+        json!({
             "name": "find_references",
             "description": "Find references to a symbol across the workspace (syntactic tree-sitter name match over 11 languages; deterministic, no language server). Returns each reference's path, line, and kind. Set include_definitions to also return the symbol's definitions. Not a scope/type resolver: results may include unrelated same-name symbols and miss aliases/re-exports.",
             "inputSchema": {
@@ -660,6 +675,17 @@ where
             )?;
             return tool_response_text(&response);
         }
+        "call_hierarchy" => {
+            let args: CallHierarchyArgs = serde_json::from_value(arguments)?;
+            let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+            let response = crate::navigate::call_hierarchy_cancellable(
+                provider,
+                &snapshot,
+                &args.into_request(),
+                cancel,
+            )?;
+            return tool_response_text(&response);
+        }
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
 
@@ -869,6 +895,36 @@ impl ToolText for crate::navigate::ReferencesResponse {
                 self.references.len(),
                 self.total
             ));
+        }
+        out
+    }
+}
+
+impl ToolText for crate::navigate::CallHierarchyResponse {
+    fn tool_text(&self) -> String {
+        let mut out = String::new();
+        let render = |label: &str, edges: &[crate::navigate::CallEdge], out: &mut String| {
+            if edges.is_empty() {
+                return;
+            }
+            out.push_str(label);
+            out.push('\n');
+            for e in edges {
+                match &e.text {
+                    Some(t) => out.push_str(&format!(
+                        "  {}:{} {} {}\n",
+                        e.display_path, e.line, e.symbol, t
+                    )),
+                    None => {
+                        out.push_str(&format!("  {}:{} {}\n", e.display_path, e.line, e.symbol))
+                    }
+                }
+            }
+        };
+        render("callers (incoming):", &self.incoming, &mut out);
+        render("callees (outgoing):", &self.outgoing, &mut out);
+        if out.is_empty() {
+            out.push_str(&format!("(no call hierarchy for {})\n", self.symbol));
         }
         out
     }
@@ -1524,6 +1580,35 @@ impl NavigateArgs {
 
 fn default_nav_max_results() -> usize {
     200
+}
+
+#[derive(Debug, Deserialize)]
+struct CallHierarchyArgs {
+    symbol: String,
+    #[serde(default = "default_call_direction")]
+    direction: crate::navigate::CallDirection,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(
+        default = "default_nav_max_results",
+        deserialize_with = "lenient_usize"
+    )]
+    max_results: usize,
+}
+
+fn default_call_direction() -> crate::navigate::CallDirection {
+    crate::navigate::CallDirection::Both
+}
+
+impl CallHierarchyArgs {
+    fn into_request(self) -> crate::navigate::CallHierarchyRequest {
+        crate::navigate::CallHierarchyRequest {
+            symbol: self.symbol,
+            direction: self.direction,
+            language: self.language,
+            max_results: self.max_results.max(1),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

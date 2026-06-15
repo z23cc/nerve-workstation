@@ -257,7 +257,7 @@ enum FileAnalysisResult {
 pub(crate) struct IndexedFile {
     pub(crate) path: String,
     pub(crate) display_path: String,
-    abs_path: PathBuf,
+    pub(crate) abs_path: PathBuf,
     pub(crate) language: String,
     pub(crate) symbols: Vec<CodeSymbol>,
     pub(crate) references: Vec<CodeReference>,

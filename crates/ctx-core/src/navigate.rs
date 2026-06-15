@@ -12,10 +12,11 @@
 //! scale).
 
 use crate::{
-    cancel::CancelToken, models::CtxError, port::CatalogProvider,
+    cancel::CancelToken, codemap::block_span, models::CtxError, port::CatalogProvider,
     repomap::indexed_files_cancellable, snapshot::CatalogSnapshot,
 };
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, path::Path};
 
 /// Caveat surfaced on every navigation response so callers (and models) know the
 /// results are syntactic name matches, not compiler-accurate resolution.
@@ -47,6 +48,9 @@ pub struct SymbolLocation {
     pub language: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Trimmed source line at `line`, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// One reference site for a symbol.
@@ -57,6 +61,9 @@ pub struct ReferenceLocation {
     pub line: usize,
     pub kind: String,
     pub language: String,
+    /// Trimmed source line at `line`, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// Response for `goto_definition`.
@@ -81,43 +88,100 @@ pub struct ReferencesResponse {
     pub note: String,
 }
 
+/// Direction of a `call_hierarchy` query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallDirection {
+    /// Callers of the symbol (who references it, by enclosing definition).
+    Incoming,
+    /// Callees of the symbol (what its body references, resolved to definitions).
+    Outgoing,
+    /// Both directions.
+    Both,
+}
+
+/// Request for `call_hierarchy`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CallHierarchyRequest {
+    pub symbol: String,
+    pub direction: CallDirection,
+    #[serde(default)]
+    pub language: Option<String>,
+    pub max_results: usize,
+}
+
+/// One related symbol in a call hierarchy (a caller for incoming, a callee for
+/// outgoing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallEdge {
+    /// The related symbol's name.
+    pub symbol: String,
+    pub path: String,
+    pub display_path: String,
+    pub line: usize,
+    pub kind: String,
+    pub language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// Response for `call_hierarchy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallHierarchyResponse {
+    pub symbol: String,
+    /// Callers (populated for `incoming`/`both`).
+    pub incoming: Vec<CallEdge>,
+    /// Callees (populated for `outgoing`/`both`).
+    pub outgoing: Vec<CallEdge>,
+    pub note: String,
+}
+
 fn language_matches(filter: Option<&str>, language: &str) -> bool {
     filter.is_none_or(|wanted| wanted == language)
 }
 
-/// Collect every definition site of `symbol`, sorted deterministically.
-fn collect_definitions<P: CatalogProvider + Sync>(
-    provider: &P,
-    snapshot: &CatalogSnapshot,
-    request: &NavigateRequest,
-    cancel: &CancelToken,
-) -> Result<Vec<SymbolLocation>, CtxError> {
-    let files = indexed_files_cancellable(provider, snapshot, cancel)?;
-    let mut hits = Vec::new();
-    for file in &files {
-        if !language_matches(request.language.as_deref(), &file.language) {
-            continue;
-        }
-        for symbol in &file.symbols {
-            if symbol.name == request.symbol {
-                hits.push(SymbolLocation {
-                    path: file.path.clone(),
-                    display_path: file.display_path.clone(),
-                    line: symbol.line,
-                    kind: symbol.kind.clone(),
-                    language: file.language.clone(),
-                    signature: symbol.signature.clone(),
-                });
-            }
+/// Lazily reads file sources (once per path) to supply line snippets and full
+/// source text for tree-sitter block-span resolution.
+struct Sources<'a, P: CatalogProvider + ?Sized> {
+    provider: &'a P,
+    cache: HashMap<String, Option<String>>,
+}
+
+impl<'a, P: CatalogProvider + ?Sized> Sources<'a, P> {
+    fn new(provider: &'a P) -> Self {
+        Self {
+            provider,
+            cache: HashMap::new(),
         }
     }
-    hits.sort_by(|a, b| {
+
+    fn source(&mut self, rel_path: &str, abs_path: &Path) -> Option<&str> {
+        self.cache
+            .entry(rel_path.to_string())
+            .or_insert_with(|| {
+                self.provider
+                    .read_bytes(abs_path)
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .as_deref()
+    }
+
+    /// Trimmed 1-based `line` from `rel_path`, or `None` if unavailable/blank.
+    fn line(&mut self, rel_path: &str, abs_path: &Path, line: usize) -> Option<String> {
+        let source = self.source(rel_path, abs_path)?;
+        let text = source.lines().nth(line.checked_sub(1)?)?.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+}
+
+fn sort_locations(locations: &mut [SymbolLocation]) {
+    locations.sort_by(|a, b| {
         a.display_path
             .cmp(&b.display_path)
             .then(a.line.cmp(&b.line))
             .then(a.kind.cmp(&b.kind))
     });
-    Ok(hits)
 }
 
 /// Find all definitions of `symbol` across the catalog.
@@ -136,7 +200,29 @@ pub fn goto_definition_cancellable<P: CatalogProvider + Sync>(
     request: &NavigateRequest,
     cancel: &CancelToken,
 ) -> Result<DefinitionResponse, CtxError> {
-    let mut definitions = collect_definitions(provider, snapshot, request, cancel)?;
+    let files = indexed_files_cancellable(provider, snapshot, cancel)?;
+    let mut sources = Sources::new(provider);
+    let mut definitions = Vec::new();
+    for file in &files {
+        if !language_matches(request.language.as_deref(), &file.language) {
+            continue;
+        }
+        for symbol in &file.symbols {
+            if symbol.name == request.symbol {
+                let text = sources.line(&file.path, &file.abs_path, symbol.line);
+                definitions.push(SymbolLocation {
+                    path: file.path.clone(),
+                    display_path: file.display_path.clone(),
+                    line: symbol.line,
+                    kind: symbol.kind.clone(),
+                    language: file.language.clone(),
+                    signature: symbol.signature.clone(),
+                    text,
+                });
+            }
+        }
+    }
+    sort_locations(&mut definitions);
     let total = definitions.len();
     let truncated = total > request.max_results;
     definitions.truncate(request.max_results);
@@ -166,6 +252,7 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
     cancel: &CancelToken,
 ) -> Result<ReferencesResponse, CtxError> {
     let files = indexed_files_cancellable(provider, snapshot, cancel)?;
+    let mut sources = Sources::new(provider);
     let mut references = Vec::new();
     for file in &files {
         if !language_matches(request.language.as_deref(), &file.language) {
@@ -173,12 +260,14 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
         }
         for reference in &file.references {
             if reference.name == request.symbol {
+                let text = sources.line(&file.path, &file.abs_path, reference.line);
                 references.push(ReferenceLocation {
                     path: file.path.clone(),
                     display_path: file.display_path.clone(),
                     line: reference.line,
                     kind: reference.kind.clone(),
                     language: file.language.clone(),
+                    text,
                 });
             }
         }
@@ -194,7 +283,27 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
     references.truncate(request.max_results);
 
     let definitions = if request.include_definitions {
-        let mut defs = collect_definitions(provider, snapshot, request, cancel)?;
+        let mut defs = Vec::new();
+        for file in &files {
+            if !language_matches(request.language.as_deref(), &file.language) {
+                continue;
+            }
+            for symbol in &file.symbols {
+                if symbol.name == request.symbol {
+                    let text = sources.line(&file.path, &file.abs_path, symbol.line);
+                    defs.push(SymbolLocation {
+                        path: file.path.clone(),
+                        display_path: file.display_path.clone(),
+                        line: symbol.line,
+                        kind: symbol.kind.clone(),
+                        language: file.language.clone(),
+                        signature: symbol.signature.clone(),
+                        text,
+                    });
+                }
+            }
+        }
+        sort_locations(&mut defs);
         defs.truncate(request.max_results);
         defs
     } else {
@@ -209,6 +318,196 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
         truncated,
         note: NAV_NOTE.to_string(),
     })
+}
+
+/// Build a name-based call hierarchy for `symbol`.
+pub fn call_hierarchy<P: CatalogProvider + Sync>(
+    provider: &P,
+    snapshot: &CatalogSnapshot,
+    request: &CallHierarchyRequest,
+) -> Result<CallHierarchyResponse, CtxError> {
+    call_hierarchy_cancellable(provider, snapshot, request, &CancelToken::never())
+}
+
+/// Cancellable [`call_hierarchy`].
+///
+/// Incoming: every reference to `symbol`, mapped to its enclosing definition
+/// (the innermost symbol whose tree-sitter block span contains the reference
+/// line) — the caller. Outgoing: the references inside `symbol`'s own block,
+/// resolved by name to definitions — the callees. Both are name-based and
+/// best-effort (see the response note).
+pub fn call_hierarchy_cancellable<P: CatalogProvider + Sync>(
+    provider: &P,
+    snapshot: &CatalogSnapshot,
+    request: &CallHierarchyRequest,
+    cancel: &CancelToken,
+) -> Result<CallHierarchyResponse, CtxError> {
+    let files = indexed_files_cancellable(provider, snapshot, cancel)?;
+    let mut sources = Sources::new(provider);
+    let lang = request.language.as_deref();
+
+    // Span cache: (rel_path, symbol_line) -> Option<(start, end)>.
+    let mut spans: HashMap<(String, usize), Option<(usize, usize)>> = HashMap::new();
+    let mut span_of = |sources: &mut Sources<P>, rel: &str, abs: &Path, line: usize| {
+        *spans.entry((rel.to_string(), line)).or_insert_with(|| {
+            sources
+                .source(rel, abs)
+                .and_then(|src| block_span(rel, src, line))
+        })
+    };
+
+    let want_incoming = matches!(
+        request.direction,
+        CallDirection::Incoming | CallDirection::Both
+    );
+    let want_outgoing = matches!(
+        request.direction,
+        CallDirection::Outgoing | CallDirection::Both
+    );
+
+    let mut incoming = Vec::new();
+    if want_incoming {
+        cancel.check_cancelled()?;
+        for file in &files {
+            if !language_matches(lang, &file.language) {
+                continue;
+            }
+            for reference in &file.references {
+                if reference.name != request.symbol {
+                    continue;
+                }
+                // Enclosing symbol = smallest block span that contains the ref line,
+                // among symbols declared at or before it.
+                let mut best: Option<&crate::codemap::CodeSymbol> = None;
+                let mut best_size = usize::MAX;
+                for symbol in &file.symbols {
+                    if symbol.line > reference.line {
+                        continue;
+                    }
+                    if let Some((start, end)) =
+                        span_of(&mut sources, &file.path, &file.abs_path, symbol.line)
+                        && start <= reference.line
+                        && reference.line <= end
+                        && (end - start) < best_size
+                    {
+                        best_size = end - start;
+                        best = Some(symbol);
+                    }
+                }
+                if let Some(caller) = best {
+                    let text = sources.line(&file.path, &file.abs_path, caller.line);
+                    incoming.push(CallEdge {
+                        symbol: caller.name.clone(),
+                        path: file.path.clone(),
+                        display_path: file.display_path.clone(),
+                        line: caller.line,
+                        kind: caller.kind.clone(),
+                        language: file.language.clone(),
+                        text,
+                    });
+                }
+            }
+        }
+        incoming.sort_by(call_edge_cmp);
+        incoming.dedup();
+        incoming.truncate(request.max_results);
+    }
+
+    let mut outgoing = Vec::new();
+    if want_outgoing {
+        cancel.check_cancelled()?;
+        // Definition index by name for resolving callees.
+        let mut defs_by_name: HashMap<&str, Vec<DefRef>> = HashMap::new();
+        for file in &files {
+            for symbol in &file.symbols {
+                defs_by_name
+                    .entry(symbol.name.as_str())
+                    .or_default()
+                    .push(DefRef {
+                        path: &file.path,
+                        display_path: &file.display_path,
+                        language: &file.language,
+                        line: symbol.line,
+                        kind: &symbol.kind,
+                    });
+            }
+        }
+
+        for file in &files {
+            if !language_matches(lang, &file.language) {
+                continue;
+            }
+            for symbol in &file.symbols {
+                if symbol.name != request.symbol {
+                    continue;
+                }
+                let Some((start, end)) =
+                    span_of(&mut sources, &file.path, &file.abs_path, symbol.line)
+                else {
+                    continue;
+                };
+                let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+                for reference in &file.references {
+                    if reference.line < start
+                        || reference.line > end
+                        || reference.name == request.symbol
+                        || !seen.insert(reference.name.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(targets) = defs_by_name.get(reference.name.as_str()) {
+                        for target in targets {
+                            outgoing.push(CallEdge {
+                                symbol: reference.name.clone(),
+                                path: target.path.to_string(),
+                                display_path: target.display_path.to_string(),
+                                line: target.line,
+                                kind: target.kind.to_string(),
+                                language: target.language.to_string(),
+                                text: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        outgoing.sort_by(call_edge_cmp);
+        outgoing.dedup();
+        // Fill snippets after dedup to avoid redundant reads.
+        for edge in &mut outgoing {
+            if let Some(abs) = files
+                .iter()
+                .find(|f| f.path == edge.path)
+                .map(|f| f.abs_path.clone())
+            {
+                edge.text = sources.line(&edge.path, &abs, edge.line);
+            }
+        }
+        outgoing.truncate(request.max_results);
+    }
+
+    Ok(CallHierarchyResponse {
+        symbol: request.symbol.clone(),
+        incoming,
+        outgoing,
+        note: NAV_NOTE.to_string(),
+    })
+}
+
+/// A definition reference into the indexed file set, for callee resolution.
+struct DefRef<'a> {
+    path: &'a str,
+    display_path: &'a str,
+    language: &'a str,
+    line: usize,
+    kind: &'a str,
+}
+
+fn call_edge_cmp(a: &CallEdge, b: &CallEdge) -> std::cmp::Ordering {
+    a.display_path
+        .cmp(&b.display_path)
+        .then(a.line.cmp(&b.line))
+        .then(a.symbol.cmp(&b.symbol))
 }
 
 #[cfg(test)]
@@ -245,8 +544,17 @@ mod tests {
         }
     }
 
+    fn calls(symbol: &str, direction: CallDirection) -> CallHierarchyRequest {
+        CallHierarchyRequest {
+            symbol: symbol.to_string(),
+            direction,
+            language: None,
+            max_results: 200,
+        }
+    }
+
     #[test]
-    fn goto_definition_finds_symbol_with_signature() {
+    fn goto_definition_finds_symbol_with_signature_and_snippet() {
         let (_dir, provider, snapshot) = temp_provider(&[(
             "lib.rs",
             "pub struct Widget;\npub fn make_widget() -> Widget { Widget }\n",
@@ -263,10 +571,14 @@ mod tests {
                 .unwrap_or_default()
                 .contains("make_widget")
         );
+        assert_eq!(
+            def.text.as_deref(),
+            Some("pub fn make_widget() -> Widget { Widget }")
+        );
     }
 
     #[test]
-    fn find_references_locates_call_sites() {
+    fn find_references_locates_call_sites_with_snippet() {
         let (_dir, provider, snapshot) = temp_provider(&[
             ("target.rs", "pub fn make_target() -> usize { 1 }\n"),
             (
@@ -277,6 +589,13 @@ mod tests {
         let response = find_references(&provider, &snapshot, &request("make_target")).expect("nav");
         assert!(response.total >= 1, "expected at least one reference");
         assert!(response.references.iter().all(|r| r.path == "caller.rs"));
+        assert!(
+            response.references[0]
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("make_target")
+        );
     }
 
     #[test]
@@ -326,5 +645,49 @@ mod tests {
         assert_eq!(response.total, 3);
         assert_eq!(response.definitions.len(), 2);
         assert!(response.truncated);
+    }
+
+    #[test]
+    fn call_hierarchy_incoming_resolves_enclosing_caller() {
+        let (_dir, provider, snapshot) = temp_provider(&[
+            ("target.rs", "pub fn make_target() -> usize { 1 }\n"),
+            (
+                "caller.rs",
+                "pub fn outer() -> usize {\n    make_target()\n}\n",
+            ),
+        ]);
+        let response = call_hierarchy(
+            &provider,
+            &snapshot,
+            &calls("make_target", CallDirection::Incoming),
+        )
+        .expect("calls");
+        assert!(response.incoming.iter().any(|e| e.symbol == "outer"));
+        assert!(response.outgoing.is_empty());
+    }
+
+    #[test]
+    fn call_hierarchy_outgoing_resolves_callees() {
+        let (_dir, provider, snapshot) = temp_provider(&[
+            ("helpers.rs", "pub fn helper_a() {}\npub fn helper_b() {}\n"),
+            (
+                "main.rs",
+                "pub fn driver() {\n    helper_a();\n    helper_b();\n}\n",
+            ),
+        ]);
+        let response = call_hierarchy(
+            &provider,
+            &snapshot,
+            &calls("driver", CallDirection::Outgoing),
+        )
+        .expect("calls");
+        let callees: Vec<&str> = response
+            .outgoing
+            .iter()
+            .map(|e| e.symbol.as_str())
+            .collect();
+        assert!(callees.contains(&"helper_a"));
+        assert!(callees.contains(&"helper_b"));
+        assert!(response.incoming.is_empty());
     }
 }
