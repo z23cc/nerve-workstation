@@ -1,8 +1,47 @@
 name: release
+
+# Automated release: bump +0.0.1, build an arm64 macOS bottle for the runner's
+# macOS, publish the GitHub Release, and push the regenerated formula to the tap.
+#
+# GitHub-hosted runners do not provide macOS 27, so this builds an arm64_sequoia
+# (macОS 15) bottle. macOS 27 / Intel / Linux fall back to building from source.
+# For an arm64_golden_gate (macOS 27) bottle, run Scripts/release.sh locally.
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
-  scaffold:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: macos-15
     steps:
-      - run: echo "scaffold — verifying workflow push works"
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up tap deploy key
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Release (bump +0.0.1, build bottle, publish, push tap)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: Scripts/release.sh
