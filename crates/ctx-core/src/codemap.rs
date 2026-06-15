@@ -114,6 +114,7 @@ enum Language {
     Rust,
     Python,
     JavaScript,
+    Go,
 }
 
 impl Language {
@@ -131,6 +132,9 @@ impl Language {
         {
             return Some(Self::JavaScript);
         }
+        if lower.ends_with(".go") {
+            return Some(Self::Go);
+        }
         None
     }
 
@@ -139,6 +143,7 @@ impl Language {
             Self::Rust => "rust",
             Self::Python => "python",
             Self::JavaScript => "javascript",
+            Self::Go => "go",
         }
     }
 }
@@ -176,6 +181,7 @@ fn code_facts_for_language(
         Language::Rust => rust_code_facts(source),
         Language::Python => python_code_facts(source),
         Language::JavaScript => javascript_code_facts(source, rel_path),
+        Language::Go => go_code_facts(source),
     }
 }
 
@@ -952,6 +958,379 @@ fn javascript_expression_name(expression: &Expression<'_>) -> Option<String> {
     }
 }
 
+fn go_code_facts(source: &str) -> Result<(Vec<CodeSymbol>, Vec<CodeReference>), String> {
+    use gosyn::ast::Declaration;
+    let file = gosyn::parse_source(source).map_err(|err| err.to_string())?;
+    let line_index = LineIndex::new(source);
+    let mut symbols = Vec::new();
+    let mut collector = GoReferenceCollector {
+        line_index: &line_index,
+        references: Vec::new(),
+    };
+
+    for import in &file.imports {
+        let path = import
+            .path
+            .value
+            .trim_matches(|c| c == '"' || c == '`')
+            .to_string();
+        let name = import.name.as_ref().map_or_else(
+            || path.rsplit('/').next().unwrap_or(path.as_str()).to_string(),
+            |ident| ident.name.clone(),
+        );
+        collector.references.push(CodeReference {
+            kind: "import".to_string(),
+            name,
+            line: line_index.line(import.path.pos),
+            import_path: Some(path),
+        });
+    }
+
+    for decl in &file.decl {
+        match decl {
+            Declaration::Function(func) => {
+                symbols.push(CodeSymbol {
+                    kind: if func.recv.is_some() {
+                        "method"
+                    } else {
+                        "function"
+                    }
+                    .to_string(),
+                    name: func.name.name.clone(),
+                    line: line_index.line(func.name.pos),
+                });
+                if let Some(recv) = &func.recv {
+                    collector.walk_field_list(recv);
+                }
+                collector.walk_func_type(&func.typ);
+                if let Some(body) = &func.body {
+                    collector.walk_block(body);
+                }
+            }
+            Declaration::Type(decl) => {
+                for spec in &decl.specs {
+                    symbols.push(CodeSymbol {
+                        kind: go_type_kind(spec).to_string(),
+                        name: spec.name.name.clone(),
+                        line: line_index.line(spec.name.pos),
+                    });
+                    collector.walk_expr(&spec.typ);
+                }
+            }
+            Declaration::Const(decl) => {
+                for spec in &decl.specs {
+                    for ident in &spec.name {
+                        symbols.push(CodeSymbol {
+                            kind: "const".to_string(),
+                            name: ident.name.clone(),
+                            line: line_index.line(ident.pos),
+                        });
+                    }
+                    collector.walk_value_spec(&spec.typ, &spec.values);
+                }
+            }
+            Declaration::Variable(decl) => {
+                for spec in &decl.specs {
+                    for ident in &spec.name {
+                        symbols.push(CodeSymbol {
+                            kind: "var".to_string(),
+                            name: ident.name.clone(),
+                            line: line_index.line(ident.pos),
+                        });
+                    }
+                    collector.walk_value_spec(&spec.typ, &spec.values);
+                }
+            }
+        }
+    }
+    Ok((symbols, collector.references))
+}
+
+fn go_type_kind(spec: &gosyn::ast::TypeSpec) -> &'static str {
+    use gosyn::ast::Expression;
+    match &spec.typ {
+        Expression::TypeStruct(_) => "struct",
+        Expression::TypeInterface(_) => "interface",
+        _ if spec.alias => "alias",
+        _ => "type",
+    }
+}
+
+struct GoReferenceCollector<'a> {
+    line_index: &'a LineIndex,
+    references: Vec<CodeReference>,
+}
+
+impl GoReferenceCollector<'_> {
+    fn walk_value_spec(
+        &mut self,
+        typ: &Option<gosyn::ast::Expression>,
+        values: &[gosyn::ast::Expression],
+    ) {
+        if let Some(typ) = typ {
+            self.walk_expr(typ);
+        }
+        for value in values {
+            self.walk_expr(value);
+        }
+    }
+
+    fn walk_field_list(&mut self, fields: &gosyn::ast::FieldList) {
+        for field in &fields.list {
+            self.walk_expr(&field.typ);
+        }
+    }
+
+    fn walk_func_type(&mut self, typ: &gosyn::ast::FuncType) {
+        self.walk_field_list(&typ.typ_params);
+        self.walk_field_list(&typ.params);
+        self.walk_field_list(&typ.result);
+    }
+
+    fn walk_block(&mut self, block: &gosyn::ast::BlockStmt) {
+        self.walk_stmts(&block.list);
+    }
+
+    fn walk_stmts(&mut self, stmts: &[gosyn::ast::Statement]) {
+        for stmt in stmts {
+            self.walk_stmt(stmt);
+        }
+    }
+
+    fn walk_stmt(&mut self, stmt: &gosyn::ast::Statement) {
+        use gosyn::ast::Statement as S;
+        match stmt {
+            S::Go(stmt) => self.walk_call(&stmt.call),
+            S::Defer(stmt) => self.walk_call(&stmt.call),
+            S::Expr(stmt) => self.walk_expr(&stmt.expr),
+            S::Send(stmt) => {
+                self.walk_expr(&stmt.chan);
+                self.walk_expr(&stmt.value);
+            }
+            S::IncDec(stmt) => self.walk_expr(&stmt.expr),
+            S::Assign(stmt) => {
+                for expr in &stmt.left {
+                    self.walk_expr(expr);
+                }
+                for expr in &stmt.right {
+                    self.walk_expr(expr);
+                }
+            }
+            S::Return(stmt) => {
+                for expr in &stmt.ret {
+                    self.walk_expr(expr);
+                }
+            }
+            S::Block(block) => self.walk_block(block),
+            S::If(stmt) => {
+                if let Some(init) = &stmt.init {
+                    self.walk_stmt(init);
+                }
+                self.walk_expr(&stmt.cond);
+                self.walk_block(&stmt.body);
+                if let Some(els) = &stmt.else_ {
+                    self.walk_stmt(els);
+                }
+            }
+            S::For(stmt) => {
+                if let Some(init) = &stmt.init {
+                    self.walk_stmt(init);
+                }
+                if let Some(cond) = &stmt.cond {
+                    self.walk_stmt(cond);
+                }
+                if let Some(post) = &stmt.post {
+                    self.walk_stmt(post);
+                }
+                self.walk_block(&stmt.body);
+            }
+            S::Range(stmt) => {
+                if let Some(key) = &stmt.key {
+                    self.walk_expr(key);
+                }
+                if let Some(value) = &stmt.value {
+                    self.walk_expr(value);
+                }
+                self.walk_expr(&stmt.expr);
+                self.walk_block(&stmt.body);
+            }
+            S::Switch(stmt) => {
+                if let Some(init) = &stmt.init {
+                    self.walk_stmt(init);
+                }
+                if let Some(tag) = &stmt.tag {
+                    self.walk_expr(tag);
+                }
+                self.walk_case_block(&stmt.block);
+            }
+            S::TypeSwitch(stmt) => {
+                if let Some(init) = &stmt.init {
+                    self.walk_stmt(init);
+                }
+                if let Some(tag) = &stmt.tag {
+                    self.walk_stmt(tag);
+                }
+                self.walk_case_block(&stmt.block);
+            }
+            S::Select(stmt) => {
+                for clause in &stmt.body.body {
+                    if let Some(comm) = &clause.comm {
+                        self.walk_stmt(comm);
+                    }
+                    self.walk_stmts(&clause.body);
+                }
+            }
+            S::Label(stmt) => self.walk_stmt(&stmt.stmt),
+            S::Declaration(decl) => self.walk_decl_stmt(decl),
+            S::Branch(_) | S::Empty(_) => {}
+        }
+    }
+
+    fn walk_case_block(&mut self, block: &gosyn::ast::CaseBlock) {
+        for clause in &block.body {
+            for expr in &clause.list {
+                self.walk_expr(expr);
+            }
+            self.walk_stmts(&clause.body);
+        }
+    }
+
+    fn walk_decl_stmt(&mut self, decl: &gosyn::ast::DeclStmt) {
+        use gosyn::ast::DeclStmt as D;
+        match decl {
+            D::Type(decl) => {
+                for spec in &decl.specs {
+                    self.walk_expr(&spec.typ);
+                }
+            }
+            D::Const(decl) => {
+                for spec in &decl.specs {
+                    self.walk_value_spec(&spec.typ, &spec.values);
+                }
+            }
+            D::Variable(decl) => {
+                for spec in &decl.specs {
+                    self.walk_value_spec(&spec.typ, &spec.values);
+                }
+            }
+        }
+    }
+
+    fn walk_call(&mut self, call: &gosyn::ast::Call) {
+        self.walk_expr(&call.func);
+        for arg in &call.args {
+            self.walk_expr(arg);
+        }
+    }
+
+    fn walk_expr(&mut self, expr: &gosyn::ast::Expression) {
+        use gosyn::ast::Expression as E;
+        match expr {
+            E::Ident(ident) => self.references.push(CodeReference {
+                kind: "identifier".to_string(),
+                name: ident.name.clone(),
+                line: self.line_index.line(ident.pos),
+                import_path: None,
+            }),
+            E::Selector(sel) => {
+                self.walk_expr(&sel.x);
+                self.references.push(CodeReference {
+                    kind: "selector".to_string(),
+                    name: sel.sel.name.clone(),
+                    line: self.line_index.line(sel.sel.pos),
+                    import_path: None,
+                });
+            }
+            E::Call(call) => self.walk_call(call),
+            E::Index(index) => {
+                self.walk_expr(&index.left);
+                self.walk_expr(&index.index);
+            }
+            E::IndexList(index) => {
+                self.walk_expr(&index.left);
+                for expr in &index.indices {
+                    self.walk_expr(expr);
+                }
+            }
+            E::Slice(slice) => {
+                self.walk_expr(&slice.left);
+                for expr in slice.index.iter().flatten() {
+                    self.walk_expr(expr);
+                }
+            }
+            E::FuncLit(lit) => {
+                self.walk_func_type(&lit.typ);
+                self.walk_block(&lit.body);
+            }
+            E::Ellipsis(ellipsis) => {
+                if let Some(elt) = &ellipsis.elt {
+                    self.walk_expr(elt);
+                }
+            }
+            E::Range(range) => self.walk_expr(&range.right),
+            E::Star(star) => self.walk_expr(&star.right),
+            E::Paren(paren) => self.walk_expr(&paren.expr),
+            E::TypeAssert(assert) => {
+                self.walk_expr(&assert.left);
+                if let Some(right) = &assert.right {
+                    self.walk_expr(right);
+                }
+            }
+            E::CompositeLit(lit) => {
+                self.walk_expr(&lit.typ);
+                self.walk_literal_value(&lit.val);
+            }
+            E::List(list) => {
+                for expr in list {
+                    self.walk_expr(expr);
+                }
+            }
+            E::Operation(op) => {
+                self.walk_expr(&op.x);
+                if let Some(y) = &op.y {
+                    self.walk_expr(y);
+                }
+            }
+            E::TypeMap(map) => {
+                self.walk_expr(&map.key);
+                self.walk_expr(&map.val);
+            }
+            E::TypeArray(array) => {
+                self.walk_expr(&array.len);
+                self.walk_expr(&array.typ);
+            }
+            E::TypeSlice(slice) => self.walk_expr(&slice.typ),
+            E::TypeFunction(typ) => self.walk_func_type(typ),
+            E::TypeStruct(typ) => {
+                for field in &typ.fields {
+                    self.walk_expr(&field.typ);
+                }
+            }
+            E::TypeChannel(chan) => self.walk_expr(&chan.typ),
+            E::TypePointer(ptr) => self.walk_expr(&ptr.typ),
+            E::TypeInterface(typ) => self.walk_field_list(&typ.methods),
+            E::BasicLit(_) => {}
+        }
+    }
+
+    fn walk_literal_value(&mut self, lit: &gosyn::ast::LiteralValue) {
+        for element in &lit.values {
+            if let Some(key) = &element.key {
+                self.walk_element(key);
+            }
+            self.walk_element(&element.val);
+        }
+    }
+
+    fn walk_element(&mut self, element: &gosyn::ast::Element) {
+        use gosyn::ast::Element as El;
+        match element {
+            El::Expr(expr) => self.walk_expr(expr),
+            El::LitValue(lit) => self.walk_literal_value(lit),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LineIndex {
     starts: Vec<usize>,
@@ -1064,6 +1443,38 @@ pub fn make_widget() -> Widget { Widget }
                 ("class", "ExportedThing", 17),
             ]
         );
+    }
+
+    #[test]
+    fn extracts_go_top_level_symbols_only() {
+        let (symbols, _) = go_code_facts(include_str!("../tests/go_fixture.go")).expect("parse");
+        let symbols: Vec<_> = symbols
+            .iter()
+            .map(|symbol| (symbol.kind.as_str(), symbol.name.as_str(), symbol.line))
+            .collect();
+        assert_eq!(
+            symbols,
+            vec![
+                ("interface", "Greeter", 8),
+                ("struct", "Service", 12),
+                ("const", "MaxRetries", 16),
+                ("var", "defaultName", 18),
+                ("method", "Greet", 20),
+                ("function", "NewService", 24),
+            ]
+        );
+    }
+
+    #[test]
+    fn collects_go_references() {
+        let (_, references) = go_code_facts(include_str!("../tests/go_fixture.go")).expect("parse");
+        let has =
+            |kind: &str, name: &str| references.iter().any(|r| r.kind == kind && r.name == name);
+        assert!(has("import", "fmt"));
+        assert!(has("import", "strings"));
+        assert!(has("selector", "ToUpper"));
+        assert!(has("selector", "Sprintf"));
+        assert!(has("identifier", "Service"));
     }
 
     #[test]

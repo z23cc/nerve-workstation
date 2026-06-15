@@ -17,6 +17,7 @@ repository = "https://github.com/z23cc/context-engine-rs"
 anyhow = "1"
 aho-corasick = "1"
 clap = { version = "4", features = ["derive"] }
+gosyn = "0.2.10"
 ignore = "0.4"
 memchr = "2"
 nucleo-matcher = "0.3.1"

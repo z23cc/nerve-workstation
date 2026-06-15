@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 aho-corasick.workspace = true
+gosyn.workspace = true
 memchr.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
