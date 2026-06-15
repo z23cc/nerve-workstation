@@ -16,6 +16,10 @@ pub struct CodeSymbol {
     pub kind: String,
     pub name: String,
     pub line: usize,
+    /// Declaration signature (e.g. `pub fn foo(a: A) -> B`), body excluded.
+    /// `None` when extraction yields nothing useful.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// An AST-derived reference occurrence used internally by repo-map.
@@ -256,7 +260,13 @@ fn code_facts_for_language(
         let line = tag.span.start.row + 1;
         let kind = config.syntax_type_name(tag.syntax_type_id).to_string();
         if tag.is_definition {
-            symbols.push(CodeSymbol { kind, name, line });
+            let signature = signature_for(language, bytes, &tag);
+            symbols.push(CodeSymbol {
+                kind,
+                name,
+                line,
+                signature,
+            });
         } else {
             references.push(CodeReference {
                 kind,
@@ -269,6 +279,68 @@ fn code_facts_for_language(
     // Deterministic order for stable output and goldens.
     symbols.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.name.cmp(&b.name)));
     Ok((symbols, references))
+}
+
+/// Build a compact one-line signature for a definition tag: text from the start
+/// of the definition node up to the body (a top-level `{` or `;` for brace
+/// languages, `:` for Python), with all whitespace collapsed to single spaces and
+/// the length capped. Falls back to the trimmed first line tree-sitter already
+/// computed (`line_range`). Returns `None` if nothing useful remains.
+fn signature_for(language: Language, source: &[u8], tag: &tree_sitter_tags::Tag) -> Option<String> {
+    const MAX_SCAN: usize = 512;
+    const MAX_CHARS: usize = 200;
+
+    let start = tag.range.start.min(source.len());
+    let scan_end = tag.range.end.min(start + MAX_SCAN).min(source.len());
+    let node = source.get(start..scan_end)?;
+    let raw = match signature_span_end(language, node) {
+        Some(end) => &node[..end],
+        None => {
+            let lo = tag.line_range.start.min(source.len());
+            let hi = tag.line_range.end.min(source.len());
+            source.get(lo..hi)?
+        }
+    };
+
+    let collapsed = String::from_utf8_lossy(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = collapsed
+        .trim()
+        .trim_end_matches(['{', ':', ';'])
+        .trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() > MAX_CHARS {
+        let capped: String = trimmed.chars().take(MAX_CHARS - 1).collect();
+        Some(format!("{capped}\u{2026}"))
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Byte offset within `node` where a definition's signature ends (exclusive):
+/// the first top-level body opener. Brace languages stop before `{` or at `;`;
+/// Python stops at the header `:`. Bracket depth (`()`/`[]`, plus `{}` for Python)
+/// keeps separators inside argument lists from ending the signature.
+fn signature_span_end(language: Language, node: &[u8]) -> Option<usize> {
+    let python = matches!(language, Language::Python);
+    let mut depth: i32 = 0;
+    for (i, &byte) in node.iter().enumerate() {
+        match byte {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'{' if python => depth += 1,
+            b'}' if python => depth -= 1,
+            b'{' if depth <= 0 => return Some(i),
+            b';' if depth <= 0 => return Some(i),
+            b':' if python && depth <= 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn select_entries<'a>(
@@ -365,6 +437,29 @@ mod tests {
             parsed.symbols
         );
         assert!(has_symbol(&parsed, "make"));
+    }
+
+    #[test]
+    fn symbols_include_declaration_signatures() {
+        let parsed = parse(
+            "pub fn add(\n    left: usize,\n    right: usize,\n) -> usize {\n    left + right\n}\n",
+            "math.rs",
+        );
+        let add = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "add")
+            .expect("add symbol");
+        let signature = add.signature.as_deref().unwrap_or_default();
+        assert!(
+            signature.starts_with("pub fn add("),
+            "signature: {signature}"
+        );
+        assert!(signature.contains("-> usize"), "signature: {signature}");
+        assert!(
+            !signature.contains('{'),
+            "signature must stop before the body: {signature}"
+        );
     }
 
     #[test]

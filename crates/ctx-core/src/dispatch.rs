@@ -495,10 +495,16 @@ impl ToolText for crate::codemap::CodeStructureResponse {
             out.push_str(&file.path);
             out.push('\n');
             for symbol in &file.symbols {
-                out.push_str(&format!(
-                    "  {} {} ({})\n",
-                    symbol.kind, symbol.name, symbol.line
-                ));
+                match &symbol.signature {
+                    Some(signature) => out.push_str(&format!(
+                        "  {} ({}): {}\n",
+                        symbol.kind, symbol.line, signature
+                    )),
+                    None => out.push_str(&format!(
+                        "  {} {} ({})\n",
+                        symbol.kind, symbol.name, symbol.line
+                    )),
+                }
             }
         }
         if self.files.is_empty() {
@@ -886,6 +892,7 @@ mod tests {
                     kind: "function".to_string(),
                     name: "needle".to_string(),
                     line: 12,
+                    signature: None,
                 }],
             }],
             diagnostics: vec![],

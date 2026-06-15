@@ -11,32 +11,38 @@ expression: response
         {
           "kind": "class",
           "name": "Alpha",
-          "line": 1
+          "line": 1,
+          "signature": "pub struct Alpha"
         },
         {
           "kind": "class",
           "name": "Mode",
-          "line": 5
+          "line": 5,
+          "signature": "pub enum Mode"
         },
         {
           "kind": "interface",
           "name": "Runnable",
-          "line": 10
+          "line": 10,
+          "signature": "pub trait Runnable"
         },
         {
           "kind": "method",
           "name": "new",
-          "line": 15
+          "line": 15,
+          "signature": "pub fn new(value: i32) -> Self"
         },
         {
           "kind": "method",
           "name": "run",
-          "line": 21
+          "line": 21,
+          "signature": "fn run(&self)"
         },
         {
           "kind": "function",
           "name": "alpha_needle",
-          "line": 24
+          "line": 24,
+          "signature": "pub fn alpha_needle() -> &'static str"
         }
       ]
     },
@@ -47,42 +53,50 @@ expression: response
         {
           "kind": "function",
           "name": "jsEntry",
-          "line": 1
+          "line": 1,
+          "signature": "function jsEntry()"
         },
         {
           "kind": "class",
           "name": "Widget",
-          "line": 5
+          "line": 5,
+          "signature": "class Widget"
         },
         {
           "kind": "method",
           "name": "method",
-          "line": 6
+          "line": 6,
+          "signature": "method()"
         },
         {
           "kind": "function",
           "name": "runTask",
-          "line": 9
+          "line": 9,
+          "signature": "const runTask = async () => 42"
         },
         {
           "kind": "function",
           "name": "exportedArrow",
-          "line": 10
+          "line": 10,
+          "signature": "export const exportedArrow = () => \"exported\""
         },
         {
           "kind": "function",
           "name": "makeThing",
-          "line": 11
+          "line": 11,
+          "signature": "let makeThing = () => new Widget()"
         },
         {
           "kind": "function",
           "name": "nestedSkip",
-          "line": 14
+          "line": 14,
+          "signature": "function nestedSkip()"
         },
         {
           "kind": "class",
           "name": "ExportedThing",
-          "line": 17
+          "line": 17,
+          "signature": "class ExportedThing"
         }
       ]
     },
@@ -93,27 +107,32 @@ expression: response
         {
           "kind": "class",
           "name": "PyAlpha",
-          "line": 1
+          "line": 1,
+          "signature": "class PyAlpha"
         },
         {
           "kind": "function",
           "name": "method",
-          "line": 2
+          "line": 2,
+          "signature": "def method(self)"
         },
         {
           "kind": "function",
           "name": "py_helper",
-          "line": 6
+          "line": 6,
+          "signature": "def py_helper()"
         },
         {
           "kind": "function",
           "name": "async_worker",
-          "line": 10
+          "line": 10,
+          "signature": "async def async_worker()"
         },
         {
           "kind": "function",
           "name": "nested_skip",
-          "line": 15
+          "line": 15,
+          "signature": "def nested_skip()"
         }
       ]
     },
@@ -124,17 +143,20 @@ expression: response
         {
           "kind": "class",
           "name": "BetaCount",
-          "line": 1
+          "line": 1,
+          "signature": "pub type BetaCount = usize"
         },
         {
           "kind": "module",
           "name": "inner",
-          "line": 7
+          "line": 7,
+          "signature": "mod inner"
         },
         {
           "kind": "macro",
           "name": "beta_macro",
-          "line": 9
+          "line": 9,
+          "signature": "macro_rules! beta_macro"
         }
       ]
     },
@@ -145,7 +167,8 @@ expression: response
         {
           "kind": "function",
           "name": "jsConsumer",
-          "line": 1
+          "line": 1,
+          "signature": "function jsConsumer()"
         }
       ]
     },
@@ -156,7 +179,8 @@ expression: response
         {
           "kind": "function",
           "name": "shared_py_helper",
-          "line": 1
+          "line": 1,
+          "signature": "def shared_py_helper()"
         }
       ]
     },
@@ -167,7 +191,8 @@ expression: response
         {
           "kind": "function",
           "name": "python_consumer",
-          "line": 1
+          "line": 1,
+          "signature": "def python_consumer()"
         }
       ]
     },
@@ -178,7 +203,8 @@ expression: response
         {
           "kind": "function",
           "name": "rust_consumer",
-          "line": 1
+          "line": 1,
+          "signature": "pub fn rust_consumer() -> usize"
         }
       ]
     },
@@ -189,7 +215,8 @@ expression: response
         {
           "kind": "function",
           "name": "shared_rust_helper",
-          "line": 1
+          "line": 1,
+          "signature": "pub fn shared_rust_helper() -> usize"
         }
       ]
     },
@@ -200,12 +227,14 @@ expression: response
         {
           "kind": "class",
           "name": "SharedThing",
-          "line": 1
+          "line": 1,
+          "signature": "class SharedThing"
         },
         {
           "kind": "function",
           "name": "sharedFactory",
-          "line": 7
+          "line": 7,
+          "signature": "function sharedFactory()"
         }
       ]
     }
