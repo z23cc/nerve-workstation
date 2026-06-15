@@ -287,7 +287,7 @@ impl ReferenceGraph {
             references
                 .sort_by(|left, right| reference_sort_key(left).cmp(&reference_sort_key(right)));
             for reference in &references {
-                if is_reference_stopword(&reference.name, &file.language) {
+                if is_reference_stopword(&reference.name, language_family(&file.language)) {
                     continue;
                 }
 
@@ -301,7 +301,7 @@ impl ReferenceGraph {
                 }
 
                 let Some(definers) = definitions
-                    .get(&file.language)
+                    .get(language_family(&file.language))
                     .and_then(|by_name| by_name.get(reference.name.as_str()))
                 else {
                     continue;
@@ -333,10 +333,22 @@ impl ReferenceGraph {
     }
 }
 
+/// Resolution family for cross-file reference edges. JS/TS/TSX share one family
+/// so references resolve across `.js`/`.ts`/`.tsx` even though each file's
+/// displayed `language` differs. Other languages map to themselves.
+fn language_family(language: &str) -> &str {
+    match language {
+        "typescript" | "tsx" => "javascript",
+        other => other,
+    }
+}
+
 fn language_file_counts(files: &[IndexedFile]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for file in files {
-        *counts.entry(file.language.clone()).or_insert(0) += 1;
+        *counts
+            .entry(language_family(&file.language).to_string())
+            .or_insert(0) += 1;
     }
     counts
 }
@@ -348,9 +360,9 @@ fn definition_index(
     let mut definitions: BTreeMap<String, BTreeMap<String, BTreeSet<usize>>> = BTreeMap::new();
     for (idx, file) in files.iter().enumerate() {
         for symbol in &file.symbols {
-            if !is_reference_stopword(&symbol.name, &file.language) {
+            if !is_reference_stopword(&symbol.name, language_family(&file.language)) {
                 definitions
-                    .entry(file.language.clone())
+                    .entry(language_family(&file.language).to_string())
                     .or_default()
                     .entry(symbol.name.clone())
                     .or_default()
@@ -386,7 +398,7 @@ fn resolve_import_reference(
 ) -> Option<usize> {
     let import_path = reference.import_path.as_deref()?;
     let referencer = &files[referencer_idx];
-    match referencer.language.as_str() {
+    match language_family(&referencer.language) {
         "rust" => resolve_rust_import(files, referencer, import_path),
         "python" => resolve_python_import(files, referencer, import_path),
         "javascript" => resolve_javascript_import(files, referencer, import_path),
@@ -939,6 +951,34 @@ mod tests {
         let graph = ReferenceGraph::build(&files);
 
         assert_eq!(edge_weight(&graph, &files, "caller.rs", "shared.js"), 0.0);
+    }
+
+    #[test]
+    fn js_family_resolves_references_across_ts_and_tsx_display_languages() {
+        // Display `language` is the accurate per-extension label, but JS/TS/TSX
+        // share one resolution family, so a `.ts` consumer still links to a
+        // `.tsx` definition.
+        let (_dir, provider, snapshot) = temp_provider(&[
+            ("widget.tsx", "export class Widget {}\n"),
+            (
+                "consumer.ts",
+                "export function use(w: Widget): Widget { return new Widget(); }\n",
+            ),
+        ]);
+        let files = indexed_files(&provider, &snapshot);
+        let language_of = |path: &str| {
+            files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap()
+                .language
+                .clone()
+        };
+        assert_eq!(language_of("widget.tsx"), "tsx");
+        assert_eq!(language_of("consumer.ts"), "typescript");
+
+        let graph = ReferenceGraph::build(&files);
+        assert!(edge_weight(&graph, &files, "consumer.ts", "widget.tsx") > 0.0);
     }
 
     #[test]

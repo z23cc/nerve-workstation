@@ -137,12 +137,15 @@ impl Language {
         })
     }
 
-    /// Repo-map language tag. JS/TS/TSX share one tag so cross-file edges match.
+    /// Display language tag for the response `language` field. Repo-map keeps
+    /// JS/TS/TSX in one resolution family separately (see repomap language_family).
     fn name(self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::Python => "python",
-            Self::JavaScript | Self::TypeScript | Self::Tsx => "javascript",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
             Self::Go => "go",
             Self::Java => "java",
             Self::C => "c",
@@ -355,7 +358,7 @@ mod tests {
             "export class Service {\n  greet(name: string): string { return name; }\n}\nexport function make(): Service { return new Service(); }\n",
             "svc.ts",
         );
-        assert_eq!(parsed.language, "javascript");
+        assert_eq!(parsed.language, "typescript");
         assert!(
             has_symbol(&parsed, "Service"),
             "symbols: {:?}",
