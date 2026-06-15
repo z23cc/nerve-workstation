@@ -295,7 +295,7 @@ where
             cancel.check_cancelled()?;
             let response = workspace_context(provider, &snapshot, &args)?;
             cancel.check_cancelled()?;
-            serde_json::to_value(response)?
+            return tool_response_text(&response);
         }
         "build_context" => {
             let args: crate::BuildContextRequest = serde_json::from_value(arguments)?;
@@ -303,27 +303,28 @@ where
             cancel.check_cancelled()?;
             let response = build_context_cancellable(provider, &snapshot, &args, cancel)?;
             cancel.check_cancelled()?;
-            serde_json::to_value(response)?
+            return tool_response_text(&response);
         }
         "file_search" => {
             let args: FileSearchArgs = serde_json::from_value(arguments)?;
             let snapshot = provider.snapshot_arc_cancellable(cancel)?;
             let response =
                 search_snapshot_cancellable(provider, &snapshot, &args.into_request(), cancel)?;
-            serde_json::to_value(response)?
+            return tool_response_text(&response);
         }
         "read_file" => {
             cancel.check_cancelled()?;
             let args: ReadFileArgs = serde_json::from_value(arguments)?;
             let response = read_file(provider, &args.into_request())?;
             cancel.check_cancelled()?;
-            serde_json::to_value(response)?
+            return tool_response_text(&response);
         }
         "get_file_tree" => {
             let args: FileTreeArgs = serde_json::from_value(arguments)?;
             let snapshot = provider.snapshot_arc_cancellable(cancel)?;
             cancel.check_cancelled()?;
-            serde_json::to_value(get_file_tree(&snapshot, args.max_depth.unwrap_or(3)))?
+            let response = get_file_tree(&snapshot, args.max_depth.unwrap_or(3));
+            return tool_response_text(&response);
         }
         "get_code_structure" => {
             let args: CodeStructureArgs = serde_json::from_value(arguments)?;
@@ -332,14 +333,14 @@ where
             let response =
                 get_code_structure(provider, &snapshot, &args.paths.unwrap_or_default())?;
             cancel.check_cancelled()?;
-            serde_json::to_value(response)?
+            return tool_response_text(&response);
         }
         "get_repo_map" => {
             let args: RepoMapArgs = serde_json::from_value(arguments)?;
             let snapshot = provider.snapshot_arc_cancellable(cancel)?;
             let response =
                 get_repo_map_cancellable(provider, &snapshot, &args.into_request(), cancel)?;
-            serde_json::to_value(response)?
+            return tool_response_text(&response);
         }
         other => return Err(DispatchError::UnknownTool(other.to_string())),
     };
@@ -352,6 +353,159 @@ fn tool_response(structured: Value) -> Result<Value, DispatchError> {
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&structured)? }],
         "structuredContent": structured,
     }))
+}
+
+/// Wrap a tool response so the model-facing `content[].text` is a compact,
+/// readable rendering while the full data stays in `structuredContent`. This
+/// avoids dumping verbose JSON (escaped newlines, repeated keys) at the model.
+fn tool_response_text<T>(response: &T) -> Result<Value, DispatchError>
+where
+    T: serde::Serialize + ToolText,
+{
+    let text = response.tool_text();
+    let structured = serde_json::to_value(response)?;
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": structured,
+    }))
+}
+
+/// Compact text rendering used for a tool's `content[].text`.
+trait ToolText {
+    fn tool_text(&self) -> String;
+}
+
+impl ToolText for crate::ReadFileResponse {
+    fn tool_text(&self) -> String {
+        self.content.clone()
+    }
+}
+
+impl ToolText for crate::FileTreeResponse {
+    fn tool_text(&self) -> String {
+        self.tree.clone()
+    }
+}
+
+impl ToolText for crate::WorkspaceContextResponse {
+    fn tool_text(&self) -> String {
+        self.context.clone()
+    }
+}
+
+impl ToolText for crate::BuildContextResponse {
+    fn tool_text(&self) -> String {
+        self.context.clone()
+    }
+}
+
+impl ToolText for crate::SearchResponse {
+    fn tool_text(&self) -> String {
+        let mut out = String::new();
+        if !self.path_matches.is_empty() {
+            out.push_str("path matches:\n");
+            for m in &self.path_matches {
+                out.push_str("  ");
+                out.push_str(&m.display_path);
+                out.push('\n');
+            }
+        }
+        if !self.content_matches.is_empty() {
+            out.push_str("content matches:\n");
+            for m in &self.content_matches {
+                out.push_str(&format!(
+                    "  {}:{}:{}: {}\n",
+                    m.display_path,
+                    m.line,
+                    m.column,
+                    m.text.trim_end()
+                ));
+            }
+        }
+        if self.path_matches.is_empty() && self.content_matches.is_empty() {
+            out.push_str("(no matches)\n");
+        }
+        let totals = &self.totals;
+        out.push_str(&format!(
+            "totals: {} path, {} content, {} files scanned{}\n",
+            totals.path_matches,
+            totals.content_matches,
+            totals.scanned_files,
+            if totals.totals_are_lower_bound {
+                " (lower bound)"
+            } else {
+                ""
+            }
+        ));
+        out
+    }
+}
+
+impl ToolText for crate::repomap::RepoMapResponse {
+    fn tool_text(&self) -> String {
+        let mut out = String::new();
+        for file in &self.files {
+            out.push_str(&file.score);
+            out.push('\t');
+            out.push_str(&file.display_path);
+            let names: Vec<&str> = file
+                .symbols
+                .iter()
+                .take(8)
+                .map(|s| s.name.as_str())
+                .collect();
+            if !names.is_empty() {
+                out.push('\t');
+                out.push_str(&names.join(", "));
+                if file.symbols.len() > names.len() {
+                    out.push_str(", …");
+                }
+            }
+            out.push('\n');
+        }
+        if self.files.is_empty() {
+            out.push_str("(no ranked files)\n");
+        }
+        if !self.diagnostics.is_empty() {
+            out.push_str(&format!(
+                "({} files skipped; parse diagnostics in structuredContent)\n",
+                self.diagnostics.len()
+            ));
+        }
+        out
+    }
+}
+
+impl ToolText for crate::codemap::CodeStructureResponse {
+    fn tool_text(&self) -> String {
+        let mut out = String::new();
+        for file in &self.files {
+            out.push_str(&file.path);
+            out.push('\n');
+            for symbol in &file.symbols {
+                out.push_str(&format!(
+                    "  {} {} ({})\n",
+                    symbol.kind, symbol.name, symbol.line
+                ));
+            }
+        }
+        if self.files.is_empty() {
+            out.push_str("(no top-level symbols)\n");
+        }
+        if self.omitted > 0 {
+            out.push_str(&format!(
+                "({} files omitted: unsupported or no symbols)\n",
+                self.omitted
+            ));
+        }
+        if !self.diagnostics.is_empty() {
+            out.push_str(&format!(
+                "({} parse diagnostics in structuredContent)\n",
+                self.diagnostics.len()
+            ));
+        }
+        out
+    }
 }
 
 /// Decode one JSON tool-call params object and encode the tool response as JSON.
@@ -677,6 +831,88 @@ mod tests {
         assert_eq!(args.max_results, 10);
         assert_eq!(args.max_content_bytes, 2048);
         assert_eq!(args.context_lines, 2);
+    }
+
+    #[test]
+    fn tool_text_read_file_is_raw_content() {
+        let response = crate::ReadFileResponse {
+            path: "a.txt".into(),
+            display_path: "a.txt".to_string(),
+            first_line: 1,
+            last_line: 2,
+            total_lines: 2,
+            content: "one\ntwo\n".to_string(),
+        };
+        assert_eq!(response.tool_text(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn tool_text_file_tree_is_ascii() {
+        let response = crate::FileTreeResponse {
+            roots: vec![],
+            tree: "src/\n  lib.rs\n".to_string(),
+            roots_count: 1,
+            was_truncated: false,
+            uses_legend: false,
+            omitted: 0,
+        };
+        assert_eq!(response.tool_text(), "src/\n  lib.rs\n");
+    }
+
+    #[test]
+    fn tool_text_code_structure_lists_symbols() {
+        let response = crate::codemap::CodeStructureResponse {
+            files: vec![crate::codemap::FileCodeStructure {
+                path: "src/lib.rs".to_string(),
+                language: "rust".to_string(),
+                symbols: vec![crate::codemap::CodeSymbol {
+                    kind: "function".to_string(),
+                    name: "needle".to_string(),
+                    line: 12,
+                }],
+            }],
+            diagnostics: vec![],
+            omitted: 0,
+        };
+        let text = response.tool_text();
+        assert!(text.contains("src/lib.rs"));
+        assert!(text.contains("function needle (12)"));
+        assert!(!text.contains("\"symbols\""));
+    }
+
+    #[test]
+    fn read_file_content_text_is_raw_not_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").expect("write");
+        let registry: WorkspaceRegistry<FsCatalogProvider> = WorkspaceRegistry::new();
+        registry.insert("default", Arc::new(provider_for(dir.path())));
+        let response = handle_tool_call_with_resolver(
+            &registry,
+            &json!({ "name": "read_file", "arguments": { "path": "a.txt" } }),
+        )
+        .expect("read_file");
+        assert_eq!(response["content"][0]["text"], json!("one\ntwo\nthree\n"));
+        assert_eq!(response["structuredContent"]["total_lines"], json!(3));
+    }
+
+    #[test]
+    fn file_tree_content_text_is_ascii_not_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), "x\n").expect("write");
+        let registry: WorkspaceRegistry<FsCatalogProvider> = WorkspaceRegistry::new();
+        registry.insert("default", Arc::new(provider_for(dir.path())));
+        let response = handle_tool_call_with_resolver(
+            &registry,
+            &json!({ "name": "get_file_tree", "arguments": {} }),
+        )
+        .expect("get_file_tree");
+        let text = response["content"][0]["text"].as_str().expect("text");
+        assert!(
+            !text.contains("\"children\""),
+            "tree text must not be raw JSON"
+        );
+        assert!(text.contains("a.txt"));
+        assert!(response["structuredContent"]["roots"].is_array());
     }
 
     fn provider_for(path: &std::path::Path) -> FsCatalogProvider {
