@@ -2,47 +2,49 @@
 #
 # release.sh — cut a release and push the Homebrew formula.
 #
-# Versioning scheme: start at 0.0.1, increment the patch by +0.0.1 each release
-# (0.0.1 -> 0.0.2 -> 0.0.3 ...). The workspace version lives in one place:
-# the root Cargo.toml [workspace.package] version (all crates inherit it).
+# Versioning scheme: start at 0.0.1, increment the patch by +0.0.1 each release.
+# The workspace version lives in one place: root Cargo.toml [workspace.package]
+# version (all crates inherit it via version.workspace = true).
 #
-# Distribution:
-#   * macOS arm64 (where brew is available) -> a real Homebrew **bottle** tagged
-#     for this machine's macOS. A bottle is *poured*, not built, so `brew install`
-#     skips the build-from-source Xcode-version gate that otherwise blocks installs
-#     on pre-release macOS. The bottle only matches the macOS version it was built
-#     on; other macOS versions / Intel / Linux fall back to building from source.
-#   * Source builds use `cargo install` (Homebrew installs a temporary `rust`).
+# Modes:
+#   Scripts/release.sh                # bump +0.0.1, then release
+#   Scripts/release.sh --current      # release the CURRENT version, no bump
+#   Scripts/release.sh --bottle-only  # add THIS machine's bottle to the already
+#                                      # released current version and MERGE its
+#                                      # sha256 into the tap formula's bottle block
+#                                      # (does not overwrite other tags' bottles)
 #
-# Usage:
-#   Scripts/release.sh            # bump +0.0.1, then release
-#   Scripts/release.sh --current  # release the CURRENT version, no bump
+# Distribution: macOS arm64 (with brew) gets a poured bottle tagged for the
+# runner's macOS; everything else builds from source via `cargo install`. Because
+# GitHub Actions has no macOS 27 runner, use --bottle-only locally to add an
+# arm64_golden_gate bottle to a CI release so this machine also pours.
 #
 set -euo pipefail
 
 OWNER="z23cc"
 REPO="context-engine-rs"
-TAP_REPO="homebrew-tap"   # Homebrew requires the "homebrew-" prefix
+TAP_REPO="homebrew-tap"
 FORMULA="ctx-mcp"
 BIN="ctx-mcp"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-bump=true
-[[ "${1:-}" == "--current" ]] && bump=false
+mode="bump"
+case "${1:-}" in
+  ""|--bump)     mode="bump" ;;
+  --current)     mode="current" ;;
+  --bottle-only) mode="bottle-only" ;;
+  *) echo "usage: release.sh [--current|--bottle-only]"; exit 1 ;;
+esac
 
-# ---- preconditions ----
+# ---- preconditions (all modes) ----
 command -v gh >/dev/null    || { echo "error: gh CLI not found"; exit 1; }
 command -v cargo >/dev/null || { echo "error: cargo not found"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "error: gh not authenticated"; exit 1; }
-
 branch="$(git rev-parse --abbrev-ref HEAD)"
 [[ "$branch" == "main" ]] || { echo "error: not on main (on '$branch')"; exit 1; }
-
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "error: working tree not clean — commit or stash first"; exit 1
-fi
+[[ -z "$(git status --porcelain)" ]] || { echo "error: working tree not clean — commit or stash first"; exit 1; }
 
 read_version() {
   awk '
@@ -51,57 +53,16 @@ read_version() {
     inpkg && /^version[[:space:]]*=/ { gsub(/[^0-9.]/, ""); print; exit }
   ' Cargo.toml
 }
-
 CUR="$(read_version)"
 [[ -n "$CUR" ]] || { echo "error: could not read [workspace.package] version"; exit 1; }
-
-if $bump; then
-  IFS=. read -r MA MI PA <<<"$CUR"
-  NEW="$MA.$MI.$((PA + 1))"
-else
-  NEW="$CUR"
-fi
-TAG="v$NEW"
-
-echo ">> current version : $CUR"
-echo ">> release version : $NEW  (tag $TAG)"
-
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-  echo "error: tag $TAG already exists locally"; exit 1
-fi
-if gh release view "$TAG" -R "$OWNER/$REPO" >/dev/null 2>&1; then
-  echo "error: release $TAG already exists on GitHub"; exit 1
-fi
-
-# ---- bump commit ----
-if $bump; then
-  awk -v new="$NEW" '
-    /^\[workspace\.package\]/ { inpkg=1; print; next }
-    /^\[/ && !/^\[workspace\.package\]/ { inpkg=0 }
-    inpkg && /^version[[:space:]]*=/ { print "version = \"" new "\""; next }
-    { print }
-  ' Cargo.toml >Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
-  cargo update --workspace >/dev/null
-  git add Cargo.toml Cargo.lock
-  git commit -m "release: $TAG"
-fi
-
-# ---- tag + push ----
-git tag -a "$TAG" -m "$TAG"
-git push origin main
-git push origin "$TAG"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# ---- source tarball (used for source builds on every platform) ----
-SRC_TARBALL="$TMP/${REPO}-${NEW}.tar.gz"
-git archive --format=tar --prefix="${REPO}-${NEW}/" "$TAG" | gzip -n >"$SRC_TARBALL"
-SRC_SHA="$(shasum -a 256 "$SRC_TARBALL" | awk '{print $1}')"
-SRC_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/${REPO}-${NEW}.tar.gz"
-echo ">> source sha256   : $SRC_SHA"
+bottle_tag() { brew ruby -e 'require "utils/bottles"; puts Utils::Bottles.tag' 2>/dev/null || true; }
 
 # ---- formula generator (arg1=1 includes the bottle block) ----
+# Uses globals: OWNER REPO BIN NEW SRC_URL SRC_SHA HAS_BOTTLE BTAG BOTTLE_ROOT BOTTLE_SHA
 gen_formula() {
   cat <<EOF
 class CtxMcp < Formula
@@ -111,7 +72,7 @@ class CtxMcp < Formula
   sha256 "$SRC_SHA"
   license any_of: ["MIT", "Apache-2.0"]
 EOF
-  if [[ "${1:-0}" == "1" && "$HAS_BOTTLE" == "1" ]]; then
+  if [[ "${1:-0}" == "1" && "${HAS_BOTTLE:-0}" == "1" ]]; then
     cat <<EOF
 
   bottle do
@@ -135,31 +96,151 @@ end
 EOF
 }
 
-# ---- Homebrew bottle for this machine's macOS (arm64 macOS with brew) ----
+# ---- bottle builder: build from $1 (a source dir) and package a bottle ----
+# Requires BTAG, NEW, TAG, SRC_URL, SRC_SHA. Sets BOTTLE, BOTTLE_SHA, BOTTLE_ROOT.
+build_bottle() {
+  local srcdir="$1"
+  echo ">> building Homebrew bottle ($BTAG)"
+  ( cd "$srcdir" && cargo build --release -p ctx-mcp )
+  "$srcdir/target/release/$BIN" --version >/dev/null # smoke test: abort if it can't run
+  local keg="$TMP/bottle/$BIN/$NEW"
+  rm -rf "$TMP/bottle"; mkdir -p "$keg/bin" "$keg/.brew"
+  cp "$srcdir/target/release/$BIN" "$keg/bin/$BIN"
+  [[ -f "$srcdir/LICENSE" ]] && cp "$srcdir/LICENSE" "$keg/LICENSE"
+  gen_formula 0 >"$keg/.brew/$BIN.rb"
+  BOTTLE="$TMP/${BIN}-${NEW}.${BTAG}.bottle.tar.gz"
+  ( cd "$TMP/bottle" && tar -czf "$BOTTLE" "$BIN/$NEW" )
+  BOTTLE_SHA="$(shasum -a 256 "$BOTTLE" | awk '{print $1}')"
+  BOTTLE_ROOT="https://github.com/$OWNER/$REPO/releases/download/$TAG"
+}
+
+# ========================================================================
+# --bottle-only: add this machine's bottle to an already-released version
+# ========================================================================
+if [[ "$mode" == "bottle-only" ]]; then
+  NEW="$CUR"; TAG="v$NEW"
+  [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] && command -v brew >/dev/null \
+    || { echo "error: --bottle-only must run on arm64 macOS with Homebrew"; exit 1; }
+  gh release view "$TAG" -R "$OWNER/$REPO" >/dev/null 2>&1 \
+    || { echo "error: release $TAG does not exist — release $NEW first"; exit 1; }
+  if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    git fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" \
+      || { echo "error: tag $TAG not found"; exit 1; }
+  fi
+  BTAG="$(bottle_tag)"; [[ -n "$BTAG" ]] || { echo "error: could not determine Homebrew bottle tag"; exit 1; }
+
+  TAPDIR="$TMP/tap"
+  git clone -q "git@github.com:$OWNER/$TAP_REPO.git" "$TAPDIR" 2>/dev/null \
+    || git clone -q "https://github.com/$OWNER/$TAP_REPO.git" "$TAPDIR"
+  FRM="$TAPDIR/Formula/${FORMULA}.rb"
+  [[ -f "$FRM" ]] || { echo "error: $FORMULA.rb not found in tap"; exit 1; }
+  fver="$(grep -oE 'releases/download/v[0-9]+\.[0-9]+\.[0-9]+/' "$FRM" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  [[ "$fver" == "$NEW" ]] || { echo "error: tap formula is at ${fver:-unknown}, not $NEW — release $NEW first"; exit 1; }
+
+  SRC_URL="$(awk -F'"' '/^  url /{print $2; exit}' "$FRM")"
+  SRC_SHA="$(awk -F'"' '/^  sha256 "/{print $2; exit}' "$FRM")"
+  HAS_BOTTLE=0
+
+  # build from the released tag's exact source (isolated), not the working tree
+  SRCDIR="$TMP/src"; mkdir -p "$SRCDIR"
+  git archive "$TAG" | tar -x -C "$SRCDIR"
+  build_bottle "$SRCDIR"
+
+  echo ">> uploading $BTAG bottle to $TAG"
+  gh release upload "$TAG" "$BOTTLE" -R "$OWNER/$REPO" --clobber 2>&1 | tail -1
+
+  # merge the bottle line into the existing formula's bottle block
+  if grep -qE '^[[:space:]]*bottle do' "$FRM"; then
+    awk -v btag="$BTAG" -v sha="$BOTTLE_SHA" '
+      /^[[:space:]]*bottle do[[:space:]]*$/ { inblk=1; print; next }
+      inblk && index($0, ", " btag ":") {
+        print "    sha256 cellar: :any_skip_relocation, " btag ": \"" sha "\""; replaced=1; next
+      }
+      inblk && /^[[:space:]]*end[[:space:]]*$/ {
+        if (!replaced) print "    sha256 cellar: :any_skip_relocation, " btag ": \"" sha "\""
+        inblk=0; print; next
+      }
+      { print }
+    ' "$FRM" >"$FRM.tmp" && mv "$FRM.tmp" "$FRM"
+  else
+    awk -v btag="$BTAG" -v sha="$BOTTLE_SHA" -v root="$BOTTLE_ROOT" '
+      { print }
+      /^  license / && !done {
+        print ""; print "  bottle do"; print "    root_url \"" root "\""
+        print "    sha256 cellar: :any_skip_relocation, " btag ": \"" sha "\""; print "  end"; done=1
+      }
+    ' "$FRM" >"$FRM.tmp" && mv "$FRM.tmp" "$FRM"
+  fi
+
+  brew style "$FRM" >/dev/null 2>&1 || echo ">> warn: brew style reported issues (continuing)"
+  git -C "$TAPDIR" add "Formula/${FORMULA}.rb"
+  if git -C "$TAPDIR" diff --cached --quiet; then
+    echo ">> $BTAG bottle already current in the formula; nothing to push"; exit 0
+  fi
+  git -C "$TAPDIR" commit -q -m "$FORMULA $NEW: add $BTAG bottle"
+  git -C "$TAPDIR" push -q
+  echo
+  echo "added $BTAG bottle to $TAG and merged it into the tap formula"
+  echo "upgrade with: brew upgrade $OWNER/tap/$FORMULA"
+  exit 0
+fi
+
+# ========================================================================
+# normal release (bump / current)
+# ========================================================================
+if [[ "$mode" == "bump" ]]; then
+  IFS=. read -r MA MI PA <<<"$CUR"; NEW="$MA.$MI.$((PA + 1))"
+else
+  NEW="$CUR"
+fi
+TAG="v$NEW"
+echo ">> current version : $CUR"
+echo ">> release version : $NEW  (tag $TAG)"
+
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+  echo "error: tag $TAG already exists locally"; exit 1
+fi
+if gh release view "$TAG" -R "$OWNER/$REPO" >/dev/null 2>&1; then
+  echo "error: release $TAG already exists on GitHub"; exit 1
+fi
+
+if [[ "$mode" == "bump" ]]; then
+  awk -v new="$NEW" '
+    /^\[workspace\.package\]/ { inpkg=1; print; next }
+    /^\[/ && !/^\[workspace\.package\]/ { inpkg=0 }
+    inpkg && /^version[[:space:]]*=/ { print "version = \"" new "\""; next }
+    { print }
+  ' Cargo.toml >Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+  cargo update --workspace >/dev/null
+  git add Cargo.toml Cargo.lock
+  git commit -m "release: $TAG"
+fi
+
+git tag -a "$TAG" -m "$TAG"
+git push origin main
+git push origin "$TAG"
+
+# ---- source tarball ----
+SRC_TARBALL="$TMP/${REPO}-${NEW}.tar.gz"
+git archive --format=tar --prefix="${REPO}-${NEW}/" "$TAG" | gzip -n >"$SRC_TARBALL"
+SRC_SHA="$(shasum -a 256 "$SRC_TARBALL" | awk '{print $1}')"
+SRC_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/${REPO}-${NEW}.tar.gz"
+echo ">> source sha256   : $SRC_SHA"
+
+# ---- bottle for this machine's macOS ----
 HAS_BOTTLE=0
 ASSETS=("$SRC_TARBALL")
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] && command -v brew >/dev/null; then
-  BTAG="$(brew ruby -e 'require "utils/bottles"; puts Utils::Bottles.tag' 2>/dev/null || true)"
+  BTAG="$(bottle_tag)"
   if [[ -n "$BTAG" ]]; then
-    echo ">> building Homebrew bottle ($BTAG)"
-    cargo build --release -p ctx-mcp
-    "target/release/$BIN" --version >/dev/null # smoke test: abort if the binary cannot run
-    KEG="$TMP/bottle/$BIN/$NEW"
-    mkdir -p "$KEG/bin" "$KEG/.brew"
-    cp "target/release/$BIN" "$KEG/bin/$BIN"
-    [[ -f LICENSE ]] && cp LICENSE "$KEG/LICENSE"
-    gen_formula 0 >"$KEG/.brew/$BIN.rb" # in-keg reference copy (no bottle block; avoids a checksum cycle)
-    BOTTLE="$TMP/${BIN}-${NEW}.${BTAG}.bottle.tar.gz"
-    ( cd "$TMP/bottle" && tar -czf "$BOTTLE" "$BIN/$NEW" )
-    BOTTLE_SHA="$(shasum -a 256 "$BOTTLE" | awk '{print $1}')"
-    BOTTLE_ROOT="https://github.com/$OWNER/$REPO/releases/download/$TAG"
+    build_bottle "$ROOT"
     HAS_BOTTLE=1
     ASSETS+=("$BOTTLE")
     echo ">> bottle ($BTAG) sha256: $BOTTLE_SHA"
   fi
 fi
 
-# ---- github release (source + bottle if built) ----
+# ---- github release ----
 gh release create "$TAG" "${ASSETS[@]}" \
   -R "$OWNER/$REPO" \
   --title "$TAG" \
@@ -172,7 +253,7 @@ if ! gh repo view "$OWNER/$TAP_REPO" >/dev/null 2>&1; then
     --description "Homebrew tap for $REPO ($BIN)"
 fi
 
-# ---- clone tap (retry: a freshly created repo may lag a moment) ----
+# ---- clone tap + push formula ----
 TAPDIR="$TMP/tap"
 cloned=false
 for _ in 1 2 3 4 5; do
@@ -185,7 +266,6 @@ $cloned || git clone -q "https://github.com/$OWNER/$TAP_REPO.git" "$TAPDIR"
 
 mkdir -p "$TAPDIR/Formula"
 gen_formula 1 >"$TAPDIR/Formula/${FORMULA}.rb"
-
 git -C "$TAPDIR" add "Formula/${FORMULA}.rb"
 git -C "$TAPDIR" commit -q -m "$FORMULA $NEW"
 git -C "$TAPDIR" branch -M main
@@ -193,7 +273,5 @@ git -C "$TAPDIR" push -q -u origin main
 
 echo
 echo "released $TAG and pushed formula to $OWNER/$TAP_REPO"
-if [[ "$HAS_BOTTLE" == "1" ]]; then
-  echo "macOS ($BTAG): brew pours the bottle (no compile, no Xcode gate)"
-fi
+[[ "${HAS_BOTTLE:-0}" == "1" ]] && echo "macOS ($BTAG): brew pours the bottle (no compile)"
 echo "install with: brew install $OWNER/tap/$FORMULA"
