@@ -40,3 +40,10 @@ path = "fuzz_targets/repomap_tokenizer.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "edit_engine"
+path = "fuzz_targets/edit_engine.rs"
+test = false
+doc = false
+bench = false
