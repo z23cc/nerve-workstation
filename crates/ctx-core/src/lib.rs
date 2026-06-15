@@ -18,6 +18,7 @@ pub mod selection;
 pub mod snapshot;
 pub mod token;
 pub mod tree;
+pub mod workspace;
 pub mod workspace_context;
 
 pub use build_context::{
@@ -31,7 +32,8 @@ pub use codemap::get_code_structure;
 pub use dispatch::{
     DispatchError, dispatch_error_json, dispatch_error_kind, handle_tool_call,
     handle_tool_call_cancellable, handle_tool_call_json, handle_tool_call_json_cancellable,
-    tool_specs,
+    handle_tool_call_json_with_resolver, handle_tool_call_json_with_resolver_cancellable,
+    handle_tool_call_with_resolver, handle_tool_call_with_resolver_cancellable, tool_specs,
 };
 pub use models::*;
 pub use port::CatalogProvider;
@@ -46,6 +48,14 @@ pub use selection::{
 pub use snapshot::CatalogSnapshot;
 pub use token::count_tokens;
 pub use tree::get_file_tree;
+#[cfg(not(target_arch = "wasm32"))]
+pub use workspace::{
+    ManageWorkspacesOp, ManageWorkspacesRequest, ManageWorkspacesResponse, WorkspaceInfo,
+};
+pub use workspace::{
+    ResolvedWorkspaceProvider, SingletonWorkspaceResolver, WorkspaceId, WorkspaceRegistry,
+    WorkspaceResolver,
+};
 pub use workspace_context::{
     WorkspaceContextInclude, WorkspaceContextRequest, WorkspaceContextResponse, workspace_context,
     workspace_context_for_selection,

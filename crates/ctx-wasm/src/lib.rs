@@ -1,15 +1,19 @@
 //! wasm-bindgen surface for browser/edge hosts.
 //!
-//! Hosts feed file path/content pairs into an in-memory catalog and then pass
-//! transport-neutral tool-call JSON through ctx-core dispatch.
+//! Hosts feed named workspace file path/content pairs into in-memory catalogs and
+//! then pass transport-neutral tool-call JSON through ctx-core dispatch.
 
-use ctx_core::{HostFile, MemoryCatalogProvider, handle_tool_call_json};
+use ctx_core::{
+    HostFile, MemoryCatalogProvider, WorkspaceRegistry, handle_tool_call_json_with_resolver,
+};
 use serde::Deserialize;
-use std::cell::RefCell;
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
+const DEFAULT_WORKSPACE: &str = "default";
+
 thread_local! {
-    static PROVIDER: RefCell<MemoryCatalogProvider> = RefCell::new(MemoryCatalogProvider::empty());
+    static REGISTRY: WorkspaceRegistry<MemoryCatalogProvider> = WorkspaceRegistry::new();
 }
 
 #[derive(Debug, Deserialize)]
@@ -18,23 +22,36 @@ struct FeedFile {
     content: String,
 }
 
-/// Replace the in-memory catalog with host-provided files.
+/// Replace the default in-memory workspace with host-provided files.
 ///
 /// `files_json` must be a JSON array of `{ "path": string, "content": string }`.
 /// Paths are logical catalog paths, not filesystem paths; no filesystem scan or
-/// ignore processing occurs.
+/// ignore processing occurs. This preserves the original single-workspace API by
+/// registering the files under the `default` workspace.
 #[wasm_bindgen]
 pub fn feed_files(files_json: &str) -> Result<(), JsValue> {
+    feed_workspace(DEFAULT_WORKSPACE, files_json)
+}
+
+/// Replace one named in-memory workspace with host-provided files.
+///
+/// `workspace_name` is the value later supplied as tool-call `arguments.workspace`.
+/// `files_json` must be a JSON array of `{ "path": string, "content": string }`.
+#[wasm_bindgen]
+pub fn feed_workspace(workspace_name: &str, files_json: &str) -> Result<(), JsValue> {
+    if workspace_name.is_empty() {
+        return Err(JsValue::from_str("workspace_name must not be empty"));
+    }
     let files: Vec<FeedFile> = serde_json::from_str(files_json)
-        .map_err(|err| JsValue::from_str(&format!("invalid feed_files json: {err}")))?;
+        .map_err(|err| JsValue::from_str(&format!("invalid feed_workspace json: {err}")))?;
     let host_files = files
         .into_iter()
         .map(|file| HostFile::new(file.path, file.content.into_bytes()))
         .collect();
     let provider = MemoryCatalogProvider::new(host_files)
         .map_err(|err| JsValue::from_str(&err.to_string()))?;
-    PROVIDER.with(|slot| {
-        *slot.borrow_mut() = provider;
+    REGISTRY.with(|registry| {
+        registry.insert(workspace_name, Arc::new(provider));
     });
     Ok(())
 }
@@ -42,12 +59,12 @@ pub fn feed_files(files_json: &str) -> Result<(), JsValue> {
 /// Handle one ctx-core tool-call params JSON object and return JSON.
 ///
 /// The input is the same transport-neutral shape accepted by
-/// `ctx_core::handle_tool_call_json`, for example:
-/// `{ "name": "file_search", "arguments": { "pattern": "needle" } }`.
+/// `ctx_core::handle_tool_call_json_with_resolver`, for example:
+/// `{ "name": "file_search", "arguments": { "workspace": "default", "pattern": "needle" } }`.
 #[wasm_bindgen]
 pub fn handle_request(request_json: &str) -> String {
-    PROVIDER.with(
-        |slot| match handle_tool_call_json(&*slot.borrow(), request_json) {
+    REGISTRY.with(
+        |registry| match handle_tool_call_json_with_resolver(registry, request_json) {
             Ok(response) => response,
             Err(err) => {
                 ctx_core::dispatch_error_json(ctx_core::dispatch_error_kind(&err), &err.to_string())

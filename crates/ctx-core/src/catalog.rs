@@ -428,6 +428,11 @@ impl FsCatalogProvider {
             .clear();
     }
 
+    #[must_use]
+    pub fn roots(&self) -> &[RootRef] {
+        self.policy.roots()
+    }
+
     fn cached_snapshot(&self, now: Instant) -> Option<Arc<CatalogSnapshot>> {
         let guard = self.cache.snapshot.read().expect("snapshot cache lock");
         guard.as_ref().and_then(|cached| {

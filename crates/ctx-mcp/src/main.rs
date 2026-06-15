@@ -1,14 +1,19 @@
 //! Stdio JSON-RPC server and small CLI for the context engine.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use ctx_core::{FsCatalogProvider, RootPolicy, ScanOptions, handle_tool_call, tool_specs};
+use ctx_core::{
+    FsCatalogProvider, RootPolicy, ScanOptions, WorkspaceRegistry,
+    handle_tool_call_json_with_resolver, tool_specs,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     io::{self, BufRead, Write},
     path::PathBuf,
     process::Command,
+    str::FromStr,
 };
 
 #[derive(Debug, Parser)]
@@ -30,12 +35,41 @@ enum CommandKind {
 
 #[derive(Debug, Args, Clone)]
 struct ServeArgs {
-    /// Allowed root. Repeatable. If absent, operations fail closed.
+    /// Allowed root for the default workspace. Repeatable. If absent, default operations fail closed.
     #[arg(long = "root")]
     roots: Vec<PathBuf>,
-    /// Maximum catalog entries.
+    /// Additional named workspace as name=path. Repeat to add workspaces or multiple roots per name.
+    #[arg(long = "workspace")]
+    workspaces: Vec<WorkspaceArg>,
+    /// Maximum catalog entries per workspace.
     #[arg(long, default_value_t = 10_000)]
     max_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceArg {
+    name: String,
+    path: PathBuf,
+}
+
+impl FromStr for WorkspaceArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (name, path) = value
+            .split_once('=')
+            .ok_or_else(|| "workspace must be name=path".to_string())?;
+        if name.is_empty() {
+            return Err("workspace name must not be empty".to_string());
+        }
+        if path.is_empty() {
+            return Err("workspace path must not be empty".to_string());
+        }
+        Ok(Self {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        })
+    }
 }
 
 #[derive(Debug, Args)]
@@ -61,19 +95,45 @@ fn main() -> Result<()> {
     }
 }
 
-fn provider(args: &ServeArgs) -> Result<FsCatalogProvider> {
-    let policy = RootPolicy::new(args.roots.clone()).context("invalid root policy")?;
-    Ok(FsCatalogProvider::new(
-        policy,
-        ScanOptions {
-            max_entries: args.max_entries,
-            ..ScanOptions::default()
-        },
-    ))
+fn scan_options(args: &ServeArgs) -> ScanOptions {
+    ScanOptions {
+        max_entries: args.max_entries,
+        ..ScanOptions::default()
+    }
+}
+
+fn provider_for_roots(roots: Vec<PathBuf>, options: ScanOptions) -> Result<FsCatalogProvider> {
+    let policy = RootPolicy::new(roots).context("invalid root policy")?;
+    Ok(FsCatalogProvider::new(policy, options))
+}
+
+fn registry(args: &ServeArgs) -> Result<WorkspaceRegistry> {
+    let options = scan_options(args);
+    let registry: WorkspaceRegistry<FsCatalogProvider> =
+        WorkspaceRegistry::with_scan_options(options.clone());
+    registry.insert(
+        "default",
+        std::sync::Arc::new(provider_for_roots(args.roots.clone(), options.clone())?),
+    );
+
+    let mut grouped: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for workspace in &args.workspaces {
+        if workspace.name == "default" {
+            bail!("--workspace default=... conflicts with --root default workspace");
+        }
+        grouped
+            .entry(workspace.name.clone())
+            .or_default()
+            .push(workspace.path.clone());
+    }
+    for (name, roots) in grouped {
+        registry.add_workspace(name, roots)?;
+    }
+    Ok(registry)
 }
 
 fn serve(args: ServeArgs) -> Result<()> {
-    let provider = provider(&args)?;
+    let registry = registry(&args)?;
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut initialized = false;
@@ -94,7 +154,7 @@ fn serve(args: ServeArgs) -> Result<()> {
             }
         };
 
-        let maybe_response = handle_message(&provider, &mut initialized, request);
+        let maybe_response = handle_message(&registry, &mut initialized, request);
         if let Some(response) = maybe_response {
             write_response(&mut stdout, response)?;
         }
@@ -117,7 +177,7 @@ struct RpcMessage {
 }
 
 fn handle_message(
-    provider: &FsCatalogProvider,
+    registry: &WorkspaceRegistry,
     initialized: &mut bool,
     message: RpcMessage,
 ) -> Option<Value> {
@@ -137,10 +197,19 @@ fn handle_message(
         }
         _ if !*initialized => Some(jsonrpc_error(id, -32002, "not initialized")),
         "tools/list" => Some(jsonrpc_result(id, json!({ "tools": tool_specs() }))),
-        "tools/call" => Some(match handle_tool_call(provider, &message.params) {
-            Ok(value) => jsonrpc_result(id, value),
-            Err(err) => jsonrpc_error(id, -32000, err.to_string()),
-        }),
+        "tools/call" => Some(
+            match serde_json::to_string(&message.params)
+                .map_err(|err| err.to_string())
+                .and_then(|request| {
+                    handle_tool_call_json_with_resolver(registry, &request)
+                        .map_err(|err| err.to_string())
+                })
+                .and_then(|response| serde_json::from_str(&response).map_err(|err| err.to_string()))
+            {
+                Ok(value) => jsonrpc_result(id, value),
+                Err(err) => jsonrpc_error(id, -32000, err),
+            },
+        ),
         _ => Some(jsonrpc_error(id, -32601, "method not found")),
     }
 }
@@ -194,17 +263,26 @@ fn config_roots(args: ServeArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn args_with(roots: Vec<PathBuf>, workspaces: Vec<WorkspaceArg>) -> ServeArgs {
+        ServeArgs {
+            roots,
+            workspaces,
+            max_entries: 10_000,
+        }
+    }
 
     #[test]
     fn requires_initialized_after_initialize() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
+        let registry: WorkspaceRegistry<FsCatalogProvider> = WorkspaceRegistry::new();
+        registry
+            .add_workspace("default", vec![dir.path().to_path_buf()])
+            .expect("workspace");
         let mut initialized = false;
         let response = handle_message(
-            &provider,
+            &registry,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(1)),
@@ -214,5 +292,159 @@ mod tests {
         )
         .expect("response");
         assert_eq!(response["error"]["message"], "not initialized");
+    }
+
+    #[test]
+    fn serve_args_build_default_and_named_workspaces() {
+        let default_dir = tempfile::tempdir().expect("default tempdir");
+        let named_dir = tempfile::tempdir().expect("named tempdir");
+        fs::write(
+            default_dir.path().join("default.txt"),
+            "alpha
+",
+        )
+        .expect("default write");
+        fs::write(
+            named_dir.path().join("named.txt"),
+            "beta
+",
+        )
+        .expect("named write");
+
+        let registry = registry(&args_with(
+            vec![default_dir.path().to_path_buf()],
+            vec![WorkspaceArg {
+                name: "named".to_string(),
+                path: named_dir.path().to_path_buf(),
+            }],
+        ))
+        .expect("registry");
+        assert_eq!(registry.len(), 2);
+
+        let mut initialized = true;
+        let response = handle_message(
+            &registry,
+            &mut initialized,
+            RpcMessage {
+                id: Some(json!(1)),
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "file_search",
+                    "arguments": {
+                        "workspace": "named",
+                        "pattern": "beta",
+                        "mode": "content"
+                    }
+                }),
+            },
+        )
+        .expect("response");
+        assert_eq!(
+            response["result"]["structuredContent"]["content_matches"][0]["path"],
+            Value::String("named.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn manage_workspaces_add_remove_affects_later_routing() {
+        let default_dir = tempfile::tempdir().expect("default tempdir");
+        let dynamic_dir = tempfile::tempdir().expect("dynamic tempdir");
+        fs::write(
+            default_dir.path().join("default.txt"),
+            "alpha
+",
+        )
+        .expect("default write");
+        fs::write(
+            dynamic_dir.path().join("dynamic.txt"),
+            "dynamic
+",
+        )
+        .expect("dynamic write");
+
+        let registry = registry(&args_with(
+            vec![default_dir.path().to_path_buf()],
+            Vec::new(),
+        ))
+        .expect("registry");
+        let mut initialized = true;
+
+        let add = handle_message(
+            &registry,
+            &mut initialized,
+            RpcMessage {
+                id: Some(json!(1)),
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "manage_workspaces",
+                    "arguments": {
+                        "op": "add",
+                        "name": "dynamic",
+                        "roots": [dynamic_dir.path()]
+                    }
+                }),
+            },
+        )
+        .expect("add response");
+        assert_eq!(
+            add["result"]["structuredContent"]["workspaces"][0]["name"],
+            Value::String("dynamic".to_string())
+        );
+
+        let search = handle_message(
+            &registry,
+            &mut initialized,
+            RpcMessage {
+                id: Some(json!(2)),
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "file_search",
+                    "arguments": {
+                        "workspace": "dynamic",
+                        "pattern": "dynamic",
+                        "mode": "content"
+                    }
+                }),
+            },
+        )
+        .expect("search response");
+        assert_eq!(
+            search["result"]["structuredContent"]["content_matches"][0]["path"],
+            Value::String("dynamic.txt".to_string())
+        );
+
+        handle_message(
+            &registry,
+            &mut initialized,
+            RpcMessage {
+                id: Some(json!(3)),
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "manage_workspaces",
+                    "arguments": { "op": "remove", "name": "dynamic" }
+                }),
+            },
+        )
+        .expect("remove response");
+
+        let missing = handle_message(
+            &registry,
+            &mut initialized,
+            RpcMessage {
+                id: Some(json!(4)),
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": "file_search",
+                    "arguments": { "workspace": "dynamic", "pattern": "dynamic" }
+                }),
+            },
+        )
+        .expect("missing response");
+        assert!(
+            missing["error"]["message"]
+                .as_str()
+                .expect("error")
+                .contains("unknown workspace: dynamic")
+        );
     }
 }

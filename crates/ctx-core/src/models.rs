@@ -33,6 +33,14 @@ pub enum CtxError {
     Cancelled,
     #[error("no roots configured; operation refused")]
     NoRoots,
+    #[error("ambiguous: specify workspace")]
+    AmbiguousWorkspace,
+    #[error("unknown workspace: {0}")]
+    UnknownWorkspace(String),
+    #[error("manage_workspaces requires a workspace registry")]
+    ManageWorkspacesUnsupported,
+    #[error("manage_workspaces requires workspace name")]
+    MissingWorkspaceName,
     #[error("path is outside configured roots: {0}")]
     OutsideRoots(PathBuf),
     #[error("path traversal is not allowed: {0}")]
