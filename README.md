@@ -11,8 +11,6 @@ A minimal, runnable Rust vertical slice of a snapshot-centered context engine.
   JSON-RPC loop plus small CLI commands (`serve`, `doctor`, `config`, `install`).
 - `crates/ctx-ffi` — C ABI (`cdylib`/`staticlib`) for embedding the engine in
   native hosts, with a cancellation surface.
-- `crates/ctx-wasm` — `wasm32` bindings exposing the same dispatch surface to
-  browser/edge hosts via an in-memory catalog.
 
 The design keeps the engine centered on immutable `CatalogSnapshot` values. File
 system access is behind the `CatalogProvider` port, so the core does not depend
@@ -87,8 +85,8 @@ that need mid-request interruption should use the C ABI cancellation surface.
 - `get_file_tree` — compact JSON tree plus token-efficient ASCII `tree`,
   `roots_count`, `was_truncated`, and `uses_legend` fields from the current
   catalog snapshot.
-- `get_code_structure` — pure-Rust lightweight codemap for Rust, Python,
-  and JavaScript/TypeScript top-level symbols.
+- `get_code_structure` — tree-sitter codemap (definitions: kind/name/line) across
+  Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, and PHP.
 - `get_repo_map` — pure-Rust deterministic PageRank repo-map that ranks files
   by cross-file symbol-reference relevance, with optional `query` and
   `seed_paths` personalization and a `max_files` file budget.
@@ -152,31 +150,25 @@ the cancellable request returns. Release tokens with `ctx_cancel_free`.
 
 ## Codemap
 
-`get_code_structure` is always available and remains pure Rust. It dispatches by
-extension: Rust files use `syn` with `proc-macro2` span locations, Python files
-(`.py`, `.pyi`) use `ruff_python_parser`, and JavaScript/TypeScript files
-(`.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`) use `oxc`.
+`get_code_structure` uses [tree-sitter](https://tree-sitter.org) with each
+grammar's `tags.scm` query. Supported by extension: Rust, Python, JavaScript,
+TypeScript/TSX, Go, Java, C, C++, C#, Ruby, and PHP. Adding a language is a
+grammar crate plus its tags query.
 
-The response keeps the lightweight top-level symbol model `(kind, name, line)`.
-Rust reports functions, structs, enums, traits, impls, modules, constants,
-statics, types, and macro definitions. Python reports top-level `def` / `async
-def` as `function` and top-level `class` as `class`. JavaScript/TypeScript
-reports top-level function declarations, class declarations, exported
-declarations, and top-level `const`/`let` arrow or function-expression bindings
-as `function`.
+The response uses the symbol model `(kind, name, line)`, where `kind` comes from
+the tags query (`function`, `method`, `class`, `interface`, `module`, …). Tag
+queries capture nested definitions (e.g. methods), not just the top level.
+Unsupported files are omitted. Filesystem providers cache parse results by
+`(mtime, size)`; `get_code_structure` and `get_repo_map` share that cache.
 
-The codemap intentionally does not expand full syntax trees, nested modules,
-class members, impl members, or nested functions. Unsupported files are omitted
-from the codemap response. Filesystem providers cache codemap parse results by
-`(mtime, size)`, and `get_code_structure` and `get_repo_map` share that cache;
-cache hits only avoid reparsing and do not change tool output.
+Because tree-sitter grammars are C, building requires a C toolchain (each
+grammar's generated `parser.c` is compiled).
 
 ## Repo-map
 
-`get_repo_map` builds an Aider-inspired repository map from the same lightweight
-codemap while staying pure Rust and dependency-light. Each supported
-Rust/Python/JavaScript/TypeScript file is parsed once and the same AST pass emits
-both top-level definitions and reference nodes. Repo-map adds weighted directed
+`get_repo_map` builds an Aider-inspired repository map from the same tree-sitter
+tag extraction. Each supported file is parsed once and the same pass emits both
+definition and reference tags. Repo-map adds weighted directed
 edges from a referencing file to same-language files defining the referenced
 name, then runs deterministic sparse PageRank (`damping=0.85`, fixed 30
 iterations). File nodes are sorted by path and PageRank summation is serialized
@@ -188,18 +180,12 @@ If no seed matches, PageRank uses a uniform restart distribution for global
 importance. `max_files` truncates the ranked response, and each returned file
 includes a fixed-precision PageRank score plus key codemap symbols.
 
-Reference edges are **AST node-level same-language name matches** rather than
-raw text occurrences. Rust collects `use` imports, call/method-call expressions,
-and type paths; Python collects `import` / `from ... import`, calls, names, and
-attributes; JavaScript/TypeScript collects import declarations, `require()`
-calls, call expressions, identifiers, and static member names. Imports that
-resolve to another catalog file add a higher-confidence edge. Comments and
-strings are excluded naturally by parsing, while language stopwords, identifiers
-shorter than three characters, high document-frequency definitions, and
-cross-language same-name edges remain filtered. This is still not a full
-scope/type resolver: aliases, re-exports, and multi-definition disambiguation
-are intentionally out of scope. No tree-sitter, native `*-sys`, or C/C++ build
-dependencies are added.
+Reference edges are **tree-sitter `@reference.*` tags matched by same-language
+definition name** rather than raw text occurrences. Comments and strings are
+excluded naturally by parsing, while language stopwords, identifiers shorter than
+three characters, high document-frequency definitions, and cross-language
+same-name edges remain filtered. This is not a full scope/type resolver: import
+paths, aliases, re-exports, and multi-definition disambiguation are out of scope.
 
 ## Golden snapshots and parity ledger
 
@@ -252,29 +238,6 @@ Notes:
   100 MB tree; catalog ~482K files/s is ~200 ms over 100K files; warm queries hit the cache.
 - Same order of magnitude as ripgrep (which is faster via mmap/SIMD/streaming); the goal
   here is an embeddable on-demand engine, not to beat a dedicated grep.
-
-## WebAssembly (browser / edge)
-
-The engine compiles to `wasm32-unknown-unknown` (no filesystem, no threads). Hosts
-feed files into an in-memory catalog via the `ctx-wasm` crate, then call tools through
-the same dispatch surface as native. On wasm, parallel (rayon) paths fall back to
-sequential and `ignore`/filesystem code is gated out.
-
-```bash
-wasm-pack build crates/ctx-wasm --target nodejs   # or --target web / bundler
-```
-
-```js
-const m = require('./crates/ctx-wasm/pkg/ctx_wasm.js');
-m.feed_files(JSON.stringify([{ path: 'src/lib.rs', content: 'pub fn needle() {}' }]));
-const res = m.handle_request(JSON.stringify({
-  name: 'file_search', arguments: { pattern: 'needle', mode: 'content' },
-}));
-```
-
-`feed_files(files_json)` replaces the in-memory catalog (`[{path, content}]`, logical
-paths). `handle_request(json)` takes the same `{name, arguments}` tool-call shape as
-native dispatch. Runnable example: `crates/ctx-wasm/examples/node-smoke.js`.
 
 ## Use with Claude Code / Codex (MCP)
 
@@ -332,4 +295,5 @@ Tools: `file_search`, `read_file`, `get_file_tree`, `get_code_structure`,
 `get_repo_map`, `manage_selection`, `manage_workspaces`, `workspace_context`,
 `build_context`.
 Pins MCP `protocolVersion` `2024-11-05` (clients negotiate accordingly). Codemap
-covers Rust/Python/JS. Pure Rust, no C toolchain required.
+covers 11 languages via tree-sitter (Rust, Python, JS, TS, Go, Java, C, C++, C#,
+Ruby, PHP); building the binary requires a C toolchain.

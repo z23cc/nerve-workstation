@@ -3,25 +3,25 @@ source: crates/ctx-core/tests/golden.rs
 expression: response
 ---
 {
-  "context": "<file_map>\n- fixtures/alpha.rs [codemap_only]\n- fixtures/nested/beta.rs [slices]\n- fixtures/notes.txt [full]\n</file_map>\n\n<instructions>\nAnswer from selected files only.\n</instructions>\n\n<file path=\"fixtures/alpha.rs\" mode=\"codemap_only\">\n```text\nlanguage: rust\n- struct Alpha @ line 1\n- enum Mode @ line 5\n- trait Runnable @ line 10\n- impl Alpha @ line 14\n- impl Runnable for Alpha @ line 20\n- function alpha_needle @ line 24\n```\n</file>\n\n<file path=\"fixtures/nested/beta.rs\" mode=\"slices\">\n<slice lines=\"1-2\" description=\"lines 1-2\">\n```text\npub type BetaCount = usize;\n\n```\n</slice>\n</file>\n\n<file path=\"fixtures/notes.txt\" mode=\"full\">\n```text\nfirst line\nneedle text line\nfinal line\n```\n</file>",
+  "context": "<file_map>\n- fixtures/alpha.rs [codemap_only]\n- fixtures/nested/beta.rs [slices]\n- fixtures/notes.txt [full]\n</file_map>\n\n<instructions>\nAnswer from selected files only.\n</instructions>\n\n<file path=\"fixtures/alpha.rs\" mode=\"codemap_only\">\n```text\nlanguage: rust\n- class Alpha @ line 1\n- class Mode @ line 5\n- interface Runnable @ line 10\n- method new @ line 15\n- method run @ line 21\n- function alpha_needle @ line 24\n```\n</file>\n\n<file path=\"fixtures/nested/beta.rs\" mode=\"slices\">\n<slice lines=\"1-2\" description=\"lines 1-2\">\n```text\npub type BetaCount = usize;\n\n```\n</slice>\n</file>\n\n<file path=\"fixtures/notes.txt\" mode=\"full\">\n```text\nfirst line\nneedle text line\nfinal line\n```\n</file>",
   "tokens": {
-    "total_tokens": 209,
+    "total_tokens": 207,
     "file_map_tokens": 37,
     "instructions_tokens": 12,
-    "contents_tokens": 160,
+    "contents_tokens": 158,
     "files": [
       {
         "root_id": "root-0",
         "path": "alpha.rs",
         "display_path": "fixtures/alpha.rs",
         "mode": "codemap_only",
-        "token_count": 79,
+        "token_count": 77,
         "segments": [
           {
             "label": "codemap",
             "start_line": null,
             "end_line": null,
-            "token_count": 56
+            "token_count": 54
           }
         ]
       },

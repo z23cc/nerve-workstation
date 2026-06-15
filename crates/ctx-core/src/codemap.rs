@@ -1,24 +1,16 @@
-//! Lightweight pure-Rust codemap extraction.
+//! Multi-language codemap extraction via tree-sitter tag queries.
 //!
-//! The codemap is intentionally shallow: it reports only top-level symbols and
-//! does not expand impl/class members or nested module contents.
+//! One engine (tree-sitter) plus each grammar's `tags.scm` query produces
+//! definitions (codemap symbols) and references (consumed by repo-map). Adding a
+//! language is a grammar crate + its tags query. Note: tree-sitter grammars are
+//! C, so a C toolchain is required at build time.
 
 use crate::{models::*, port::CatalogProvider, snapshot::CatalogSnapshot};
-use oxc_allocator::Allocator;
-use oxc_ast::ast::{
-    Argument, BindingPattern, Class, Declaration, ExportDefaultDeclarationKind, Expression,
-    Function, ImportDeclarationSpecifier, Statement, VariableDeclaration,
-};
-use oxc_parser::Parser;
-use oxc_span::{SourceType, Span};
-use proc_macro2::Span as RustSpan;
-use quote::ToTokens;
-use ruff_python_ast::{Expr, Stmt, visitor};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::PathBuf};
-use syn::{Item, spanned::Spanned, visit};
+use std::{collections::BTreeSet, path::PathBuf, sync::OnceLock};
+use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
-/// A top-level symbol extracted from a source file.
+/// A symbol (definition) extracted from a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeSymbol {
     pub kind: String,
@@ -28,10 +20,9 @@ pub struct CodeSymbol {
 
 /// An AST-derived reference occurrence used internally by repo-map.
 ///
-/// These references are node-level names from imports, calls, attributes,
-/// identifiers, and type paths. They intentionally do not perform full scope,
-/// type, alias, re-export, or multi-definition resolution; repo-map resolves
-/// them later by same-language name matching against top-level codemap symbols.
+/// References are name-level occurrences (calls, etc.) captured by the tags
+/// query. They do not perform scope/type/alias resolution; repo-map resolves
+/// them later by same-language name matching against definitions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeReference {
     pub kind: String,
@@ -73,7 +64,7 @@ pub struct CodeStructureResponse {
     pub omitted: usize,
 }
 
-/// Extract lightweight code structure for selected paths.
+/// Extract code structure for selected paths.
 ///
 /// Empty `paths` means the whole catalog. Directory paths select entries by
 /// prefix; file paths select exact entries. Unsupported files are omitted.
@@ -114,36 +105,102 @@ enum Language {
     Rust,
     Python,
     JavaScript,
+    TypeScript,
+    Tsx,
     Go,
+    Java,
+    C,
+    Cpp,
+    CSharp,
+    Ruby,
+    Php,
 }
 
 impl Language {
     fn from_path(path: &str) -> Option<Self> {
         let lower = path.to_ascii_lowercase();
-        if lower.ends_with(".rs") {
-            return Some(Self::Rust);
-        }
-        if lower.ends_with(".py") || lower.ends_with(".pyi") {
-            return Some(Self::Python);
-        }
-        if [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]
-            .iter()
-            .any(|ext| lower.ends_with(ext))
-        {
-            return Some(Self::JavaScript);
-        }
-        if lower.ends_with(".go") {
-            return Some(Self::Go);
-        }
-        None
+        let ext = lower.rsplit('.').next().unwrap_or("");
+        Some(match ext {
+            "rs" => Self::Rust,
+            "py" | "pyi" => Self::Python,
+            "js" | "jsx" | "mjs" | "cjs" => Self::JavaScript,
+            "ts" | "mts" | "cts" => Self::TypeScript,
+            "tsx" => Self::Tsx,
+            "go" => Self::Go,
+            "java" => Self::Java,
+            "c" | "h" => Self::C,
+            "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => Self::Cpp,
+            "cs" => Self::CSharp,
+            "rb" => Self::Ruby,
+            "php" | "phtml" => Self::Php,
+            _ => return None,
+        })
     }
 
+    /// Repo-map language tag. JS/TS/TSX share one tag so cross-file edges match.
     fn name(self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::Python => "python",
-            Self::JavaScript => "javascript",
+            Self::JavaScript | Self::TypeScript | Self::Tsx => "javascript",
             Self::Go => "go",
+            Self::Java => "java",
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::CSharp => "csharp",
+            Self::Ruby => "ruby",
+            Self::Php => "php",
+        }
+    }
+
+    /// Cached tags configuration (compiling a query is expensive).
+    fn config(self) -> Option<&'static TagsConfiguration> {
+        fn build(language: tree_sitter::Language, query: &str) -> Option<TagsConfiguration> {
+            TagsConfiguration::new(language, query, "").ok()
+        }
+        macro_rules! cached {
+            ($lang:expr, $query:expr) => {{
+                static CELL: OnceLock<Option<TagsConfiguration>> = OnceLock::new();
+                CELL.get_or_init(|| build($lang.into(), $query)).as_ref()
+            }};
+        }
+        match self {
+            Self::Rust => cached!(tree_sitter_rust::LANGUAGE, tree_sitter_rust::TAGS_QUERY),
+            Self::Python => cached!(tree_sitter_python::LANGUAGE, tree_sitter_python::TAGS_QUERY),
+            Self::JavaScript => {
+                cached!(
+                    tree_sitter_javascript::LANGUAGE,
+                    tree_sitter_javascript::TAGS_QUERY
+                )
+            }
+            // TypeScript's tags.scm only adds TS-specific captures and inherits the
+            // rest from JavaScript; concatenate both so class/function decls are seen.
+            Self::TypeScript => cached!(
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                &format!(
+                    "{}\n{}",
+                    tree_sitter_javascript::TAGS_QUERY,
+                    tree_sitter_typescript::TAGS_QUERY
+                )
+            ),
+            Self::Tsx => cached!(
+                tree_sitter_typescript::LANGUAGE_TSX,
+                &format!(
+                    "{}\n{}",
+                    tree_sitter_javascript::TAGS_QUERY,
+                    tree_sitter_typescript::TAGS_QUERY
+                )
+            ),
+            Self::Go => cached!(tree_sitter_go::LANGUAGE, tree_sitter_go::TAGS_QUERY),
+            Self::Java => cached!(tree_sitter_java::LANGUAGE, tree_sitter_java::TAGS_QUERY),
+            Self::C => cached!(tree_sitter_c::LANGUAGE, tree_sitter_c::TAGS_QUERY),
+            Self::Cpp => cached!(tree_sitter_cpp::LANGUAGE, tree_sitter_cpp::TAGS_QUERY),
+            Self::CSharp => cached!(
+                tree_sitter_c_sharp::LANGUAGE,
+                tree_sitter_c_sharp::TAGS_QUERY
+            ),
+            Self::Ruby => cached!(tree_sitter_ruby::LANGUAGE, tree_sitter_ruby::TAGS_QUERY),
+            Self::Php => cached!(tree_sitter_php::LANGUAGE_PHP, tree_sitter_php::TAGS_QUERY),
         }
     }
 }
@@ -155,7 +212,7 @@ pub(crate) fn symbols_for_path(
     let Some(language) = Language::from_path(rel_path) else {
         return Ok(None);
     };
-    let (symbols, references) = code_facts_for_language(language, source, rel_path)?;
+    let (symbols, references) = code_facts_for_language(language, source)?;
     Ok(Some(ParsedCodeFile {
         language: language.name().to_string(),
         symbols,
@@ -169,20 +226,46 @@ pub fn fuzz_symbols_for_path(
     source: &str,
     rel_path: &str,
 ) -> Result<Option<(String, Vec<CodeSymbol>)>, String> {
-    symbols_for_path(source, rel_path)
+    Ok(symbols_for_path(source, rel_path)?.map(|parsed| (parsed.language, parsed.symbols)))
 }
 
 fn code_facts_for_language(
     language: Language,
     source: &str,
-    rel_path: &str,
 ) -> Result<(Vec<CodeSymbol>, Vec<CodeReference>), String> {
-    match language {
-        Language::Rust => rust_code_facts(source),
-        Language::Python => python_code_facts(source),
-        Language::JavaScript => javascript_code_facts(source, rel_path),
-        Language::Go => go_code_facts(source),
+    let config = language
+        .config()
+        .ok_or_else(|| format!("no tags configuration for {}", language.name()))?;
+    let mut context = TagsContext::new();
+    let bytes = source.as_bytes();
+    let (tags, _failed) = context
+        .generate_tags(config, bytes, None)
+        .map_err(|err| format!("tags error: {err:?}"))?;
+
+    let mut symbols = Vec::new();
+    let mut references = Vec::new();
+    for tag in tags {
+        let tag = tag.map_err(|err| format!("tag error: {err:?}"))?;
+        let Some(name) = bytes.get(tag.name_range.clone()) else {
+            continue;
+        };
+        let name = String::from_utf8_lossy(name).into_owned();
+        let line = tag.span.start.row + 1;
+        let kind = config.syntax_type_name(tag.syntax_type_id).to_string();
+        if tag.is_definition {
+            symbols.push(CodeSymbol { kind, name, line });
+        } else {
+            references.push(CodeReference {
+                kind,
+                name,
+                line,
+                import_path: None,
+            });
+        }
     }
+    // Deterministic order for stable output and goldens.
+    symbols.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.name.cmp(&b.name)));
+    Ok((symbols, references))
 }
 
 fn select_entries<'a>(
@@ -217,1270 +300,98 @@ fn select_entries<'a>(
         .collect()
 }
 
-fn rust_code_facts(source: &str) -> Result<(Vec<CodeSymbol>, Vec<CodeReference>), String> {
-    let file = syn::parse_file(source).map_err(|err| err.to_string())?;
-    let symbols = file
-        .items
-        .iter()
-        .filter_map(item_symbol)
-        .collect::<Vec<_>>();
-    let mut collector = RustReferenceCollector::default();
-    visit::visit_file(&mut collector, &file);
-    Ok((symbols, collector.references))
-}
-
-#[cfg(test)]
-fn rust_symbols(source: &str) -> Result<Vec<CodeSymbol>, String> {
-    rust_code_facts(source).map(|(symbols, _)| symbols)
-}
-
-fn item_symbol(item: &Item) -> Option<CodeSymbol> {
-    let (kind, name, span) = match item {
-        Item::Fn(item) => (
-            "function",
-            item.sig.ident.to_string(),
-            item.sig.ident.span(),
-        ),
-        Item::Struct(item) => ("struct", item.ident.to_string(), item.ident.span()),
-        Item::Enum(item) => ("enum", item.ident.to_string(), item.ident.span()),
-        Item::Trait(item) => ("trait", item.ident.to_string(), item.ident.span()),
-        Item::Impl(item) => ("impl", impl_name(item), item.impl_token.span),
-        Item::Type(item) => ("type", item.ident.to_string(), item.ident.span()),
-        Item::Const(item) => ("const", item.ident.to_string(), item.ident.span()),
-        Item::Static(item) => ("static", item.ident.to_string(), item.ident.span()),
-        Item::Mod(item) => ("mod", item.ident.to_string(), item.ident.span()),
-        Item::Macro(item) => ("macro", macro_name(item)?, item.mac.path.span()),
-        _ => return None,
-    };
-
-    Some(CodeSymbol {
-        kind: kind.to_string(),
-        name,
-        line: span_line(span),
-    })
-}
-
-fn impl_name(item: &syn::ItemImpl) -> String {
-    let self_ty = type_name(&item.self_ty);
-    if let Some((_, trait_path, _)) = &item.trait_ {
-        format!("{} for {self_ty}", path_name(trait_path))
-    } else {
-        self_ty
-    }
-}
-
-fn macro_name(item: &syn::ItemMacro) -> Option<String> {
-    item.ident.as_ref().map(ToString::to_string).or_else(|| {
-        item.mac
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-    })
-}
-
-fn type_name(ty: &syn::Type) -> String {
-    compact_tokens(ty)
-}
-
-fn path_name(path: &syn::Path) -> String {
-    path.segments
-        .iter()
-        .map(|seg| {
-            let args = if seg.arguments.is_empty() {
-                String::new()
-            } else {
-                compact_tokens(&seg.arguments)
-            };
-            format!("{}{}", seg.ident, args)
-        })
-        .collect::<Vec<_>>()
-        .join("::")
-}
-
-fn compact_tokens<T: ToTokens>(tokens: &T) -> String {
-    tokens
-        .to_token_stream()
-        .to_string()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace(" <", "<")
-        .replace(" >", ">")
-        .replace(" :: ", "::")
-        .replace(" & ", "&")
-}
-
-fn span_line(span: RustSpan) -> usize {
-    span.start().line
-}
-
-fn python_code_facts(source: &str) -> Result<(Vec<CodeSymbol>, Vec<CodeReference>), String> {
-    let parsed = ruff_python_parser::parse_module(source).map_err(|err| err.to_string())?;
-    let line_index = LineIndex::new(source);
-    let body = &parsed.syntax().body;
-    let symbols = body
-        .iter()
-        .filter_map(|stmt| python_stmt_symbol(stmt, &line_index))
-        .collect();
-    let mut collector = PythonReferenceCollector {
-        line_index: &line_index,
-        references: Vec::new(),
-    };
-    visitor::walk_body(&mut collector, body);
-    Ok((symbols, collector.references))
-}
-
-#[cfg(test)]
-fn python_symbols(source: &str) -> Result<Vec<CodeSymbol>, String> {
-    python_code_facts(source).map(|(symbols, _)| symbols)
-}
-
-fn python_stmt_symbol(stmt: &Stmt, line_index: &LineIndex) -> Option<CodeSymbol> {
-    match stmt {
-        Stmt::FunctionDef(function) => Some(CodeSymbol {
-            kind: "function".to_string(),
-            name: function.name.id.as_str().to_string(),
-            line: line_index.line(function.name.range.start().into()),
-        }),
-        Stmt::ClassDef(class) => Some(CodeSymbol {
-            kind: "class".to_string(),
-            name: class.name.id.as_str().to_string(),
-            line: line_index.line(class.name.range.start().into()),
-        }),
-        _ => None,
-    }
-}
-
-fn javascript_code_facts(
-    source: &str,
-    rel_path: &str,
-) -> Result<(Vec<CodeSymbol>, Vec<CodeReference>), String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(rel_path).map_err(|err| err.to_string())?;
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked {
-        return Err(parsed.errors.first().map_or_else(
-            || "JavaScript parser panicked".to_string(),
-            ToString::to_string,
-        ));
-    }
-    if let Some(error) = parsed.errors.first() {
-        return Err(error.to_string());
-    }
-
-    let line_index = LineIndex::new(source);
-    let mut symbols = Vec::new();
-    let mut references = Vec::new();
-    for statement in &parsed.program.body {
-        javascript_statement_symbols(statement, &line_index, &mut symbols);
-        javascript_statement_references(statement, &line_index, &mut references);
-    }
-    Ok((symbols, references))
-}
-
-#[cfg(test)]
-fn javascript_symbols(source: &str, rel_path: &str) -> Result<Vec<CodeSymbol>, String> {
-    javascript_code_facts(source, rel_path).map(|(symbols, _)| symbols)
-}
-
-fn javascript_statement_symbols(
-    statement: &Statement<'_>,
-    line_index: &LineIndex,
-    symbols: &mut Vec<CodeSymbol>,
-) {
-    match statement {
-        Statement::FunctionDeclaration(function) => {
-            if let Some(symbol) = javascript_function_symbol(function, line_index, "function") {
-                symbols.push(symbol);
-            }
-        }
-        Statement::ClassDeclaration(class) => {
-            if let Some(symbol) = javascript_class_symbol(class, line_index, "class") {
-                symbols.push(symbol);
-            }
-        }
-        Statement::VariableDeclaration(declaration) => {
-            javascript_variable_symbols(declaration, line_index, symbols);
-        }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(declaration) = &export.declaration {
-                javascript_declaration_symbols(declaration, line_index, symbols);
-            }
-        }
-        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                if let Some(symbol) = javascript_function_symbol(function, line_index, "function") {
-                    symbols.push(symbol);
-                }
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                if let Some(symbol) = javascript_class_symbol(class, line_index, "class") {
-                    symbols.push(symbol);
-                }
-            }
-            _ => {}
-        },
-        _ => {}
-    }
-}
-
-fn javascript_declaration_symbols(
-    declaration: &Declaration<'_>,
-    line_index: &LineIndex,
-    symbols: &mut Vec<CodeSymbol>,
-) {
-    match declaration {
-        Declaration::FunctionDeclaration(function) => {
-            if let Some(symbol) = javascript_function_symbol(function, line_index, "function") {
-                symbols.push(symbol);
-            }
-        }
-        Declaration::ClassDeclaration(class) => {
-            if let Some(symbol) = javascript_class_symbol(class, line_index, "class") {
-                symbols.push(symbol);
-            }
-        }
-        Declaration::VariableDeclaration(declaration) => {
-            javascript_variable_symbols(declaration, line_index, symbols);
-        }
-        _ => {}
-    }
-}
-
-fn javascript_function_symbol(
-    function: &Function<'_>,
-    line_index: &LineIndex,
-    kind: &str,
-) -> Option<CodeSymbol> {
-    let id = function.id.as_ref()?;
-    Some(CodeSymbol {
-        kind: kind.to_string(),
-        name: id.name.as_str().to_string(),
-        line: span_start_line(id.span, line_index),
-    })
-}
-
-fn javascript_class_symbol(
-    class: &Class<'_>,
-    line_index: &LineIndex,
-    kind: &str,
-) -> Option<CodeSymbol> {
-    let id = class.id.as_ref()?;
-    Some(CodeSymbol {
-        kind: kind.to_string(),
-        name: id.name.as_str().to_string(),
-        line: span_start_line(id.span, line_index),
-    })
-}
-
-fn javascript_variable_symbols(
-    declaration: &VariableDeclaration<'_>,
-    line_index: &LineIndex,
-    symbols: &mut Vec<CodeSymbol>,
-) {
-    for declarator in &declaration.declarations {
-        let Some(init) = &declarator.init else {
-            continue;
-        };
-        if !matches!(
-            init,
-            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-        ) {
-            continue;
-        }
-        let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-            continue;
-        };
-        symbols.push(CodeSymbol {
-            kind: "function".to_string(),
-            name: id.name.as_str().to_string(),
-            line: span_start_line(id.span, line_index),
-        });
-    }
-}
-
-fn span_start_line(span: Span, line_index: &LineIndex) -> usize {
-    line_index.line(span.start as usize)
-}
-
-fn code_reference(kind: &str, name: impl Into<String>, line: usize) -> CodeReference {
-    CodeReference {
-        kind: kind.to_string(),
-        name: name.into(),
-        line,
-        import_path: None,
-    }
-}
-
-fn import_reference(
-    name: impl Into<String>,
-    line: usize,
-    import_path: impl Into<Option<String>>,
-) -> CodeReference {
-    CodeReference {
-        kind: "import".to_string(),
-        name: name.into(),
-        line,
-        import_path: import_path.into(),
-    }
-}
-
-#[derive(Default)]
-struct RustReferenceCollector {
-    references: Vec<CodeReference>,
-}
-
-impl RustReferenceCollector {
-    fn push_path_reference(&mut self, kind: &str, path: &syn::Path, span: RustSpan) {
-        if let Some(name) = path.segments.last().map(|seg| seg.ident.to_string()) {
-            self.references
-                .push(code_reference(kind, name, span_line(span)));
-        }
-    }
-
-    fn push_use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
-        match tree {
-            syn::UseTree::Path(path) => {
-                prefix.push(path.ident.to_string());
-                self.push_use_tree(&path.tree, prefix);
-                prefix.pop();
-            }
-            syn::UseTree::Name(name) => {
-                let symbol = name.ident.to_string();
-                let mut full_path = prefix.clone();
-                full_path.push(symbol.clone());
-                self.references.push(import_reference(
-                    symbol,
-                    span_line(name.ident.span()),
-                    Some(full_path.join("::")),
-                ));
-            }
-            syn::UseTree::Rename(rename) => {
-                let symbol = rename.ident.to_string();
-                let mut full_path = prefix.clone();
-                full_path.push(symbol.clone());
-                self.references.push(import_reference(
-                    symbol,
-                    span_line(rename.ident.span()),
-                    Some(full_path.join("::")),
-                ));
-            }
-            syn::UseTree::Glob(glob) => {
-                if let Some(module) = prefix.last() {
-                    self.references.push(import_reference(
-                        module.clone(),
-                        span_line(glob.star_token.span),
-                        Some(prefix.join("::")),
-                    ));
-                }
-            }
-            syn::UseTree::Group(group) => {
-                for item in &group.items {
-                    self.push_use_tree(item, prefix);
-                }
-            }
-        }
-    }
-}
-
-impl<'ast> visit::Visit<'ast> for RustReferenceCollector {
-    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        let mut prefix = Vec::new();
-        self.push_use_tree(&item.tree, &mut prefix);
-    }
-
-    fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = expr.func.as_ref() {
-            self.push_path_reference("call", &path.path, path.path.span());
-        }
-        for arg in &expr.args {
-            visit::visit_expr(self, arg);
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
-        self.references.push(code_reference(
-            "method_call",
-            expr.method.to_string(),
-            span_line(expr.method.span()),
-        ));
-        visit::visit_expr(self, &expr.receiver);
-        for arg in &expr.args {
-            visit::visit_expr(self, arg);
-        }
-    }
-
-    fn visit_type_path(&mut self, ty: &'ast syn::TypePath) {
-        self.push_path_reference("type", &ty.path, ty.path.span());
-        visit::visit_type_path(self, ty);
-    }
-}
-
-struct PythonReferenceCollector<'a> {
-    line_index: &'a LineIndex,
-    references: Vec<CodeReference>,
-}
-
-impl PythonReferenceCollector<'_> {
-    fn line_for_range(&self, range: ruff_text_size::TextRange) -> usize {
-        self.line_index.line(range.start().into())
-    }
-}
-
-impl<'a> visitor::Visitor<'a> for PythonReferenceCollector<'_> {
-    fn visit_stmt(&mut self, stmt: &'a Stmt) {
-        match stmt {
-            Stmt::Import(import) => {
-                for alias in &import.names {
-                    let full = alias.name.id.as_str().to_string();
-                    let symbol = full.rsplit('.').next().unwrap_or(&full).to_string();
-                    self.references.push(import_reference(
-                        symbol,
-                        self.line_for_range(alias.range),
-                        Some(full),
-                    ));
-                }
-            }
-            Stmt::ImportFrom(import) => {
-                let module = import
-                    .module
-                    .as_ref()
-                    .map(|module| module.id.as_str().to_string());
-                for alias in &import.names {
-                    let symbol = alias.name.id.as_str().to_string();
-                    let path = module
-                        .as_ref()
-                        .map(|module| format!("{module}.{symbol}"))
-                        .or_else(|| Some(symbol.clone()));
-                    self.references.push(import_reference(
-                        symbol,
-                        self.line_for_range(alias.range),
-                        path,
-                    ));
-                }
-            }
-            _ => visitor::walk_stmt(self, stmt),
-        }
-    }
-
-    fn visit_expr(&mut self, expr: &'a Expr) {
-        match expr {
-            Expr::Call(call) => {
-                if let Some(name) = python_expr_name(&call.func) {
-                    self.references.push(code_reference(
-                        "call",
-                        name,
-                        self.line_for_range(call.range),
-                    ));
-                }
-                visitor::walk_expr(self, expr);
-            }
-            Expr::Name(name) => {
-                self.references.push(code_reference(
-                    "identifier",
-                    name.id.as_str(),
-                    self.line_for_range(name.range),
-                ));
-            }
-            Expr::Attribute(attribute) => {
-                self.references.push(code_reference(
-                    "attribute",
-                    attribute.attr.id.as_str(),
-                    self.line_for_range(attribute.attr.range),
-                ));
-                visitor::walk_expr(self, expr);
-            }
-            _ => visitor::walk_expr(self, expr),
-        }
-    }
-}
-
-fn python_expr_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Name(name) => Some(name.id.as_str().to_string()),
-        Expr::Attribute(attribute) => Some(attribute.attr.id.as_str().to_string()),
-        _ => None,
-    }
-}
-
-fn javascript_statement_references(
-    statement: &Statement<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    match statement {
-        Statement::ImportDeclaration(import) => {
-            javascript_import_references(import, line_index, references)
-        }
-        Statement::ExpressionStatement(statement) => {
-            javascript_expression_references(&statement.expression, line_index, references);
-        }
-        Statement::ReturnStatement(statement) => {
-            if let Some(argument) = &statement.argument {
-                javascript_expression_references(argument, line_index, references);
-            }
-        }
-        Statement::VariableDeclaration(declaration) => {
-            javascript_variable_references(declaration, line_index, references);
-        }
-        Statement::FunctionDeclaration(function) => {
-            javascript_function_body_references(function, line_index, references);
-        }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(declaration) = &export.declaration {
-                javascript_declaration_references(declaration, line_index, references);
-            }
-        }
-        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                javascript_function_body_references(function, line_index, references);
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(_) => {}
-            _ => {
-                if let Some(expression) = export.declaration.as_expression() {
-                    javascript_expression_references(expression, line_index, references);
-                }
-            }
-        },
-        _ => {}
-    }
-}
-
-fn javascript_declaration_references(
-    declaration: &Declaration<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    match declaration {
-        Declaration::VariableDeclaration(declaration) => {
-            javascript_variable_references(declaration, line_index, references);
-        }
-        Declaration::FunctionDeclaration(function) => {
-            javascript_function_body_references(function, line_index, references);
-        }
-        _ => {}
-    }
-}
-
-fn javascript_import_references(
-    import: &oxc_ast::ast::ImportDeclaration<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    let source = import.source.value.as_str().to_string();
-    if let Some(specifiers) = &import.specifiers {
-        for specifier in specifiers {
-            let (name, span) = match specifier {
-                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                    (module_export_name(&specifier.imported), specifier.span)
-                }
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                    (specifier.local.name.as_str().to_string(), specifier.span)
-                }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                    (specifier.local.name.as_str().to_string(), specifier.span)
-                }
-            };
-            references.push(import_reference(
-                name,
-                span_start_line(span, line_index),
-                Some(source.clone()),
-            ));
-        }
-    } else {
-        references.push(import_reference(
-            source.clone(),
-            span_start_line(import.source.span, line_index),
-            Some(source),
-        ));
-    }
-}
-
-fn module_export_name(name: &oxc_ast::ast::ModuleExportName<'_>) -> String {
-    match name {
-        oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str().to_string(),
-        oxc_ast::ast::ModuleExportName::IdentifierReference(name) => name.name.as_str().to_string(),
-        oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str().to_string(),
-    }
-}
-
-fn javascript_variable_references(
-    declaration: &VariableDeclaration<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    for declarator in &declaration.declarations {
-        if let Some(init) = &declarator.init {
-            javascript_expression_references(init, line_index, references);
-        }
-    }
-}
-
-fn javascript_function_body_references(
-    function: &Function<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    if let Some(body) = &function.body {
-        for statement in &body.statements {
-            javascript_statement_references(statement, line_index, references);
-        }
-    }
-}
-
-fn javascript_expression_references(
-    expression: &Expression<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    match expression {
-        Expression::Identifier(identifier) => references.push(code_reference(
-            "identifier",
-            identifier.name.as_str(),
-            span_start_line(identifier.span, line_index),
-        )),
-        Expression::CallExpression(call) => {
-            if let Some(name) = javascript_expression_name(&call.callee) {
-                if name == "require" {
-                    if let Some(source) = javascript_require_source(call) {
-                        references.push(import_reference(
-                            source.clone(),
-                            span_start_line(call.span, line_index),
-                            Some(source),
-                        ));
-                    }
-                } else {
-                    references.push(code_reference(
-                        "call",
-                        name,
-                        span_start_line(call.span, line_index),
-                    ));
-                }
-            }
-            javascript_expression_references(&call.callee, line_index, references);
-            for argument in &call.arguments {
-                javascript_argument_references(argument, line_index, references);
-            }
-        }
-        Expression::StaticMemberExpression(member) => {
-            references.push(code_reference(
-                "attribute",
-                member.property.name.as_str(),
-                span_start_line(member.property.span, line_index),
-            ));
-            javascript_expression_references(&member.object, line_index, references);
-        }
-        Expression::ComputedMemberExpression(member) => {
-            javascript_expression_references(&member.object, line_index, references);
-            javascript_expression_references(&member.expression, line_index, references);
-        }
-        Expression::BinaryExpression(binary) => {
-            javascript_expression_references(&binary.left, line_index, references);
-            javascript_expression_references(&binary.right, line_index, references);
-        }
-        Expression::LogicalExpression(logical) => {
-            javascript_expression_references(&logical.left, line_index, references);
-            javascript_expression_references(&logical.right, line_index, references);
-        }
-        Expression::AssignmentExpression(assignment) => {
-            javascript_assignment_target_references(&assignment.left, line_index, references);
-            javascript_expression_references(&assignment.right, line_index, references);
-        }
-        Expression::ArrowFunctionExpression(function) => {
-            for statement in &function.body.statements {
-                javascript_statement_references(statement, line_index, references);
-            }
-        }
-        Expression::FunctionExpression(function) => {
-            javascript_function_body_references(function, line_index, references);
-        }
-        Expression::ParenthesizedExpression(parenthesized) => {
-            javascript_expression_references(&parenthesized.expression, line_index, references);
-        }
-        Expression::ConditionalExpression(conditional) => {
-            javascript_expression_references(&conditional.test, line_index, references);
-            javascript_expression_references(&conditional.consequent, line_index, references);
-            javascript_expression_references(&conditional.alternate, line_index, references);
-        }
-        Expression::SequenceExpression(sequence) => {
-            for expr in &sequence.expressions {
-                javascript_expression_references(expr, line_index, references);
-            }
-        }
-        Expression::ArrayExpression(array) => {
-            for element in &array.elements {
-                if let Some(expression) = element.as_expression() {
-                    javascript_expression_references(expression, line_index, references);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn javascript_require_source(call: &oxc_ast::ast::CallExpression<'_>) -> Option<String> {
-    let first = call.arguments.first()?;
-    let expression = first.as_expression()?;
-    if let Expression::StringLiteral(literal) = expression {
-        return Some(literal.value.as_str().to_string());
-    }
-    None
-}
-
-fn javascript_argument_references(
-    argument: &Argument<'_>,
-    line_index: &LineIndex,
-    references: &mut Vec<CodeReference>,
-) {
-    match argument {
-        Argument::SpreadElement(spread) => {
-            javascript_expression_references(&spread.argument, line_index, references);
-        }
-        _ => javascript_expression_references(argument.to_expression(), line_index, references),
-    }
-}
-
-fn javascript_assignment_target_references(
-    _target: &oxc_ast::ast::AssignmentTarget<'_>,
-    _line_index: &LineIndex,
-    _references: &mut Vec<CodeReference>,
-) {
-}
-
-fn javascript_expression_name(expression: &Expression<'_>) -> Option<String> {
-    match expression {
-        Expression::Identifier(identifier) => Some(identifier.name.as_str().to_string()),
-        Expression::StaticMemberExpression(member) => {
-            Some(member.property.name.as_str().to_string())
-        }
-        _ => None,
-    }
-}
-
-fn go_code_facts(source: &str) -> Result<(Vec<CodeSymbol>, Vec<CodeReference>), String> {
-    use gosyn::ast::Declaration;
-    let file = gosyn::parse_source(source).map_err(|err| err.to_string())?;
-    let line_index = LineIndex::new(source);
-    let mut symbols = Vec::new();
-    let mut collector = GoReferenceCollector {
-        line_index: &line_index,
-        references: Vec::new(),
-    };
-
-    for import in &file.imports {
-        let path = import
-            .path
-            .value
-            .trim_matches(|c| c == '"' || c == '`')
-            .to_string();
-        let name = import.name.as_ref().map_or_else(
-            || path.rsplit('/').next().unwrap_or(path.as_str()).to_string(),
-            |ident| ident.name.clone(),
-        );
-        collector.references.push(CodeReference {
-            kind: "import".to_string(),
-            name,
-            line: line_index.line(import.path.pos),
-            import_path: Some(path),
-        });
-    }
-
-    for decl in &file.decl {
-        match decl {
-            Declaration::Function(func) => {
-                symbols.push(CodeSymbol {
-                    kind: if func.recv.is_some() {
-                        "method"
-                    } else {
-                        "function"
-                    }
-                    .to_string(),
-                    name: func.name.name.clone(),
-                    line: line_index.line(func.name.pos),
-                });
-                if let Some(recv) = &func.recv {
-                    collector.walk_field_list(recv);
-                }
-                collector.walk_func_type(&func.typ);
-                if let Some(body) = &func.body {
-                    collector.walk_block(body);
-                }
-            }
-            Declaration::Type(decl) => {
-                for spec in &decl.specs {
-                    symbols.push(CodeSymbol {
-                        kind: go_type_kind(spec).to_string(),
-                        name: spec.name.name.clone(),
-                        line: line_index.line(spec.name.pos),
-                    });
-                    collector.walk_expr(&spec.typ);
-                }
-            }
-            Declaration::Const(decl) => {
-                for spec in &decl.specs {
-                    for ident in &spec.name {
-                        symbols.push(CodeSymbol {
-                            kind: "const".to_string(),
-                            name: ident.name.clone(),
-                            line: line_index.line(ident.pos),
-                        });
-                    }
-                    collector.walk_value_spec(&spec.typ, &spec.values);
-                }
-            }
-            Declaration::Variable(decl) => {
-                for spec in &decl.specs {
-                    for ident in &spec.name {
-                        symbols.push(CodeSymbol {
-                            kind: "var".to_string(),
-                            name: ident.name.clone(),
-                            line: line_index.line(ident.pos),
-                        });
-                    }
-                    collector.walk_value_spec(&spec.typ, &spec.values);
-                }
-            }
-        }
-    }
-    Ok((symbols, collector.references))
-}
-
-fn go_type_kind(spec: &gosyn::ast::TypeSpec) -> &'static str {
-    use gosyn::ast::Expression;
-    match &spec.typ {
-        Expression::TypeStruct(_) => "struct",
-        Expression::TypeInterface(_) => "interface",
-        _ if spec.alias => "alias",
-        _ => "type",
-    }
-}
-
-struct GoReferenceCollector<'a> {
-    line_index: &'a LineIndex,
-    references: Vec<CodeReference>,
-}
-
-impl GoReferenceCollector<'_> {
-    fn walk_value_spec(
-        &mut self,
-        typ: &Option<gosyn::ast::Expression>,
-        values: &[gosyn::ast::Expression],
-    ) {
-        if let Some(typ) = typ {
-            self.walk_expr(typ);
-        }
-        for value in values {
-            self.walk_expr(value);
-        }
-    }
-
-    fn walk_field_list(&mut self, fields: &gosyn::ast::FieldList) {
-        for field in &fields.list {
-            self.walk_expr(&field.typ);
-        }
-    }
-
-    fn walk_func_type(&mut self, typ: &gosyn::ast::FuncType) {
-        self.walk_field_list(&typ.typ_params);
-        self.walk_field_list(&typ.params);
-        self.walk_field_list(&typ.result);
-    }
-
-    fn walk_block(&mut self, block: &gosyn::ast::BlockStmt) {
-        self.walk_stmts(&block.list);
-    }
-
-    fn walk_stmts(&mut self, stmts: &[gosyn::ast::Statement]) {
-        for stmt in stmts {
-            self.walk_stmt(stmt);
-        }
-    }
-
-    fn walk_stmt(&mut self, stmt: &gosyn::ast::Statement) {
-        use gosyn::ast::Statement as S;
-        match stmt {
-            S::Go(stmt) => self.walk_call(&stmt.call),
-            S::Defer(stmt) => self.walk_call(&stmt.call),
-            S::Expr(stmt) => self.walk_expr(&stmt.expr),
-            S::Send(stmt) => {
-                self.walk_expr(&stmt.chan);
-                self.walk_expr(&stmt.value);
-            }
-            S::IncDec(stmt) => self.walk_expr(&stmt.expr),
-            S::Assign(stmt) => {
-                for expr in &stmt.left {
-                    self.walk_expr(expr);
-                }
-                for expr in &stmt.right {
-                    self.walk_expr(expr);
-                }
-            }
-            S::Return(stmt) => {
-                for expr in &stmt.ret {
-                    self.walk_expr(expr);
-                }
-            }
-            S::Block(block) => self.walk_block(block),
-            S::If(stmt) => {
-                if let Some(init) = &stmt.init {
-                    self.walk_stmt(init);
-                }
-                self.walk_expr(&stmt.cond);
-                self.walk_block(&stmt.body);
-                if let Some(els) = &stmt.else_ {
-                    self.walk_stmt(els);
-                }
-            }
-            S::For(stmt) => {
-                if let Some(init) = &stmt.init {
-                    self.walk_stmt(init);
-                }
-                if let Some(cond) = &stmt.cond {
-                    self.walk_stmt(cond);
-                }
-                if let Some(post) = &stmt.post {
-                    self.walk_stmt(post);
-                }
-                self.walk_block(&stmt.body);
-            }
-            S::Range(stmt) => {
-                if let Some(key) = &stmt.key {
-                    self.walk_expr(key);
-                }
-                if let Some(value) = &stmt.value {
-                    self.walk_expr(value);
-                }
-                self.walk_expr(&stmt.expr);
-                self.walk_block(&stmt.body);
-            }
-            S::Switch(stmt) => {
-                if let Some(init) = &stmt.init {
-                    self.walk_stmt(init);
-                }
-                if let Some(tag) = &stmt.tag {
-                    self.walk_expr(tag);
-                }
-                self.walk_case_block(&stmt.block);
-            }
-            S::TypeSwitch(stmt) => {
-                if let Some(init) = &stmt.init {
-                    self.walk_stmt(init);
-                }
-                if let Some(tag) = &stmt.tag {
-                    self.walk_stmt(tag);
-                }
-                self.walk_case_block(&stmt.block);
-            }
-            S::Select(stmt) => {
-                for clause in &stmt.body.body {
-                    if let Some(comm) = &clause.comm {
-                        self.walk_stmt(comm);
-                    }
-                    self.walk_stmts(&clause.body);
-                }
-            }
-            S::Label(stmt) => self.walk_stmt(&stmt.stmt),
-            S::Declaration(decl) => self.walk_decl_stmt(decl),
-            S::Branch(_) | S::Empty(_) => {}
-        }
-    }
-
-    fn walk_case_block(&mut self, block: &gosyn::ast::CaseBlock) {
-        for clause in &block.body {
-            for expr in &clause.list {
-                self.walk_expr(expr);
-            }
-            self.walk_stmts(&clause.body);
-        }
-    }
-
-    fn walk_decl_stmt(&mut self, decl: &gosyn::ast::DeclStmt) {
-        use gosyn::ast::DeclStmt as D;
-        match decl {
-            D::Type(decl) => {
-                for spec in &decl.specs {
-                    self.walk_expr(&spec.typ);
-                }
-            }
-            D::Const(decl) => {
-                for spec in &decl.specs {
-                    self.walk_value_spec(&spec.typ, &spec.values);
-                }
-            }
-            D::Variable(decl) => {
-                for spec in &decl.specs {
-                    self.walk_value_spec(&spec.typ, &spec.values);
-                }
-            }
-        }
-    }
-
-    fn walk_call(&mut self, call: &gosyn::ast::Call) {
-        self.walk_expr(&call.func);
-        for arg in &call.args {
-            self.walk_expr(arg);
-        }
-    }
-
-    fn walk_expr(&mut self, expr: &gosyn::ast::Expression) {
-        use gosyn::ast::Expression as E;
-        match expr {
-            E::Ident(ident) => self.references.push(CodeReference {
-                kind: "identifier".to_string(),
-                name: ident.name.clone(),
-                line: self.line_index.line(ident.pos),
-                import_path: None,
-            }),
-            E::Selector(sel) => {
-                self.walk_expr(&sel.x);
-                self.references.push(CodeReference {
-                    kind: "selector".to_string(),
-                    name: sel.sel.name.clone(),
-                    line: self.line_index.line(sel.sel.pos),
-                    import_path: None,
-                });
-            }
-            E::Call(call) => self.walk_call(call),
-            E::Index(index) => {
-                self.walk_expr(&index.left);
-                self.walk_expr(&index.index);
-            }
-            E::IndexList(index) => {
-                self.walk_expr(&index.left);
-                for expr in &index.indices {
-                    self.walk_expr(expr);
-                }
-            }
-            E::Slice(slice) => {
-                self.walk_expr(&slice.left);
-                for expr in slice.index.iter().flatten() {
-                    self.walk_expr(expr);
-                }
-            }
-            E::FuncLit(lit) => {
-                self.walk_func_type(&lit.typ);
-                self.walk_block(&lit.body);
-            }
-            E::Ellipsis(ellipsis) => {
-                if let Some(elt) = &ellipsis.elt {
-                    self.walk_expr(elt);
-                }
-            }
-            E::Range(range) => self.walk_expr(&range.right),
-            E::Star(star) => self.walk_expr(&star.right),
-            E::Paren(paren) => self.walk_expr(&paren.expr),
-            E::TypeAssert(assert) => {
-                self.walk_expr(&assert.left);
-                if let Some(right) = &assert.right {
-                    self.walk_expr(right);
-                }
-            }
-            E::CompositeLit(lit) => {
-                self.walk_expr(&lit.typ);
-                self.walk_literal_value(&lit.val);
-            }
-            E::List(list) => {
-                for expr in list {
-                    self.walk_expr(expr);
-                }
-            }
-            E::Operation(op) => {
-                self.walk_expr(&op.x);
-                if let Some(y) = &op.y {
-                    self.walk_expr(y);
-                }
-            }
-            E::TypeMap(map) => {
-                self.walk_expr(&map.key);
-                self.walk_expr(&map.val);
-            }
-            E::TypeArray(array) => {
-                self.walk_expr(&array.len);
-                self.walk_expr(&array.typ);
-            }
-            E::TypeSlice(slice) => self.walk_expr(&slice.typ),
-            E::TypeFunction(typ) => self.walk_func_type(typ),
-            E::TypeStruct(typ) => {
-                for field in &typ.fields {
-                    self.walk_expr(&field.typ);
-                }
-            }
-            E::TypeChannel(chan) => self.walk_expr(&chan.typ),
-            E::TypePointer(ptr) => self.walk_expr(&ptr.typ),
-            E::TypeInterface(typ) => self.walk_field_list(&typ.methods),
-            E::BasicLit(_) => {}
-        }
-    }
-
-    fn walk_literal_value(&mut self, lit: &gosyn::ast::LiteralValue) {
-        for element in &lit.values {
-            if let Some(key) = &element.key {
-                self.walk_element(key);
-            }
-            self.walk_element(&element.val);
-        }
-    }
-
-    fn walk_element(&mut self, element: &gosyn::ast::Element) {
-        use gosyn::ast::Element as El;
-        match element {
-            El::Expr(expr) => self.walk_expr(expr),
-            El::LitValue(lit) => self.walk_literal_value(lit),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct LineIndex {
-    starts: Vec<usize>,
-}
-
-impl LineIndex {
-    fn new(source: &str) -> Self {
-        let mut starts = vec![0];
-        for (idx, byte) in source.bytes().enumerate() {
-            if byte == b'\n' {
-                starts.push(idx + 1);
-            }
-        }
-        Self { starts }
-    }
-
-    fn line(&self, offset: usize) -> usize {
-        self.starts.partition_point(|start| *start <= offset)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsCatalogProvider, RootPolicy, ScanOptions};
-    use std::fs;
 
-    #[test]
-    fn extracts_rust_top_level_symbols_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("lib.rs"),
-            r#"
-pub struct Widget;
+    fn parse(source: &str, rel_path: &str) -> ParsedCodeFile {
+        symbols_for_path(source, rel_path)
+            .expect("parse")
+            .expect("supported language")
+    }
 
-enum Mode { Fast }
-
-trait Render { fn render(&self); }
-
-impl Widget {
-    pub fn method(&self) {}
-}
-
-pub fn make_widget() -> Widget { Widget }
-"#,
-        )
-        .expect("write");
-
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
-        let snapshot = provider.snapshot().expect("snapshot");
-        let response = get_code_structure(&provider, &snapshot, &[]).expect("codemap");
-        let file = response.files.first().expect("file");
-        let symbols: Vec<_> = file
-            .symbols
-            .iter()
-            .map(|symbol| (symbol.kind.as_str(), symbol.name.as_str(), symbol.line))
-            .collect();
-
-        assert_eq!(
-            symbols,
-            vec![
-                ("struct", "Widget", 2),
-                ("enum", "Mode", 4),
-                ("trait", "Render", 6),
-                ("impl", "Widget", 8),
-                ("function", "make_widget", 12),
-            ]
-        );
-        assert!(!file.symbols.iter().any(|symbol| symbol.name == "method"));
+    fn has_symbol(parsed: &ParsedCodeFile, name: &str) -> bool {
+        parsed.symbols.iter().any(|symbol| symbol.name == name)
     }
 
     #[test]
-    fn extracts_python_top_level_symbols_only() {
-        let symbols = python_symbols(include_str!("../tests/fixtures/gamma.py")).expect("parse");
-        let symbols: Vec<_> = symbols
-            .iter()
-            .map(|symbol| (symbol.kind.as_str(), symbol.name.as_str(), symbol.line))
-            .collect();
-
-        assert_eq!(
-            symbols,
-            vec![
-                ("class", "PyAlpha", 1),
-                ("function", "py_helper", 6),
-                ("function", "async_worker", 10),
-            ]
+    fn rust_definitions_and_references() {
+        let parsed = parse(
+            "pub struct Widget;\npub fn make_widget() -> Widget { Widget }\n",
+            "lib.rs",
         );
+        assert_eq!(parsed.language, "rust");
+        assert!(has_symbol(&parsed, "Widget"));
+        assert!(has_symbol(&parsed, "make_widget"));
     }
 
     #[test]
-    fn extracts_javascript_top_level_symbols_only() {
-        let symbols = javascript_symbols(include_str!("../tests/fixtures/delta.js"), "delta.js")
-            .expect("parse");
-        let symbols: Vec<_> = symbols
-            .iter()
-            .map(|symbol| (symbol.kind.as_str(), symbol.name.as_str(), symbol.line))
-            .collect();
+    fn python_definitions() {
+        let parsed = parse(include_str!("../tests/fixtures/gamma.py"), "gamma.py");
+        assert_eq!(parsed.language, "python");
+        assert!(has_symbol(&parsed, "PyAlpha"));
+        assert!(has_symbol(&parsed, "py_helper"));
+    }
 
-        assert_eq!(
-            symbols,
-            vec![
-                ("function", "jsEntry", 1),
-                ("class", "Widget", 5),
-                ("function", "runTask", 9),
-                ("function", "exportedArrow", 10),
-                ("function", "makeThing", 11),
-                ("class", "ExportedThing", 17),
-            ]
+    #[test]
+    fn javascript_definitions() {
+        let parsed = parse(include_str!("../tests/fixtures/delta.js"), "delta.js");
+        assert_eq!(parsed.language, "javascript");
+        assert!(has_symbol(&parsed, "Widget"));
+    }
+
+    #[test]
+    fn go_definitions_and_references() {
+        let parsed = parse(include_str!("../tests/go_fixture.go"), "main.go");
+        assert_eq!(parsed.language, "go");
+        assert!(has_symbol(&parsed, "NewService"));
+        assert!(has_symbol(&parsed, "Greet"));
+        assert!(!parsed.references.is_empty());
+    }
+
+    #[test]
+    fn typescript_definitions() {
+        let parsed = parse(
+            "export class Service {\n  greet(name: string): string { return name; }\n}\nexport function make(): Service { return new Service(); }\n",
+            "svc.ts",
         );
-    }
-
-    #[test]
-    fn extracts_go_top_level_symbols_only() {
-        let (symbols, _) = go_code_facts(include_str!("../tests/go_fixture.go")).expect("parse");
-        let symbols: Vec<_> = symbols
-            .iter()
-            .map(|symbol| (symbol.kind.as_str(), symbol.name.as_str(), symbol.line))
-            .collect();
-        assert_eq!(
-            symbols,
-            vec![
-                ("interface", "Greeter", 8),
-                ("struct", "Service", 12),
-                ("const", "MaxRetries", 16),
-                ("var", "defaultName", 18),
-                ("method", "Greet", 20),
-                ("function", "NewService", 24),
-            ]
+        assert_eq!(parsed.language, "javascript");
+        assert!(
+            has_symbol(&parsed, "Service"),
+            "symbols: {:?}",
+            parsed.symbols
         );
+        assert!(has_symbol(&parsed, "make"));
     }
 
     #[test]
-    fn collects_go_references() {
-        let (_, references) = go_code_facts(include_str!("../tests/go_fixture.go")).expect("parse");
-        let has =
-            |kind: &str, name: &str| references.iter().any(|r| r.kind == kind && r.name == name);
-        assert!(has("import", "fmt"));
-        assert!(has("import", "strings"));
-        assert!(has("selector", "ToUpper"));
-        assert!(has("selector", "Sprintf"));
-        assert!(has("identifier", "Service"));
+    fn java_definitions() {
+        let parsed = parse(
+            "class Greeter {\n  public String greet(String name) { return name; }\n}\n",
+            "Greeter.java",
+        );
+        assert_eq!(parsed.language, "java");
+        assert!(has_symbol(&parsed, "Greeter"));
+        assert!(has_symbol(&parsed, "greet"));
     }
 
     #[test]
-    fn names_trait_impls_as_trait_for_type() {
-        let symbols = rust_symbols("impl CatalogProvider for FsCatalogProvider {}").expect("parse");
-        assert_eq!(symbols[0].kind, "impl");
-        assert_eq!(symbols[0].name, "CatalogProvider for FsCatalogProvider");
+    fn ruby_definitions() {
+        let parsed = parse(
+            "class Greeter\n  def greet(name)\n    name\n  end\nend\n",
+            "greeter.rb",
+        );
+        assert_eq!(parsed.language, "ruby");
+        assert!(has_symbol(&parsed, "Greeter"));
+        assert!(has_symbol(&parsed, "greet"));
+    }
+
+    #[test]
+    fn unsupported_extension_returns_none() {
+        assert!(
+            symbols_for_path("plain text", "notes.txt")
+                .expect("ok")
+                .is_none()
+        );
     }
 }

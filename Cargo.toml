@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ctx-core", "crates/ctx-mcp", "crates/ctx-ffi", "crates/ctx-wasm"]
+members = ["crates/ctx-core", "crates/ctx-mcp", "crates/ctx-ffi"]
 exclude = ["fuzz"]
 resolver = "3"
 
@@ -17,7 +17,6 @@ repository = "https://github.com/z23cc/context-engine-rs"
 anyhow = "1"
 aho-corasick = "1"
 clap = { version = "4", features = ["derive"] }
-gosyn = "0.2.10"
 ignore = "0.4"
 memchr = "2"
 nucleo-matcher = "0.3.1"
@@ -25,20 +24,9 @@ regex = "1"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "2", features = ["full", "printing", "extra-traits", "visit"] }
-quote = "1"
-oxc_parser = "0.135.0"
-oxc_ast = "0.135.0"
-oxc_span = "0.135.0"
-oxc_allocator = "0.135.0"
-ruff_python_parser = { version = "0.15.8", package = "rustpython-ruff_python_parser" }
-ruff_python_ast = { version = "0.15.8", package = "rustpython-ruff_python_ast" }
-ruff_text_size = { version = "0.15.8", package = "rustpython-ruff_text_size" }
 thiserror = "2"
 tempfile = "3"
 insta = { version = "1", features = ["json", "redactions"] }
 criterion = { version = "0.5", default-features = false }
 proptest = "1"
 tiktoken-rs = { version = "0.12.0", default-features = false }
-wasm-bindgen = "0.2"

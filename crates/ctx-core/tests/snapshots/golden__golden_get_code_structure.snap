@@ -9,29 +9,29 @@ expression: response
       "language": "rust",
       "symbols": [
         {
-          "kind": "struct",
+          "kind": "class",
           "name": "Alpha",
           "line": 1
         },
         {
-          "kind": "enum",
+          "kind": "class",
           "name": "Mode",
           "line": 5
         },
         {
-          "kind": "trait",
+          "kind": "interface",
           "name": "Runnable",
           "line": 10
         },
         {
-          "kind": "impl",
-          "name": "Alpha",
-          "line": 14
+          "kind": "method",
+          "name": "new",
+          "line": 15
         },
         {
-          "kind": "impl",
-          "name": "Runnable for Alpha",
-          "line": 20
+          "kind": "method",
+          "name": "run",
+          "line": 21
         },
         {
           "kind": "function",
@@ -55,6 +55,11 @@ expression: response
           "line": 5
         },
         {
+          "kind": "method",
+          "name": "method",
+          "line": 6
+        },
+        {
           "kind": "function",
           "name": "runTask",
           "line": 9
@@ -68,6 +73,11 @@ expression: response
           "kind": "function",
           "name": "makeThing",
           "line": 11
+        },
+        {
+          "kind": "function",
+          "name": "nestedSkip",
+          "line": 14
         },
         {
           "kind": "class",
@@ -87,6 +97,11 @@ expression: response
         },
         {
           "kind": "function",
+          "name": "method",
+          "line": 2
+        },
+        {
+          "kind": "function",
           "name": "py_helper",
           "line": 6
         },
@@ -94,6 +109,11 @@ expression: response
           "kind": "function",
           "name": "async_worker",
           "line": 10
+        },
+        {
+          "kind": "function",
+          "name": "nested_skip",
+          "line": 15
         }
       ]
     },
@@ -102,22 +122,12 @@ expression: response
       "language": "rust",
       "symbols": [
         {
-          "kind": "type",
+          "kind": "class",
           "name": "BetaCount",
           "line": 1
         },
         {
-          "kind": "const",
-          "name": "BETA_LIMIT",
-          "line": 3
-        },
-        {
-          "kind": "static",
-          "name": "BETA_NAME",
-          "line": 5
-        },
-        {
-          "kind": "mod",
+          "kind": "module",
           "name": "inner",
           "line": 7
         },
