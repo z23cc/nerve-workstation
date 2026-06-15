@@ -108,6 +108,9 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   STAGE="$TMP/stage"; mkdir -p "$STAGE"
   cp "target/release/$BIN" "$STAGE/$BIN"
   strip "$STAGE/$BIN" 2>/dev/null || true
+  # strip drops the linker's ad-hoc signature; re-sign or the binary is SIGKILLed on Apple Silicon
+  codesign --sign - --force "$STAGE/$BIN"
+  "$STAGE/$BIN" --version >/dev/null # smoke test: abort the release if the binary cannot run
   MAC_TARBALL="$TMP/${BIN}-${NEW}-aarch64-apple-darwin.tar.gz"
   tar -czf "$MAC_TARBALL" -C "$STAGE" "$BIN"
   MAC_SHA="$(shasum -a 256 "$MAC_TARBALL" | awk '{print $1}')"
