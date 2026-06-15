@@ -8,11 +8,9 @@ repository.workspace = true
 
 [dependencies]
 aho-corasick.workspace = true
-ignore.workspace = true
 memchr.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
-rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,6 +25,10 @@ ruff_python_parser.workspace = true
 ruff_python_ast.workspace = true
 ruff_text_size.workspace = true
 tiktoken-rs.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ignore.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

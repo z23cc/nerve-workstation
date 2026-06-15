@@ -17,6 +17,7 @@ use crate::{
     port::CatalogProvider,
     snapshot::CatalogSnapshot,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -193,11 +194,22 @@ fn analyze_files_cancellable<P: CatalogProvider + Sync>(
     query: Option<&str>,
     cancel: &CancelToken,
 ) -> Result<Vec<FileAnalysisResult>, CtxError> {
-    snapshot
-        .entries
-        .par_iter()
-        .map(|entry| analyze_file(provider, snapshot, entry, query, cancel))
-        .collect()
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        snapshot
+            .entries
+            .par_iter()
+            .map(|entry| analyze_file(provider, snapshot, entry, query, cancel))
+            .collect()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| analyze_file(provider, snapshot, entry, query, cancel))
+            .collect()
+    }
 }
 
 fn analyze_file<P: CatalogProvider + Sync>(

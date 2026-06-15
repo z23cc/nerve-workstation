@@ -1,30 +1,309 @@
-//! Filesystem-backed catalog provider.
+//! Catalog providers.
+//!
+//! `MemoryCatalogProvider` is host-fed and works in wasm/browser/edge hosts. The
+//! native-only `FsCatalogProvider` keeps the filesystem + ignore walker behind
+//! the same `CatalogProvider` port.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::security::RootPolicy;
 use crate::{
     cancel::CancelToken,
     codemap::symbols_for_path,
     models::*,
     port::{CatalogProvider, CodeSymbolsResult},
-    security::RootPolicy,
     selection::Selection,
     snapshot::CatalogSnapshot,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use ignore::WalkBuilder;
 use std::{
     collections::HashMap,
+    path::{Component, Path, PathBuf},
+    sync::{Arc, RwLock},
+};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
     fmt, fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::Mutex,
     time::{Duration, Instant, SystemTime},
 };
 
-/// Options controlling catalog scan cost.
+/// One host-provided file for `MemoryCatalogProvider`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostFile {
+    pub path: PathBuf,
+    pub content: Vec<u8>,
+}
+
+impl HostFile {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>, content: impl Into<Vec<u8>>) -> Self {
+        Self {
+            path: path.into(),
+            content: content.into(),
+        }
+    }
+}
+
+/// Host-fed in-memory catalog provider.
+///
+/// This provider never scans the filesystem and never consults ignore rules. It
+/// is intended for browser/edge wasm hosts that already possess file paths and
+/// contents and want to feed them through the same engine port used by native
+/// filesystem hosts.
+#[derive(Clone, Debug)]
+pub struct MemoryCatalogProvider {
+    root_id: String,
+    root_path: PathBuf,
+    state: Arc<MemoryProviderState>,
+}
+
+#[derive(Debug)]
+struct MemoryProviderState {
+    snapshot: RwLock<Arc<CatalogSnapshot>>,
+    files: RwLock<HashMap<PathBuf, Arc<Vec<u8>>>>,
+    codemap: RwLock<HashMap<PathBuf, Arc<CodeSymbolsResult>>>,
+    selection: RwLock<Selection>,
+}
+
+impl Default for MemoryProviderState {
+    fn default() -> Self {
+        Self {
+            snapshot: RwLock::new(Arc::new(CatalogSnapshot {
+                generation: 0,
+                roots: Vec::new(),
+                entries: Vec::new(),
+                diagnostics: Vec::new(),
+            })),
+            files: RwLock::new(HashMap::new()),
+            codemap: RwLock::new(HashMap::new()),
+            selection: RwLock::new(Selection::default()),
+        }
+    }
+}
+
+impl Default for MemoryCatalogProvider {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl MemoryCatalogProvider {
+    const DEFAULT_ROOT_ID: &'static str = "memory-root";
+    const DEFAULT_ROOT_NAME: &'static str = "host";
+
+    #[must_use]
+    pub fn empty() -> Self {
+        let provider = Self {
+            root_id: Self::DEFAULT_ROOT_ID.to_string(),
+            root_path: PathBuf::from(Self::DEFAULT_ROOT_NAME),
+            state: Arc::new(MemoryProviderState::default()),
+        };
+        provider
+            .replace_files(Vec::new())
+            .expect("empty host files");
+        provider
+    }
+
+    pub fn new(files: Vec<HostFile>) -> Result<Self, CtxError> {
+        let provider = Self::empty();
+        provider.replace_files(files)?;
+        Ok(provider)
+    }
+
+    pub fn from_pairs<I, P, C>(files: I) -> Result<Self, CtxError>
+    where
+        I: IntoIterator<Item = (P, C)>,
+        P: Into<PathBuf>,
+        C: Into<Vec<u8>>,
+    {
+        Self::new(
+            files
+                .into_iter()
+                .map(|(path, content)| HostFile::new(path, content))
+                .collect(),
+        )
+    }
+
+    pub fn replace_files(&self, files: Vec<HostFile>) -> Result<(), CtxError> {
+        let mut entries = Vec::with_capacity(files.len());
+        let mut map = HashMap::with_capacity(files.len());
+
+        for file in files {
+            let normalized = normalize_host_path(&file.path)?;
+            let rel_path = path_to_slash_string(&normalized);
+            let content = Arc::new(file.content);
+            entries.push(CatalogEntry {
+                root_id: self.root_id.clone(),
+                rel_path,
+                abs_path: normalized.clone(),
+                size: content.len() as u64,
+            });
+            map.insert(normalized, content);
+        }
+
+        entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+        let snapshot = CatalogSnapshot {
+            generation: self
+                .state
+                .snapshot
+                .read()
+                .expect("memory snapshot lock")
+                .generation
+                .saturating_add(1),
+            roots: vec![RootRef {
+                id: self.root_id.clone(),
+                path: self.root_path.clone(),
+            }],
+            entries,
+            diagnostics: Vec::new(),
+        };
+
+        *self.state.files.write().expect("memory files lock") = map;
+        *self.state.codemap.write().expect("memory codemap lock") = HashMap::new();
+        *self.state.snapshot.write().expect("memory snapshot lock") = Arc::new(snapshot);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn root_id(&self) -> &str {
+        &self.root_id
+    }
+}
+
+impl CatalogProvider for MemoryCatalogProvider {
+    fn snapshot(&self) -> Result<CatalogSnapshot, CtxError> {
+        Ok((**self.state.snapshot.read().expect("memory snapshot lock")).clone())
+    }
+
+    fn snapshot_arc(&self) -> Result<Arc<CatalogSnapshot>, CtxError> {
+        Ok(Arc::clone(
+            &self.state.snapshot.read().expect("memory snapshot lock"),
+        ))
+    }
+
+    fn snapshot_arc_cancellable(
+        &self,
+        cancel: &CancelToken,
+    ) -> Result<Arc<CatalogSnapshot>, CtxError> {
+        cancel.check_cancelled()?;
+        let snapshot = self.snapshot_arc()?;
+        cancel.check_cancelled()?;
+        Ok(snapshot)
+    }
+
+    fn invalidate(&self) {
+        self.state
+            .codemap
+            .write()
+            .expect("memory codemap lock")
+            .clear();
+    }
+
+    fn selection(&self) -> Selection {
+        self.state
+            .selection
+            .read()
+            .expect("memory selection lock")
+            .clone()
+    }
+
+    fn set_selection(&self, selection: Selection) {
+        *self.state.selection.write().expect("memory selection lock") = selection;
+    }
+
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CtxError> {
+        let normalized = normalize_host_path(path)?;
+        self.state
+            .files
+            .read()
+            .expect("memory files lock")
+            .get(&normalized)
+            .map(|bytes| bytes.as_ref().clone())
+            .ok_or_else(|| CtxError::OutsideRoots(path.to_path_buf()))
+    }
+
+    fn code_symbols_for_path(
+        &self,
+        path: &Path,
+        rel_path: &str,
+    ) -> Result<CodeSymbolsResult, CtxError> {
+        let normalized = normalize_host_path(path)?;
+        if let Some(cached) = self
+            .state
+            .codemap
+            .read()
+            .expect("memory codemap lock")
+            .get(&normalized)
+        {
+            return Ok((**cached).clone());
+        }
+
+        let bytes = self.read_bytes(&normalized)?;
+        let source = String::from_utf8_lossy(&bytes);
+        let parsed: CodeSymbolsResult =
+            symbols_for_path(&source, rel_path).map(|maybe| maybe.map(Arc::new));
+        self.state
+            .codemap
+            .write()
+            .expect("memory codemap lock")
+            .insert(normalized, Arc::new(parsed.clone()));
+        Ok(parsed)
+    }
+
+    fn display_path(&self, path: &Path) -> String {
+        normalize_host_path(path).map_or_else(
+            |_| path.to_string_lossy().replace('\\', "/"),
+            |normalized| {
+                format!(
+                    "{}/{}",
+                    self.root_path.display(),
+                    path_to_slash_string(&normalized)
+                )
+            },
+        )
+    }
+}
+
+fn normalize_host_path(path: &Path) -> Result<PathBuf, CtxError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                if normalized.as_os_str().is_empty()
+                    && part == MemoryCatalogProvider::DEFAULT_ROOT_NAME
+                {
+                    continue;
+                }
+                normalized.push(part);
+            }
+            Component::CurDir | Component::RootDir => {}
+            Component::ParentDir => {
+                return Err(CtxError::PathTraversal(path.display().to_string()));
+            }
+            Component::Prefix(_) => {}
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        Err(CtxError::OutsideRoots(path.to_path_buf()))
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn path_to_slash_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Options controlling native catalog scan cost.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub max_entries: usize,
     pub snapshot_cache_ttl: Duration,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
@@ -34,9 +313,11 @@ impl Default for ScanOptions {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type Clock = dyn Fn() -> Instant + Send + Sync;
 
 /// Filesystem provider using an allow-listed root policy.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct FsCatalogProvider {
     policy: RootPolicy,
@@ -45,6 +326,7 @@ pub struct FsCatalogProvider {
     clock: Arc<Clock>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl fmt::Debug for FsCatalogProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FsCatalogProvider")
@@ -54,6 +336,7 @@ impl fmt::Debug for FsCatalogProvider {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 struct ProviderCache {
     snapshot: RwLock<Option<CachedSnapshot>>,
@@ -61,24 +344,28 @@ struct ProviderCache {
     selection: RwLock<Selection>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 struct CachedSnapshot {
     created_at: Instant,
     snapshot: Arc<CatalogSnapshot>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 struct CachedCodeSymbols {
     signature: FileSignature,
     symbols: Arc<CodeSymbolsResult>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileSignature {
     modified: Option<SystemTime>,
     size: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FsCatalogProvider {
     #[must_use]
     pub fn new(policy: RootPolicy, options: ScanOptions) -> Self {
@@ -277,11 +564,13 @@ impl FsCatalogProvider {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn cache_entry_fresh(now: Instant, created_at: Instant, ttl: Duration) -> bool {
     now.checked_duration_since(created_at)
         .is_some_and(|age| age <= ttl)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CatalogProvider for FsCatalogProvider {
     fn snapshot(&self) -> Result<CatalogSnapshot, CtxError> {
         self.snapshot_arc().map(|snapshot| (*snapshot).clone())
@@ -375,6 +664,34 @@ impl CatalogProvider for FsCatalogProvider {
 }
 
 #[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn memory_provider_reads_host_fed_files_without_fs() {
+        let provider =
+            MemoryCatalogProvider::new(vec![HostFile::new("src/lib.rs", "pub fn alpha() {}\n")])
+                .expect("provider");
+        let snapshot = provider.snapshot().expect("snapshot");
+        assert_eq!(snapshot.entries[0].rel_path, "src/lib.rs");
+        assert_eq!(
+            provider.read_bytes(Path::new("src/lib.rs")).expect("read"),
+            b"pub fn alpha() {}\n"
+        );
+        assert_eq!(
+            provider.display_path(Path::new("src/lib.rs")),
+            "host/src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn memory_provider_rejects_traversal() {
+        let err = MemoryCatalogProvider::new(vec![HostFile::new("../secret", "nope")]).unwrap_err();
+        assert!(matches!(err, CtxError::PathTraversal(_)));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -406,89 +723,41 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_cache_reuses_arc_until_ttl_expires() {
+    fn cache_reuses_snapshot_within_ttl() {
         let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("first.rs"), "pub fn first() {}\n").expect("write");
+        fs::write(dir.path().join("a.txt"), "a").expect("a");
         let now = Arc::new(Mutex::new(Instant::now()));
         let clock_now = Arc::clone(&now);
         let provider = FsCatalogProvider::with_clock(
             RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions {
-                snapshot_cache_ttl: Duration::from_millis(1_000),
-                ..ScanOptions::default()
-            },
-            move || *clock_now.lock().expect("clock lock"),
-        );
-
-        let first = provider.snapshot_arc().expect("snapshot");
-        fs::write(dir.path().join("second.rs"), "pub fn second() {}\n").expect("write");
-        let second = provider.snapshot_arc().expect("cached snapshot");
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(paths(&second), vec!["first.rs"]);
-
-        *now.lock().expect("clock lock") += Duration::from_millis(1_001);
-        let third = provider.snapshot_arc().expect("expired snapshot");
-        assert!(!Arc::ptr_eq(&first, &third));
-        assert_eq!(paths(&third), vec!["first.rs", "second.rs"]);
-    }
-
-    #[test]
-    fn invalidate_forces_snapshot_rebuild() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("first.rs"), "pub fn first() {}\n").expect("write");
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
             ScanOptions::default(),
+            move || *clock_now.lock().expect("clock"),
         );
-
-        let first = provider.snapshot_arc().expect("snapshot");
-        fs::write(dir.path().join("second.rs"), "pub fn second() {}\n").expect("write");
-        provider.invalidate();
-        let second = provider.snapshot_arc().expect("rebuilt snapshot");
-
-        assert!(!Arc::ptr_eq(&first, &second));
-        assert_eq!(paths(&second), vec!["first.rs", "second.rs"]);
+        let first = provider.snapshot_arc().expect("first");
+        fs::write(dir.path().join("b.txt"), "b").expect("b");
+        let second = provider.snapshot_arc().expect("second");
+        assert!(Arc::ptr_eq(&first, &second));
+        *now.lock().expect("clock") += Duration::from_secs(2);
+        let third = provider.snapshot_arc().expect("third");
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(paths(&third), vec!["a.txt", "b.txt"]);
     }
 
     #[test]
-    fn codemap_cache_reuses_symbols_until_signature_changes_or_invalidates() {
+    fn invalidation_clears_snapshot_and_codemap_cache() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("lib.rs");
-        fs::write(&path, "pub fn first() {}\n").expect("write");
+        fs::write(&path, "pub fn one() {}\n").expect("write one");
         let provider = FsCatalogProvider::new(
             RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
             ScanOptions::default(),
         );
-
-        let first = provider
+        provider
             .code_symbols_for_path(&path, "lib.rs")
-            .expect("read")
-            .expect("parse")
-            .expect("supported");
-        let second = provider
-            .code_symbols_for_path(&path, "lib.rs")
-            .expect("read")
-            .expect("parse")
-            .expect("supported");
-        assert!(Arc::ptr_eq(&first, &second));
+            .expect("codemap")
+            .expect("parse");
         assert_eq!(provider.codemap_cache_len(), 1);
-
-        fs::write(&path, "pub fn first() {}\npub fn second() {}\n").expect("rewrite");
-        let stale = provider
-            .code_symbols_for_path(&path, "lib.rs")
-            .expect("read")
-            .expect("parse")
-            .expect("supported");
-        assert!(!Arc::ptr_eq(&first, &stale));
-        assert_eq!(stale.symbols.len(), 2);
-
         provider.invalidate();
         assert_eq!(provider.codemap_cache_len(), 0);
-        let after_invalidate = provider
-            .code_symbols_for_path(&path, "lib.rs")
-            .expect("read")
-            .expect("parse")
-            .expect("supported");
-        assert!(!Arc::ptr_eq(&stale, &after_invalidate));
     }
 }

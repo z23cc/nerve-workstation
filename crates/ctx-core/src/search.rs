@@ -6,6 +6,7 @@ use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use std::{
@@ -83,24 +84,58 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
 
     let mut path_matches = Vec::new();
     if matches!(request.mode, SearchMode::Path | SearchMode::Both) {
-        let path_results: Vec<Result<Option<PathSearchMatch>, CtxError>> = snapshot
-            .entries
-            .par_iter()
-            .map_init(
-                || PathMatcherState::new(case_sensitive),
-                |state, entry| {
-                    cancel.check_cancelled()?;
-                    Ok(path_score(&entry.rel_path, path_query, state).map(|score| {
-                        PathSearchMatch {
-                            root_id: entry.root_id.clone(),
-                            path: entry.rel_path.clone(),
-                            display_path: display_path(snapshot, &entry.root_id, &entry.rel_path),
-                            score,
-                        }
-                    }))
-                },
-            )
-            .collect();
+        let path_results: Vec<Result<Option<PathSearchMatch>, CtxError>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                snapshot
+                    .entries
+                    .par_iter()
+                    .map_init(
+                        || PathMatcherState::new(case_sensitive),
+                        |state, entry| {
+                            cancel.check_cancelled()?;
+                            Ok(path_score(&entry.rel_path, path_query, state).map(|score| {
+                                PathSearchMatch {
+                                    root_id: entry.root_id.clone(),
+                                    path: entry.rel_path.clone(),
+                                    display_path: display_path(
+                                        snapshot,
+                                        &entry.root_id,
+                                        &entry.rel_path,
+                                    ),
+                                    score,
+                                }
+                            }))
+                        },
+                    )
+                    .collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut state = PathMatcherState::new(case_sensitive);
+                snapshot
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        cancel.check_cancelled()?;
+                        Ok(
+                            path_score(&entry.rel_path, path_query, &mut state).map(|score| {
+                                PathSearchMatch {
+                                    root_id: entry.root_id.clone(),
+                                    path: entry.rel_path.clone(),
+                                    display_path: display_path(
+                                        snapshot,
+                                        &entry.root_id,
+                                        &entry.rel_path,
+                                    ),
+                                    score,
+                                }
+                            }),
+                        )
+                    })
+                    .collect()
+            }
+        };
         let mut path_hits = Vec::new();
         for result in path_results {
             if let Some(hit) = result? {
@@ -145,9 +180,13 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
             content_entries.push(entry);
         }
 
-        let content_results: Vec<Result<ContentSearchResult, CtxError>> = content_entries
-            .par_iter()
-            .map(|entry| {
+        let content_results: Vec<Result<ContentSearchResult, CtxError>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            let iter = content_entries.par_iter();
+            #[cfg(target_arch = "wasm32")]
+            let iter = content_entries.iter();
+
+            iter.map(|entry| {
                 cancel.check_cancelled()?;
                 let bytes = provider.read_bytes(Path::new(&entry.abs_path))?;
                 cancel.check_cancelled()?;
@@ -201,7 +240,8 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
                     diagnostic: None,
                 })
             })
-            .collect();
+            .collect()
+        };
 
         for result in content_results {
             let found = result?;

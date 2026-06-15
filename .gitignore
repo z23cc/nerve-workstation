@@ -1,3 +1,6 @@
 /target/
 **/*.rs.bk
 .DS_Store
+
+# wasm-pack build output
+crates/ctx-wasm/pkg/

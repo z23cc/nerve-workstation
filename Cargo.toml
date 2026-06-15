@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ctx-core", "crates/ctx-mcp", "crates/ctx-ffi"]
+members = ["crates/ctx-core", "crates/ctx-mcp", "crates/ctx-ffi", "crates/ctx-wasm"]
 exclude = ["fuzz"]
 resolver = "3"
 
@@ -36,3 +36,4 @@ insta = { version = "1", features = ["json", "redactions"] }
 criterion = { version = "0.5", default-features = false }
 proptest = "1"
 tiktoken-rs = { version = "0.12.0", default-features = false }
+wasm-bindgen = "0.2"

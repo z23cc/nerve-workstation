@@ -209,3 +209,26 @@ Notes:
   100 MB tree; catalog ~482K files/s is ~200 ms over 100K files; warm queries hit the cache.
 - Same order of magnitude as ripgrep (which is faster via mmap/SIMD/streaming); the goal
   here is an embeddable on-demand engine, not to beat a dedicated grep.
+
+## WebAssembly (browser / edge)
+
+The engine compiles to `wasm32-unknown-unknown` (no filesystem, no threads). Hosts
+feed files into an in-memory catalog via the `ctx-wasm` crate, then call tools through
+the same dispatch surface as native. On wasm, parallel (rayon) paths fall back to
+sequential and `ignore`/filesystem code is gated out.
+
+```bash
+wasm-pack build crates/ctx-wasm --target nodejs   # or --target web / bundler
+```
+
+```js
+const m = require('./crates/ctx-wasm/pkg/ctx_wasm.js');
+m.feed_files(JSON.stringify([{ path: 'src/lib.rs', content: 'pub fn needle() {}' }]));
+const res = m.handle_request(JSON.stringify({
+  name: 'file_search', arguments: { pattern: 'needle', mode: 'content' },
+}));
+```
+
+`feed_files(files_json)` replaces the in-memory catalog (`[{path, content}]`, logical
+paths). `handle_request(json)` takes the same `{name, arguments}` tool-call shape as
+native dispatch. Runnable example: `crates/ctx-wasm/examples/node-smoke.js`.

@@ -24,7 +24,9 @@ pub use build_context::{
     BuildContextRequest, BuildContextResponse, build_context, build_context_cancellable,
 };
 pub use cancel::CancelToken;
+#[cfg(not(target_arch = "wasm32"))]
 pub use catalog::{FsCatalogProvider, ScanOptions};
+pub use catalog::{HostFile, MemoryCatalogProvider};
 pub use codemap::get_code_structure;
 pub use dispatch::{
     DispatchError, dispatch_error_json, dispatch_error_kind, handle_tool_call,
