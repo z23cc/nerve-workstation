@@ -7,10 +7,12 @@
 # the root Cargo.toml [workspace.package] version (all crates inherit it).
 #
 # Distribution:
-#   * macOS arm64 -> a prebuilt binary asset (no compiler needed on install).
-#   * everything else (Intel macOS, Linux) -> build from source via cargo.
-# When this script runs on an arm64 Mac it builds and attaches the prebuilt
-# binary and emits the dual formula; otherwise it emits a source-only formula.
+#   * macOS arm64 (where brew is available) -> a real Homebrew **bottle** tagged
+#     for this machine's macOS. A bottle is *poured*, not built, so `brew install`
+#     skips the build-from-source Xcode-version gate that otherwise blocks installs
+#     on pre-release macOS. The bottle only matches the macOS version it was built
+#     on; other macOS versions / Intel / Linux fall back to building from source.
+#   * Source builds use `cargo install` (Homebrew installs a temporary `rust`).
 #
 # Usage:
 #   Scripts/release.sh            # bump +0.0.1, then release
@@ -92,44 +94,16 @@ git push origin "$TAG"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# ---- source tarball (Linux / Intel fallback) ----
+# ---- source tarball (used for source builds on every platform) ----
 SRC_TARBALL="$TMP/${REPO}-${NEW}.tar.gz"
 git archive --format=tar --prefix="${REPO}-${NEW}/" "$TAG" | gzip -n >"$SRC_TARBALL"
 SRC_SHA="$(shasum -a 256 "$SRC_TARBALL" | awk '{print $1}')"
 SRC_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/${REPO}-${NEW}.tar.gz"
 echo ">> source sha256   : $SRC_SHA"
 
-# ---- prebuilt macOS arm64 binary (only when building on an arm64 Mac) ----
-HAS_MAC=0
-ASSETS=("$SRC_TARBALL")
-if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
-  echo ">> building macOS arm64 binary"
-  cargo build --release -p ctx-mcp
-  STAGE="$TMP/stage"; mkdir -p "$STAGE"
-  cp "target/release/$BIN" "$STAGE/$BIN"
-  # [profile.release] strip = true strips at link time and keeps a valid ad-hoc linker
-  # signature. Do NOT run external strip/codesign here — that corrupts the Mach-O and the
-  # binary gets SIGKILLed on Apple Silicon even after a verifying re-sign.
-  "$STAGE/$BIN" --version >/dev/null # smoke test: abort the release if the binary cannot run
-  MAC_TARBALL="$TMP/${BIN}-${NEW}-aarch64-apple-darwin.tar.gz"
-  tar -czf "$MAC_TARBALL" -C "$STAGE" "$BIN"
-  MAC_SHA="$(shasum -a 256 "$MAC_TARBALL" | awk '{print $1}')"
-  MAC_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/${BIN}-${NEW}-aarch64-apple-darwin.tar.gz"
-  HAS_MAC=1
-  ASSETS+=("$MAC_TARBALL")
-  echo ">> macos arm sha256: $MAC_SHA"
-fi
-
-# ---- github release (source + any prebuilt assets) ----
-gh release create "$TAG" "${ASSETS[@]}" \
-  -R "$OWNER/$REPO" \
-  --title "$TAG" \
-  --notes "Automated release $TAG. Install: \`brew install $OWNER/tap/$FORMULA\`"
-
-# ---- formula generator ----
+# ---- formula generator (arg1=1 includes the bottle block) ----
 gen_formula() {
-  if [[ "$HAS_MAC" == "1" ]]; then
-    cat <<EOF
+  cat <<EOF
 class CtxMcp < Formula
   desc "Minimal snapshot-centered context engine (MCP server over stdio)"
   homepage "https://github.com/$OWNER/$REPO"
@@ -137,44 +111,17 @@ class CtxMcp < Formula
   version "$NEW"
   sha256 "$SRC_SHA"
   license any_of: ["MIT", "Apache-2.0"]
-
-  on_macos do
-    on_arm do
-      url "$MAC_URL"
-      sha256 "$MAC_SHA"
-    end
-    on_intel do
-      depends_on "rust" => :build
-    end
-  end
-
-  on_linux do
-    depends_on "rust" => :build
-  end
-
-  def install
-    if OS.mac? && Hardware::CPU.arm?
-      bin.install "$BIN"
-    else
-      system "cargo", "install", *std_cargo_args(path: "crates/ctx-mcp")
-    end
-  end
-
-  test do
-    assert_match "$BIN $NEW", shell_output("#{bin}/$BIN --version")
-  end
-end
 EOF
-  else
+  if [[ "${1:-0}" == "1" && "$HAS_BOTTLE" == "1" ]]; then
     cat <<EOF
-class CtxMcp < Formula
-  desc "Minimal snapshot-centered context engine (MCP server over stdio)"
-  homepage "https://github.com/$OWNER/$REPO"
-  url "$SRC_URL"
-  version "$NEW"
-  sha256 "$SRC_SHA"
-  license any_of: ["MIT", "Apache-2.0"]
-  head "https://github.com/$OWNER/$REPO.git", branch: "main"
+
+  bottle do
+    root_url "$BOTTLE_ROOT"
+    sha256 cellar: :any_skip_relocation, $BTAG: "$BOTTLE_SHA"
+  end
+EOF
+  fi
+  cat <<EOF
 
   depends_on "rust" => :build
 
@@ -187,8 +134,37 @@ class CtxMcp < Formula
   end
 end
 EOF
-  fi
 }
+
+# ---- Homebrew bottle for this machine's macOS (arm64 macOS with brew) ----
+HAS_BOTTLE=0
+ASSETS=("$SRC_TARBALL")
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] && command -v brew >/dev/null; then
+  BTAG="$(brew ruby -e 'require "utils/bottles"; puts Utils::Bottles.tag' 2>/dev/null || true)"
+  if [[ -n "$BTAG" ]]; then
+    echo ">> building Homebrew bottle ($BTAG)"
+    cargo build --release -p ctx-mcp
+    "target/release/$BIN" --version >/dev/null # smoke test: abort if the binary cannot run
+    KEG="$TMP/bottle/$BIN/$NEW"
+    mkdir -p "$KEG/bin" "$KEG/.brew"
+    cp "target/release/$BIN" "$KEG/bin/$BIN"
+    [[ -f LICENSE ]] && cp LICENSE "$KEG/LICENSE"
+    gen_formula 0 >"$KEG/.brew/$BIN.rb" # in-keg reference copy (no bottle block; avoids a checksum cycle)
+    BOTTLE="$TMP/${BIN}-${NEW}.${BTAG}.bottle.tar.gz"
+    ( cd "$TMP/bottle" && tar -czf "$BOTTLE" "$BIN/$NEW" )
+    BOTTLE_SHA="$(shasum -a 256 "$BOTTLE" | awk '{print $1}')"
+    BOTTLE_ROOT="https://github.com/$OWNER/$REPO/releases/download/$TAG"
+    HAS_BOTTLE=1
+    ASSETS+=("$BOTTLE")
+    echo ">> bottle ($BTAG) sha256: $BOTTLE_SHA"
+  fi
+fi
+
+# ---- github release (source + bottle if built) ----
+gh release create "$TAG" "${ASSETS[@]}" \
+  -R "$OWNER/$REPO" \
+  --title "$TAG" \
+  --notes "Automated release $TAG. Install: \`brew install $OWNER/tap/$FORMULA\`"
 
 # ---- ensure tap repo exists ----
 if ! gh repo view "$OWNER/$TAP_REPO" >/dev/null 2>&1; then
@@ -209,7 +185,7 @@ done
 $cloned || git clone -q "https://github.com/$OWNER/$TAP_REPO.git" "$TAPDIR"
 
 mkdir -p "$TAPDIR/Formula"
-gen_formula >"$TAPDIR/Formula/${FORMULA}.rb"
+gen_formula 1 >"$TAPDIR/Formula/${FORMULA}.rb"
 
 git -C "$TAPDIR" add "Formula/${FORMULA}.rb"
 git -C "$TAPDIR" commit -q -m "$FORMULA $NEW"
@@ -218,4 +194,7 @@ git -C "$TAPDIR" push -q -u origin main
 
 echo
 echo "released $TAG and pushed formula to $OWNER/$TAP_REPO"
+if [[ "$HAS_BOTTLE" == "1" ]]; then
+  echo "macOS ($BTAG): brew pours the bottle (no compile, no Xcode gate)"
+fi
 echo "install with: brew install $OWNER/tap/$FORMULA"
