@@ -12,10 +12,12 @@
 //!   cargo test -p ctx-core --features semantic --test eval -- --ignored --nocapture
 //!
 //! Knobs (env):
-//!   EVAL_K=10        top-k cutoff for recall@k / hit / symbol-hit (default 10)
-//!   EVAL_RERANK=1    also construct + apply the reranker (default off: the
-//!                    pre-rerank fused candidate recall is the real bottleneck
-//!                    signal — rerank only reorders what was already retrieved).
+//!   EVAL_K=10            top-k cutoff for recall@k / hit / symbol-hit (default 10)
+//!   EVAL_RERANK=1        construct + apply the reranker (default off — on local
+//!                        code corpora no available reranker beats the fused
+//!                        BM25+dense ranking; see findings below)
+//!   EVAL_RERANKER=name   reranker model when EVAL_RERANK=1 (e.g.
+//!                        bge-reranker-v2-m3, jina-reranker-v2-base-multilingual)
 //!
 //! The assertion floor is intentionally a low sanity check. Once you trust the
 //! printed baseline, raise it to lock in a regression gate.
@@ -23,8 +25,9 @@
 #![cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
 
 use ctx_core::{
-    CancelToken, CatalogProvider, FsCatalogProvider, RootPolicy, ScanOptions, SemanticSearchMode,
-    SemanticSearchRequest, semantic::SemanticRuntimeConfig,
+    CancelToken, CatalogProvider, CatalogSnapshot, FsCatalogProvider, RootPolicy, ScanOptions,
+    SemanticSearchMode, SemanticSearchRequest,
+    semantic::{SemanticIndex, SemanticRuntimeConfig},
 };
 use serde::Deserialize;
 use std::{path::PathBuf, time::Instant};
@@ -42,6 +45,13 @@ struct EvalQuery {
 #[derive(Deserialize)]
 struct EvalSet {
     queries: Vec<EvalQuery>,
+}
+
+struct Outcome {
+    rank: Option<usize>,
+    labeled_symbol: bool,
+    symbol_hit: bool,
+    top1: String,
 }
 
 /// `crates/ctx-core` -> repository root.
@@ -75,16 +85,66 @@ fn truncate(value: &str, max: usize) -> String {
     }
 }
 
+fn eval_query(
+    index: &SemanticIndex,
+    provider: &FsCatalogProvider,
+    snapshot: &CatalogSnapshot,
+    q: &EvalQuery,
+    k: usize,
+    rerank: bool,
+) -> Outcome {
+    let response = index
+        .search(
+            provider,
+            snapshot,
+            &SemanticSearchRequest {
+                query: q.query.clone(),
+                max_results: k,
+                mode: SemanticSearchMode::Hybrid,
+                rerank,
+            },
+            &CancelToken::never(),
+        )
+        .expect("semantic search");
+
+    let rank = response
+        .results
+        .iter()
+        .take(k)
+        .position(|r| q.expected_files.iter().any(|e| e == &r.path))
+        .map(|i| i + 1);
+    let labeled_symbol = !q.expected_symbols.is_empty();
+    let symbol_hit = labeled_symbol
+        && response.results.iter().take(k).any(|r| {
+            r.symbol
+                .as_deref()
+                .is_some_and(|s| q.expected_symbols.iter().any(|e| e == s))
+        });
+    let top1 = response
+        .results
+        .first()
+        .map(|r| r.path.clone())
+        .unwrap_or_else(|| "-".into());
+
+    Outcome {
+        rank,
+        labeled_symbol,
+        symbol_hit,
+        top1,
+    }
+}
+
 #[test]
 #[ignore = "needs local ONNX model + builds the dense index over the repo; run with --ignored --nocapture"]
 fn semantic_search_recall_baseline() {
     let root = repo_root();
     let k = env_usize("EVAL_K", 10);
     let rerank = env_flag("EVAL_RERANK");
+    let reranker_model = std::env::var("EVAL_RERANKER").ok().filter(|v| !v.is_empty());
 
     let policy = RootPolicy::new(vec![root.clone()]).expect("root policy");
     let provider = FsCatalogProvider::new(
-        RootPolicy::new(vec![root.clone()]).expect("provider policy"),
+        RootPolicy::new(vec![root]).expect("provider policy"),
         ScanOptions::default(),
     );
     let snapshot = provider.snapshot().expect("snapshot");
@@ -92,6 +152,7 @@ fn semantic_search_recall_baseline() {
     let config = SemanticRuntimeConfig {
         enabled: true,
         rerank,
+        reranker_model: reranker_model.clone(),
         ..SemanticRuntimeConfig::disabled()
     };
     let index = config
@@ -99,78 +160,47 @@ fn semantic_search_recall_baseline() {
         .expect("build semantic index")
         .expect("semantic index enabled");
 
-    let set: EvalSet = serde_json::from_str(include_str!("fixtures/eval/queries.json"))
+    let set: EvalSet = serde_json::from_str(include_str!("eval_data/queries.json"))
         .expect("parse eval dataset");
     let n = set.queries.len();
     assert!(n > 0, "empty eval dataset");
 
+    println!();
+    println!(
+        "repo-level retrieval eval   (k={k}, rerank={rerank}, reranker={}, n={n})",
+        reranker_model.as_deref().unwrap_or("default")
+    );
+    println!("{:<18} {:>5} {:>5} {:>4}  top-1 path", "query", "hit", "rank", "sym");
+    println!("{}", "-".repeat(96));
+
+    let started = Instant::now();
     let mut file_hits = 0usize;
     let mut mrr_sum = 0.0f64;
     let mut symbol_total = 0usize;
     let mut symbol_hits = 0usize;
-
-    println!();
-    println!("repo-level retrieval eval   (k={k}, rerank={rerank}, n={n})");
-    println!(
-        "{:<18} {:>5} {:>5} {:>4}  {}",
-        "query", "hit", "rank", "sym", "top-1 path"
-    );
-    println!("{}", "-".repeat(96));
-
-    let started = Instant::now();
     for q in &set.queries {
-        let response = index
-            .search(
-                &provider,
-                &snapshot,
-                &SemanticSearchRequest {
-                    query: q.query.clone(),
-                    max_results: k,
-                    mode: SemanticSearchMode::Hybrid,
-                    rerank,
-                    ..SemanticSearchRequest::default()
-                },
-                &CancelToken::never(),
-            )
-            .expect("semantic search");
-
-        let rank = response
-            .results
-            .iter()
-            .take(k)
-            .position(|r| q.expected_files.iter().any(|e| e == &r.path))
-            .map(|i| i + 1);
-        if let Some(r) = rank {
+        let o = eval_query(&index, &provider, &snapshot, q, k, rerank);
+        if let Some(r) = o.rank {
             file_hits += 1;
             mrr_sum += 1.0 / r as f64;
         }
-
-        let symbol_hit = if q.expected_symbols.is_empty() {
-            None
-        } else {
+        if o.labeled_symbol {
             symbol_total += 1;
-            let hit = response.results.iter().take(k).any(|r| {
-                r.symbol
-                    .as_deref()
-                    .is_some_and(|s| q.expected_symbols.iter().any(|e| e == s))
-            });
-            if hit {
-                symbol_hits += 1;
-            }
-            Some(hit)
-        };
-
+            symbol_hits += usize::from(o.symbol_hit);
+        }
         println!(
             "{:<18} {:>5} {:>5} {:>4}  {}",
             truncate(&q.id, 18),
-            if rank.is_some() { "yes" } else { "NO" },
-            rank.map(|r| r.to_string()).unwrap_or_else(|| "-".into()),
-            match symbol_hit {
-                None => "-",
-                Some(true) => "yes",
-                Some(false) => "no",
+            if o.rank.is_some() { "yes" } else { "NO" },
+            o.rank.map(|r| r.to_string()).unwrap_or_else(|| "-".into()),
+            if !o.labeled_symbol {
+                "-"
+            } else if o.symbol_hit {
+                "yes"
+            } else {
+                "no"
             },
-            response.results.first().map(|r| r.path.as_str()).unwrap_or("-"),
+            o.top1,
         );
     }
     let elapsed = started.elapsed();

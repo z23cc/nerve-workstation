@@ -5,6 +5,10 @@ use super::*;
 
 pub(super) const DEFAULT_CANDIDATES: usize = 100;
 pub(super) const DEFAULT_RERANK_LIMIT: usize = 100;
+/// Rerank only the top `max_results * RERANK_WINDOW_FACTOR` fused candidates,
+/// so the cross-encoder refines ordering near the cut without promoting
+/// deep-pool junk into the returned top-k (which would drop recall@k).
+pub(super) const RERANK_WINDOW_FACTOR: usize = 4;
 pub(super) const RRF_K: f64 = 60.0;
 pub(super) const HNSW_MAX_CONN: usize = 16;
 pub(super) const HNSW_MAX_LAYER: usize = 16;

@@ -111,6 +111,13 @@ pub(super) fn parse_embedding_model(model: Option<&str>) -> Result<EmbeddingMode
 pub(super) fn parse_reranker_model(model: Option<&str>) -> Result<RerankerModel, CtxError> {
     match model.unwrap_or("bge-reranker-base") {
         "bge-reranker-base" | "BAAI/bge-reranker-base" => Ok(RerankerModel::BGERerankerBase),
+        "bge-reranker-v2-m3" | "BAAI/bge-reranker-v2-m3" => Ok(RerankerModel::BGERerankerV2M3),
+        "jina-reranker-v1-turbo-en" | "jinaai/jina-reranker-v1-turbo-en" => {
+            Ok(RerankerModel::JINARerankerV1TurboEn)
+        }
+        "jina-reranker-v2-base-multilingual" | "jinaai/jina-reranker-v2-base-multilingual" => {
+            Ok(RerankerModel::JINARerankerV2BaseMultiligual)
+        }
         other => Err(CtxError::Semantic(format!(
             "unsupported reranker model for semantic_search: {other}"
         ))),
