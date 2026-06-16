@@ -65,6 +65,11 @@ pub struct RepoMapFile {
     pub language: String,
     /// Fixed-precision PageRank score string for portable goldens.
     pub score: String,
+    /// Key symbols, surfaced as names in the rendered map text. Not serialized
+    /// into `structuredContent`: their names are already in the map text, and
+    /// full signatures/members belong to `get_code_structure` on demand — a
+    /// ranking tool should not re-encode codemap detail (aider emits text only).
+    #[serde(default, skip_serializing)]
     pub symbols: Vec<CodeSymbol>,
 }
 

@@ -790,38 +790,63 @@ impl ToolText for crate::SearchResponse {
     }
 }
 
+/// Character budget for the rendered repo-map text (~3k tokens). Like aider's
+/// `map_tokens`, the map degrades to fit: top-ranked files render first and the
+/// tail is dropped with a note, so a large `max_files` on a big repo never blows
+/// up the model-facing text. Full ranking stays in `structuredContent`.
+const REPO_MAP_TEXT_BUDGET_CHARS: usize = 12_000;
+const REPO_MAP_MAX_NAMES: usize = 8;
+
+fn render_repo_map_text(response: &crate::repomap::RepoMapResponse, budget: usize) -> String {
+    let mut out = String::new();
+    let mut rendered = 0usize;
+    for file in &response.files {
+        let mut line = String::new();
+        line.push_str(&file.score);
+        line.push('\t');
+        line.push_str(&file.display_path);
+        let names: Vec<&str> = file
+            .symbols
+            .iter()
+            .take(REPO_MAP_MAX_NAMES)
+            .map(|s| s.name.as_str())
+            .collect();
+        if !names.is_empty() {
+            line.push('\t');
+            line.push_str(&names.join(", "));
+            if file.symbols.len() > names.len() {
+                line.push_str(", …");
+            }
+        }
+        line.push('\n');
+        // Always emit at least the top-ranked file; stop once the budget is hit.
+        if rendered > 0 && out.len() + line.len() > budget {
+            break;
+        }
+        out.push_str(&line);
+        rendered += 1;
+    }
+    if response.files.is_empty() {
+        out.push_str("(no ranked files)\n");
+    }
+    let omitted = response.files.len() - rendered;
+    if omitted > 0 {
+        out.push_str(&format!(
+            "(+{omitted} more ranked files omitted to fit the map budget; full ranking in structuredContent)\n"
+        ));
+    }
+    if !response.diagnostics.is_empty() {
+        out.push_str(&format!(
+            "({} files skipped; parse diagnostics in structuredContent)\n",
+            response.diagnostics.len()
+        ));
+    }
+    out
+}
+
 impl ToolText for crate::repomap::RepoMapResponse {
     fn tool_text(&self) -> String {
-        let mut out = String::new();
-        for file in &self.files {
-            out.push_str(&file.score);
-            out.push('\t');
-            out.push_str(&file.display_path);
-            let names: Vec<&str> = file
-                .symbols
-                .iter()
-                .take(8)
-                .map(|s| s.name.as_str())
-                .collect();
-            if !names.is_empty() {
-                out.push('\t');
-                out.push_str(&names.join(", "));
-                if file.symbols.len() > names.len() {
-                    out.push_str(", …");
-                }
-            }
-            out.push('\n');
-        }
-        if self.files.is_empty() {
-            out.push_str("(no ranked files)\n");
-        }
-        if !self.diagnostics.is_empty() {
-            out.push_str(&format!(
-                "({} files skipped; parse diagnostics in structuredContent)\n",
-                self.diagnostics.len()
-            ));
-        }
-        out
+        render_repo_map_text(self, REPO_MAP_TEXT_BUDGET_CHARS)
     }
 }
 
@@ -934,26 +959,7 @@ impl ToolText for crate::codemap::CodeStructureResponse {
     fn tool_text(&self) -> String {
         let mut out = String::new();
         for file in &self.files {
-            out.push_str(&file.path);
-            out.push('\n');
-            for symbol in &file.symbols {
-                match &symbol.signature {
-                    Some(signature) => out.push_str(&format!(
-                        "  {} ({}): {}\n",
-                        symbol.kind, symbol.line, signature
-                    )),
-                    None => out.push_str(&format!(
-                        "  {} {} ({})\n",
-                        symbol.kind, symbol.name, symbol.line
-                    )),
-                }
-                for member in &symbol.members {
-                    match &member.signature {
-                        Some(signature) => out.push_str(&format!("    - {signature}\n")),
-                        None => out.push_str(&format!("    - {}\n", member.name)),
-                    }
-                }
-            }
+            out.push_str(&crate::codemap::render_file_codemap(file));
         }
         if self.files.is_empty() {
             out.push_str("(no symbols)\n");
@@ -1797,9 +1803,11 @@ mod tests {
                     signature: None,
                     members: vec![],
                 }],
+                token_count: 0,
             }],
             diagnostics: vec![],
             omitted: 0,
+            total_tokens: 0,
         };
         let text = response.tool_text();
         assert!(text.contains("src/lib.rs"));
@@ -1839,7 +1847,10 @@ mod tests {
             "tree text must not be raw JSON"
         );
         assert!(text.contains("a.txt"));
-        assert!(response["structuredContent"]["roots"].is_array());
+        // structuredContent carries the compact ASCII `tree`, not a redundant
+        // nested `roots` array (that would bloat the payload for clients).
+        assert!(response["structuredContent"]["tree"].is_string());
+        assert!(response["structuredContent"]["roots"].is_null());
     }
 
     fn provider_for(path: &std::path::Path) -> FsCatalogProvider {
@@ -1853,6 +1864,67 @@ mod tests {
     // strings (clients that stringify numbers), per the documented contract.
     // build_context.token_budget/max_files and ast_search.max_results were the
     // two holdouts.
+    #[test]
+    fn get_code_structure_reports_token_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("lib.rs"),
+            "pub struct Widget;\npub fn make_widget() -> Widget { Widget }\n",
+        )
+        .expect("seed");
+        let provider = provider_for(dir.path());
+        let response = handle_tool_call(
+            &provider,
+            &json!({ "name": "get_code_structure", "arguments": { "paths": ["lib.rs"] } }),
+        )
+        .expect("get_code_structure");
+        let sc = &response["structuredContent"];
+        let file_tokens = sc["files"][0]["token_count"].as_u64().expect("token_count");
+        let total = sc["total_tokens"].as_u64().expect("total_tokens");
+        assert!(file_tokens > 0, "per-file token_count should be positive");
+        assert_eq!(total, file_tokens, "total_tokens == sum of file token_counts");
+    }
+
+    #[test]
+    fn repo_map_text_degrades_to_budget() {
+        use crate::repomap::{RepoMapFile, RepoMapResponse, RepoMapTotals};
+        let files: Vec<RepoMapFile> = (0..10)
+            .map(|i| RepoMapFile {
+                rank: i + 1,
+                path: format!("src/file_{i:02}.rs"),
+                display_path: format!("src/file_{i:02}.rs"),
+                language: "rust".to_string(),
+                score: format!("0.{i:08}"),
+                symbols: Vec::new(),
+            })
+            .collect();
+        let response = RepoMapResponse {
+            files,
+            diagnostics: Vec::new(),
+            totals: RepoMapTotals {
+                scanned_files: 10,
+                indexed_files: 10,
+                symbols_indexed: 0,
+                edges: 0,
+                seed_files: 0,
+                omitted_files: 0,
+                max_files: 10,
+                damping: "0.85".to_string(),
+                iterations: 30,
+            },
+            reference_heuristic: String::new(),
+        };
+        // Tiny budget: only the top-ranked file fits, the rest are noted.
+        let text = render_repo_map_text(&response, 40);
+        assert!(text.contains("src/file_00.rs"));
+        assert!(!text.contains("src/file_09.rs"));
+        assert!(text.contains("more ranked files omitted"));
+        // Full budget renders every file with no omission note.
+        let full = render_repo_map_text(&response, REPO_MAP_TEXT_BUDGET_CHARS);
+        assert!(full.contains("src/file_09.rs"));
+        assert!(!full.contains("omitted"));
+    }
+
     #[test]
     fn numeric_params_accept_stringified_ints() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2475,19 +2547,13 @@ mod tests {
             }),
         )
         .expect("workspace context dispatch");
+        // The assembled context lives in content[].text; structuredContent keeps
+        // only the token breakdown (the body is not duplicated across channels).
+        let text = response["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("<file_map>"));
+        assert!(text.contains("<tokens>"));
         let structured = &response["structuredContent"];
-        assert!(
-            structured["context"]
-                .as_str()
-                .expect("context")
-                .contains("<file_map>")
-        );
-        assert!(
-            structured["context"]
-                .as_str()
-                .expect("context")
-                .contains("<tokens>")
-        );
+        assert!(structured["context"].is_null());
         assert_eq!(
             structured["tokens"]["files"][0]["path"],
             Value::String("text.txt".to_string())

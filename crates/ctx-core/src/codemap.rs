@@ -70,6 +70,33 @@ pub struct FileCodeStructure {
     pub path: String,
     pub language: String,
     pub symbols: Vec<CodeSymbol>,
+    /// Estimated tokens of this file's rendered codemap block, so callers can
+    /// budget which files' structures to include without re-tokenizing.
+    pub token_count: usize,
+}
+
+/// Render one file's codemap block (path header + `kind (line): signature`
+/// lines, with members indented). Shared by the `get_code_structure` tool text
+/// and the per-file `token_count`, so the count matches what is shown.
+pub fn render_file_codemap(file: &FileCodeStructure) -> String {
+    let mut out = String::new();
+    out.push_str(&file.path);
+    out.push('\n');
+    for symbol in &file.symbols {
+        match &symbol.signature {
+            Some(signature) => {
+                out.push_str(&format!("  {} ({}): {}\n", symbol.kind, symbol.line, signature))
+            }
+            None => out.push_str(&format!("  {} {} ({})\n", symbol.kind, symbol.name, symbol.line)),
+        }
+        for member in &symbol.members {
+            match &member.signature {
+                Some(signature) => out.push_str(&format!("    - {signature}\n")),
+                None => out.push_str(&format!("    - {}\n", member.name)),
+            }
+        }
+    }
+    out
 }
 
 /// Non-fatal codemap diagnostic.
@@ -85,6 +112,8 @@ pub struct CodeStructureResponse {
     pub files: Vec<FileCodeStructure>,
     pub diagnostics: Vec<CodeStructureDiagnostic>,
     pub omitted: usize,
+    /// Sum of every file's `token_count`.
+    pub total_tokens: usize,
 }
 
 /// Extract code structure for selected paths.
@@ -103,11 +132,16 @@ pub fn get_code_structure<P: CatalogProvider>(
 
     for entry in selected {
         match provider.code_symbols_for_path(&entry.abs_path, &entry.rel_path)? {
-            Ok(Some(parsed)) => files.push(FileCodeStructure {
-                path: entry.rel_path.clone(),
-                language: parsed.language.clone(),
-                symbols: parsed.symbols.clone(),
-            }),
+            Ok(Some(parsed)) => {
+                let mut file = FileCodeStructure {
+                    path: entry.rel_path.clone(),
+                    language: parsed.language.clone(),
+                    symbols: parsed.symbols.clone(),
+                    token_count: 0,
+                };
+                file.token_count = crate::token::count_tokens(&render_file_codemap(&file));
+                files.push(file);
+            }
             Ok(None) => omitted += 1,
             Err(message) => diagnostics.push(CodeStructureDiagnostic {
                 path: Some(entry.rel_path.clone()),
@@ -117,6 +151,7 @@ pub fn get_code_structure<P: CatalogProvider>(
     }
 
     Ok(CodeStructureResponse {
+        total_tokens: files.iter().map(|file| file.token_count).sum(),
         files,
         diagnostics,
         omitted,

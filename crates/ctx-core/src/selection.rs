@@ -247,6 +247,7 @@ fn token_estimate_for_entry<P: CatalogProvider>(
                 path: entry.rel_path.clone(),
                 language: parsed.language.clone(),
                 symbols: parsed.symbols.clone(),
+                token_count: 0,
             };
             let text = serde_json::to_string(&structure).expect("codemap summary serializes");
             Ok(count_tokens(&text))

@@ -32,6 +32,10 @@ pub struct WorkspaceContextRequest {
 /// Structured response for `workspace_context`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceContextResponse {
+    /// Assembled context text. Not serialized into `structuredContent`: it is
+    /// already the tool's `content[].text`, so emitting it twice would double
+    /// the payload. The token breakdown stays structured.
+    #[serde(default, skip_serializing)]
     pub context: String,
     pub tokens: WorkspaceContextTokenBreakdown,
 }
@@ -315,6 +319,7 @@ fn render_codemap_file<P: CatalogProvider>(
                     path: selected.entry.rel_path.clone(),
                     language: parsed.language.clone(),
                     symbols: parsed.symbols.clone(),
+                    token_count: 0,
                 };
                 let text = render_codemap_signature(&structure);
                 let tokens = count_tokens(&text);

@@ -60,7 +60,8 @@ expression: response
           "line": 24,
           "signature": "pub fn alpha_needle() -> &'static str"
         }
-      ]
+      ],
+      "token_count": 88
     },
     {
       "path": "delta.js",
@@ -114,7 +115,8 @@ expression: response
           "line": 17,
           "signature": "class ExportedThing"
         }
-      ]
+      ],
+      "token_count": 91
     },
     {
       "path": "gamma.py",
@@ -150,7 +152,8 @@ expression: response
           "line": 15,
           "signature": "def nested_skip()"
         }
-      ]
+      ],
+      "token_count": 49
     },
     {
       "path": "nested/beta.rs",
@@ -174,7 +177,8 @@ expression: response
           "line": 9,
           "signature": "macro_rules! beta_macro"
         }
-      ]
+      ],
+      "token_count": 36
     },
     {
       "path": "repo_map/js_consumer.js",
@@ -186,7 +190,8 @@ expression: response
           "line": 1,
           "signature": "function jsConsumer()"
         }
-      ]
+      ],
+      "token_count": 16
     },
     {
       "path": "repo_map/py_lib.py",
@@ -198,7 +203,8 @@ expression: response
           "line": 1,
           "signature": "def shared_py_helper()"
         }
-      ]
+      ],
+      "token_count": 17
     },
     {
       "path": "repo_map/python_consumer.py",
@@ -210,7 +216,8 @@ expression: response
           "line": 1,
           "signature": "def python_consumer()"
         }
-      ]
+      ],
+      "token_count": 17
     },
     {
       "path": "repo_map/rust_consumer.rs",
@@ -222,7 +229,8 @@ expression: response
           "line": 1,
           "signature": "pub fn rust_consumer() -> usize"
         }
-      ]
+      ],
+      "token_count": 22
     },
     {
       "path": "repo_map/rust_lib.rs",
@@ -234,7 +242,8 @@ expression: response
           "line": 1,
           "signature": "pub fn shared_rust_helper() -> usize"
         }
-      ]
+      ],
+      "token_count": 22
     },
     {
       "path": "repo_map/shared.js",
@@ -252,9 +261,11 @@ expression: response
           "line": 7,
           "signature": "function sharedFactory()"
         }
-      ]
+      ],
+      "token_count": 23
     }
   ],
   "diagnostics": [],
-  "omitted": 2
+  "omitted": 2,
+  "total_tokens": 381
 }

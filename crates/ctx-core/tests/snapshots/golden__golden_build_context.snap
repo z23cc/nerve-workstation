@@ -3,7 +3,6 @@ source: crates/ctx-core/tests/golden.rs
 expression: response
 ---
 {
-  "context": "<file_map>\n- fixtures/alpha.rs [codemap_only]\n</file_map>\n\n<file path=\"fixtures/alpha.rs\" mode=\"codemap_only\">\n```text\nlanguage: rust\n- class Alpha @ line 1\n- class Mode @ line 5\n- interface Runnable @ line 10\n- method new @ line 15\n- method run @ line 21\n- function alpha_needle @ line 24\n```\n</file>",
   "manifest": {
     "query": "Alpha",
     "token_budget": 120,

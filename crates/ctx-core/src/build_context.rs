@@ -35,6 +35,10 @@ pub struct BuildContextRequest {
 /// Response from `build_context`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildContextResponse {
+    /// Assembled context text. Not serialized into `structuredContent`: it is
+    /// already the tool's `content[].text`, so emitting it twice would double
+    /// the payload. The manifest (ranking/selection/tokens) stays structured.
+    #[serde(default, skip_serializing)]
     pub context: String,
     pub manifest: BuildContextManifest,
 }

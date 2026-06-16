@@ -230,6 +230,9 @@ pub struct ReadFileResponse {
     pub first_line: usize,
     pub last_line: usize,
     pub total_lines: usize,
+    /// File body. Not serialized into `structuredContent`: it is already the
+    /// tool's `content[].text`, so emitting it twice would double the payload.
+    #[serde(default, skip_serializing)]
     pub content: String,
 }
 
@@ -251,6 +254,10 @@ pub enum FileTreeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileTreeResponse {
+    /// In-memory nested tree used to render `tree`. Not serialized: the ASCII
+    /// `tree` string conveys the same structure far more compactly, so emitting
+    /// the nested form would only bloat `structuredContent` for clients.
+    #[serde(default, skip_serializing)]
     pub roots: Vec<FileTreeNode>,
     pub tree: String,
     pub roots_count: usize,

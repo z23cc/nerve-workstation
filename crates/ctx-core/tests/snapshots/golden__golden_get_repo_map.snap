@@ -9,187 +9,35 @@ expression: response
       "path": "repo_map/rust_lib.rs",
       "display_path": "repo_map/rust_lib.rs",
       "language": "rust",
-      "score": "0.64912281",
-      "symbols": [
-        {
-          "kind": "function",
-          "name": "shared_rust_helper",
-          "line": 1,
-          "signature": "pub fn shared_rust_helper() -> usize"
-        }
-      ]
+      "score": "0.64912281"
     },
     {
       "rank": 2,
       "path": "repo_map/rust_consumer.rs",
       "display_path": "repo_map/rust_consumer.rs",
       "language": "rust",
-      "score": "0.35087719",
-      "symbols": [
-        {
-          "kind": "function",
-          "name": "rust_consumer",
-          "line": 1,
-          "signature": "pub fn rust_consumer() -> usize"
-        }
-      ]
+      "score": "0.35087719"
     },
     {
       "rank": 3,
       "path": "alpha.rs",
       "display_path": "alpha.rs",
       "language": "rust",
-      "score": "0.00000000",
-      "symbols": [
-        {
-          "kind": "class",
-          "name": "Alpha",
-          "line": 1,
-          "signature": "pub struct Alpha",
-          "members": [
-            {
-              "name": "value",
-              "signature": "pub value: i32"
-            }
-          ]
-        },
-        {
-          "kind": "class",
-          "name": "Mode",
-          "line": 5,
-          "signature": "pub enum Mode",
-          "members": [
-            {
-              "name": "Fast",
-              "signature": "Fast"
-            },
-            {
-              "name": "Slow",
-              "signature": "Slow"
-            }
-          ]
-        },
-        {
-          "kind": "interface",
-          "name": "Runnable",
-          "line": 10,
-          "signature": "pub trait Runnable"
-        },
-        {
-          "kind": "method",
-          "name": "new",
-          "line": 15,
-          "signature": "pub fn new(value: i32) -> Self"
-        },
-        {
-          "kind": "method",
-          "name": "run",
-          "line": 21,
-          "signature": "fn run(&self)"
-        },
-        {
-          "kind": "function",
-          "name": "alpha_needle",
-          "line": 24,
-          "signature": "pub fn alpha_needle() -> &'static str"
-        }
-      ]
+      "score": "0.00000000"
     },
     {
       "rank": 4,
       "path": "delta.js",
       "display_path": "delta.js",
       "language": "javascript",
-      "score": "0.00000000",
-      "symbols": [
-        {
-          "kind": "function",
-          "name": "jsEntry",
-          "line": 1,
-          "signature": "function jsEntry()"
-        },
-        {
-          "kind": "class",
-          "name": "Widget",
-          "line": 5,
-          "signature": "class Widget"
-        },
-        {
-          "kind": "method",
-          "name": "method",
-          "line": 6,
-          "signature": "method()"
-        },
-        {
-          "kind": "function",
-          "name": "runTask",
-          "line": 9,
-          "signature": "const runTask = async () => 42"
-        },
-        {
-          "kind": "function",
-          "name": "exportedArrow",
-          "line": 10,
-          "signature": "export const exportedArrow = () => \"exported\""
-        },
-        {
-          "kind": "function",
-          "name": "makeThing",
-          "line": 11,
-          "signature": "let makeThing = () => new Widget()"
-        },
-        {
-          "kind": "function",
-          "name": "nestedSkip",
-          "line": 14,
-          "signature": "function nestedSkip()"
-        },
-        {
-          "kind": "class",
-          "name": "ExportedThing",
-          "line": 17,
-          "signature": "class ExportedThing"
-        }
-      ]
+      "score": "0.00000000"
     },
     {
       "rank": 5,
       "path": "gamma.py",
       "display_path": "gamma.py",
       "language": "python",
-      "score": "0.00000000",
-      "symbols": [
-        {
-          "kind": "class",
-          "name": "PyAlpha",
-          "line": 1,
-          "signature": "class PyAlpha"
-        },
-        {
-          "kind": "function",
-          "name": "method",
-          "line": 2,
-          "signature": "def method(self)"
-        },
-        {
-          "kind": "function",
-          "name": "py_helper",
-          "line": 6,
-          "signature": "def py_helper()"
-        },
-        {
-          "kind": "function",
-          "name": "async_worker",
-          "line": 10,
-          "signature": "async def async_worker()"
-        },
-        {
-          "kind": "function",
-          "name": "nested_skip",
-          "line": 15,
-          "signature": "def nested_skip()"
-        }
-      ]
+      "score": "0.00000000"
     }
   ],
   "diagnostics": [],

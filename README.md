@@ -82,11 +82,13 @@ that need mid-request interruption should use the C ABI cancellation surface.
   (`start_line`/`end_line`, or `start_line` + `limit`; `offset` is accepted as an
   alias for `start_line`), preserving selected trailing newlines and returning
   `first_line` / `last_line` plus root-prefixed `display_path`.
-- `get_file_tree` — compact JSON tree plus token-efficient ASCII `tree`,
-  `roots_count`, `was_truncated`, and `uses_legend` fields from the current
-  catalog snapshot.
-- `get_code_structure` — tree-sitter codemap (definitions: kind/name/line) across
-  Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, and PHP.
+- `get_file_tree` — token-efficient ASCII `tree` string plus `roots_count`,
+  `was_truncated`, `uses_legend`, `omitted`, and `note` fields from the current
+  catalog snapshot (the ASCII tree is the structure; no redundant nested JSON).
+- `get_code_structure` — tree-sitter codemap (definitions: kind/name/line, with
+  signatures and members) across Rust, Python, JavaScript, TypeScript, Go, Java,
+  C, C++, C#, Ruby, and PHP. Each file carries a `token_count` and the response a
+  `total_tokens`, so callers can budget which structures to include.
 - `get_repo_map` — pure-Rust deterministic PageRank repo-map that ranks files
   by cross-file symbol-reference relevance, with optional `query` and
   `seed_paths` personalization and a `max_files` file budget.
@@ -193,8 +195,11 @@ so golden rankings remain portable.
 Personalization is optional: `query` seeds files whose path or content match the
 literal query, and `seed_paths` seeds explicit relative or in-root absolute paths.
 If no seed matches, PageRank uses a uniform restart distribution for global
-importance. `max_files` truncates the ranked response, and each returned file
-includes a fixed-precision PageRank score plus key codemap symbols.
+importance. `max_files` truncates the ranked response; `structuredContent`
+carries the ranking only (`rank`/`path`/`display_path`/`language`/`score`). The
+model-facing `content[].text` renders the aider-style map (ranked file + key
+symbol names) under a character budget, dropping the tail with a note when it
+overflows; full signatures/fields come from `get_code_structure` on demand.
 
 Reference edges are **tree-sitter `@reference.*` tags matched by same-language
 definition name** rather than raw text occurrences. Comments and strings are
