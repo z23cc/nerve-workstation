@@ -510,112 +510,23 @@ impl FsCatalogProvider {
 
         for root in self.policy.roots() {
             cancel.check_cancelled()?;
-            let mut builder = WalkBuilder::new(&root.path);
-            let filter_cancel = cancel.clone();
-            builder
-                .hidden(false)
-                .git_ignore(true)
-                .git_exclude(true)
-                .parents(true)
-                .filter_entry(move |entry| {
-                    if filter_cancel.is_cancelled() {
-                        return false;
-                    }
-                    let name = entry.file_name().to_string_lossy();
-                    !matches!(name.as_ref(), ".git" | "node_modules" | ".build" | "target")
-                });
-
-            let root_path = root.path.clone();
-            let root_id = root.id.clone();
-            let entries = Arc::clone(&entries);
-            let diagnostics = Arc::clone(&diagnostics);
-            let cancel = cancel.clone();
-
-            builder.build_parallel().run(|| {
-                let root_path = root_path.clone();
-                let root_id = root_id.clone();
-                let entries = Arc::clone(&entries);
-                let diagnostics = Arc::clone(&diagnostics);
-                let cancel = cancel.clone();
-
-                Box::new(move |dent| {
-                    if cancel.is_cancelled() {
-                        return ignore::WalkState::Quit;
-                    }
-                    let dent = match dent {
-                        Ok(dent) => dent,
-                        Err(err) => {
-                            diagnostics
-                                .lock()
-                                .expect("diagnostics lock")
-                                .push(Diagnostic {
-                                    path: None,
-                                    message: err.to_string(),
-                                });
-                            return ignore::WalkState::Continue;
-                        }
-                    };
-
-                    let path = dent.path();
-                    if !path.is_file() {
-                        return ignore::WalkState::Continue;
-                    }
-                    let metadata = match dent.metadata() {
-                        Ok(metadata) => metadata,
-                        Err(err) => {
-                            diagnostics
-                                .lock()
-                                .expect("diagnostics lock")
-                                .push(Diagnostic {
-                                    path: Some(path.to_path_buf()),
-                                    message: err.to_string(),
-                                });
-                            return ignore::WalkState::Continue;
-                        }
-                    };
-                    let rel_path = path
-                        .strip_prefix(&root_path)
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    entries.lock().expect("entries lock").push(CatalogEntry {
-                        root_id: root_id.clone(),
-                        rel_path,
-                        abs_path: path.to_path_buf(),
-                        size: metadata.len(),
-                    });
-                    ignore::WalkState::Continue
-                })
-            });
+            scan_root(root, Arc::clone(&entries), Arc::clone(&diagnostics), cancel);
             cancel.check_cancelled()?;
         }
 
-        cancel.check_cancelled()?;
-        let mut entries = Arc::try_unwrap(entries)
-            .expect("entries references dropped")
-            .into_inner()
-            .expect("entries lock");
-        if entries.len() > self.options.max_entries {
-            return Err(CtxError::EntryLimitExceeded {
-                limit: self.options.max_entries,
-            });
-        }
-        entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
-        let mut diagnostics = Arc::try_unwrap(diagnostics)
-            .expect("diagnostics references dropped")
-            .into_inner()
-            .expect("diagnostics lock");
-        diagnostics.sort_by(|left, right| {
-            left.path
-                .cmp(&right.path)
-                .then_with(|| left.message.cmp(&right.message))
-        });
-        Ok(CatalogSnapshot {
-            generation: 1,
-            roots: self.policy.roots().to_vec(),
-            entries,
-            diagnostics,
-        })
+        finalize_snapshot(
+            Arc::try_unwrap(entries)
+                .expect("entries references dropped")
+                .into_inner()
+                .expect("entries lock"),
+            Arc::try_unwrap(diagnostics)
+                .expect("diagnostics references dropped")
+                .into_inner()
+                .expect("diagnostics lock"),
+            self.policy.roots(),
+            self.options.max_entries,
+            cancel,
+        )
     }
 
     fn file_signature(path: &Path) -> Result<FileSignature, CtxError> {
@@ -630,6 +541,149 @@ impl FsCatalogProvider {
     fn codemap_cache_len(&self) -> usize {
         self.cache.codemap.read().expect("codemap cache lock").len()
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_root(
+    root: &RootRef,
+    entries: Arc<Mutex<Vec<CatalogEntry>>>,
+    diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
+    cancel: &CancelToken,
+) {
+    let mut builder = WalkBuilder::new(&root.path);
+    let filter_cancel = cancel.clone();
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .parents(true)
+        .filter_entry(move |entry| include_walk_entry(entry, &filter_cancel));
+
+    let context = ScanRootContext {
+        root_path: root.path.clone(),
+        root_id: root.id.clone(),
+        entries,
+        diagnostics,
+        cancel: cancel.clone(),
+    };
+    builder
+        .build_parallel()
+        .run(|| scan_worker(context.clone()));
+}
+
+fn include_walk_entry(entry: &ignore::DirEntry, cancel: &CancelToken) -> bool {
+    if cancel.is_cancelled() {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    !matches!(name.as_ref(), ".git" | "node_modules" | ".build" | "target")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct ScanRootContext {
+    root_path: PathBuf,
+    root_id: String,
+    entries: Arc<Mutex<Vec<CatalogEntry>>>,
+    diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
+    cancel: CancelToken,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_worker(
+    context: ScanRootContext,
+) -> Box<dyn FnMut(Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState + Send> {
+    Box::new(move |dent| scan_entry(dent, &context))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_entry(
+    dent: Result<ignore::DirEntry, ignore::Error>,
+    context: &ScanRootContext,
+) -> ignore::WalkState {
+    if context.cancel.is_cancelled() {
+        return ignore::WalkState::Quit;
+    }
+    let dent = match dent {
+        Ok(dent) => dent,
+        Err(err) => {
+            push_scan_diagnostic(&context.diagnostics, None, err.to_string());
+            return ignore::WalkState::Continue;
+        }
+    };
+    let path = dent.path();
+    if !path.is_file() {
+        return ignore::WalkState::Continue;
+    }
+    let metadata = match dent.metadata() {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            push_scan_diagnostic(
+                &context.diagnostics,
+                Some(path.to_path_buf()),
+                err.to_string(),
+            );
+            return ignore::WalkState::Continue;
+        }
+    };
+    push_catalog_entry(path, metadata.len(), context);
+    ignore::WalkState::Continue
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn push_scan_diagnostic(
+    diagnostics: &Arc<Mutex<Vec<Diagnostic>>>,
+    path: Option<PathBuf>,
+    message: String,
+) {
+    diagnostics
+        .lock()
+        .expect("diagnostics lock")
+        .push(Diagnostic { path, message });
+}
+
+fn push_catalog_entry(path: &Path, size: u64, context: &ScanRootContext) {
+    let rel_path = path
+        .strip_prefix(&context.root_path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    context
+        .entries
+        .lock()
+        .expect("entries lock")
+        .push(CatalogEntry {
+            root_id: context.root_id.clone(),
+            rel_path,
+            abs_path: path.to_path_buf(),
+            size,
+        });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn finalize_snapshot(
+    mut entries: Vec<CatalogEntry>,
+    mut diagnostics: Vec<Diagnostic>,
+    roots: &[RootRef],
+    max_entries: usize,
+    cancel: &CancelToken,
+) -> Result<CatalogSnapshot, CtxError> {
+    cancel.check_cancelled()?;
+    if entries.len() > max_entries {
+        return Err(CtxError::EntryLimitExceeded { limit: max_entries });
+    }
+    entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    diagnostics.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    Ok(CatalogSnapshot {
+        generation: 1,
+        roots: roots.to_vec(),
+        entries,
+        diagnostics,
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,0 +1,5 @@
+# Code-size / complexity thresholds (see docs/CONVENTIONS.md).
+# Functions over this many lines fail `clippy::too_many_lines` (denied in CI).
+too-many-lines-threshold = 100
+# Block deeply-nested control flow; prefer early returns / extracted helpers.
+excessive-nesting-threshold = 6

@@ -30,6 +30,19 @@ jobs:
           rustup default stable
           rustc --version
 
+      - name: Clippy
+        shell: bash
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy with semantic feature
+        shell: bash
+        run: cargo clippy --workspace --all-targets --features semantic -- -D warnings
+
+      - name: File-size advisory
+        shell: bash
+        continue-on-error: true
+        run: bash Scripts/check-file-size.sh --strict
+
       - name: Test
         shell: bash
         run: cargo test -p ctx-core -p ctx-mcp

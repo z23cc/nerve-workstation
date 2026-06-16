@@ -140,6 +140,7 @@ proptest! {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // reason: table-driven boundary corpus fixture exercises many degradation cases.
 fn boundary_corpus_uses_tempdir_and_degrades_gracefully() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_file(dir.path(), "empty.txt", b"");
