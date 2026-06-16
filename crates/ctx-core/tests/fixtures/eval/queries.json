@@ -1,0 +1,18 @@
+{
+  "queries": [
+    { "id": "dispatch", "query": "how are MCP tool calls dispatched to handlers", "expected_files": ["crates/ctx-core/src/dispatch/mod.rs"], "expected_symbols": ["handle_tool_call", "handle_tool_call_with_resolver_cancellable"] },
+    { "id": "rrf_fusion", "query": "reciprocal rank fusion combining dense and bm25 results", "expected_files": ["crates/ctx-core/src/semantic/scoring.rs"], "expected_symbols": ["rrf_fuse"] },
+    { "id": "bm25", "query": "BM25 lexical scoring over code chunks with idf", "expected_files": ["crates/ctx-core/src/semantic/bm25.rs"], "expected_symbols": ["ChunkBm25"] },
+    { "id": "dense_ann", "query": "dense approximate nearest neighbor vector search with HNSW", "expected_files": ["crates/ctx-core/src/semantic/ann.rs"], "expected_symbols": ["DenseAnn"] },
+    { "id": "chunking", "query": "split source files into symbol aware chunks using tree-sitter", "expected_files": ["crates/ctx-core/src/semantic/chunk.rs"], "expected_symbols": ["build_chunks"] },
+    { "id": "embedding_trait", "query": "embedding backend trait abstraction for the semantic index", "expected_files": ["crates/ctx-core/src/semantic/config.rs", "crates/ctx-core/src/semantic/backend.rs"], "expected_symbols": ["EmbeddingBackend"] },
+    { "id": "fastembed", "query": "load the onnx embedding model lazily via fastembed", "expected_files": ["crates/ctx-core/src/semantic/backend.rs"], "expected_symbols": ["FastembedEmbeddingBackend"] },
+    { "id": "persistence", "query": "persist the semantic index to disk and reload embeddings", "expected_files": ["crates/ctx-core/src/semantic/persistence.rs"], "expected_symbols": ["save_persisted_index"] },
+    { "id": "repo_map", "query": "rank repository files using personalized pagerank over symbol references", "expected_files": ["crates/ctx-core/src/repomap.rs"], "expected_symbols": ["get_repo_map"] },
+    { "id": "call_hierarchy", "query": "find callers and callees of a function", "expected_files": ["crates/ctx-core/src/navigate/call_hierarchy.rs"], "expected_symbols": ["call_hierarchy"] },
+    { "id": "workspace_route", "query": "route a tool call to the correct registered workspace", "expected_files": ["crates/ctx-core/src/workspace.rs"], "expected_symbols": [] },
+    { "id": "hashline_edit", "query": "apply a hashline anchored edit to a file", "expected_files": ["crates/ctx-core/src/edit/hashline.rs", "crates/ctx-core/src/edit/mod.rs"], "expected_symbols": [] },
+    { "id": "file_tree", "query": "render an ascii directory tree within a size budget", "expected_files": ["crates/ctx-core/src/tree.rs"], "expected_symbols": [] },
+    { "id": "root_security", "query": "reject file access outside the allowed root directories", "expected_files": ["crates/ctx-core/src/security.rs"], "expected_symbols": [] }
+  ]
+}
