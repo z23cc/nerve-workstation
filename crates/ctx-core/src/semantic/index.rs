@@ -179,7 +179,17 @@ impl SemanticIndex {
             && self.config.rerank
             && let Some(reranker) = &self.reranker
         {
-            let rerank_limit = self.config.rerank_limit.min(scored.len());
+            // Only rerank a bounded window around the results we would return.
+            // Reranking the full candidate pool and then truncating to
+            // `max_results` lets a mediocre cross-encoder promote deep-pool junk
+            // into the top-k and evict good fused hits (measured: recall drop).
+            // Capping the window keeps rerank as an order-refiner, not a recall risk.
+            let rerank_window = max_results.saturating_mul(RERANK_WINDOW_FACTOR);
+            let rerank_limit = self
+                .config
+                .rerank_limit
+                .min(scored.len())
+                .min(rerank_window.max(max_results));
             let docs: Vec<String> = scored
                 .iter()
                 .take(rerank_limit)

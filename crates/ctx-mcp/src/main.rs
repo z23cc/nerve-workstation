@@ -72,10 +72,12 @@ struct ServeArgs {
     #[cfg(feature = "semantic")]
     #[arg(long = "semantic-cache-dir")]
     semantic_cache_dir: Option<PathBuf>,
-    /// Disable semantic_search reranking.
+    /// Enable semantic_search reranking (off by default). On local code corpora
+    /// the available cross-encoder rerankers do not beat the fused BM25+dense
+    /// ranking and add 15-20x query latency — see crates/ctx-core/tests/eval.rs.
     #[cfg(feature = "semantic")]
-    #[arg(long = "semantic-no-rerank")]
-    semantic_no_rerank: bool,
+    #[arg(long = "semantic-rerank")]
+    semantic_rerank: bool,
     /// Restrict semantic indexing to paths matching this glob. Repeatable.
     #[cfg(feature = "semantic")]
     #[arg(long = "semantic-include")]
@@ -159,7 +161,7 @@ fn semantic_runtime_config(args: &ServeArgs) -> SemanticRuntimeConfig {
         reranker_model: args.semantic_reranker_model.clone(),
         model_cache_dir: args.semantic_model_cache_dir.clone(),
         index_cache_dir: args.semantic_cache_dir.clone(),
-        rerank: !args.semantic_no_rerank,
+        rerank: args.semantic_rerank,
         mock: false,
         scope: SemanticIndexScope {
             extensions: args.semantic_extensions.clone(),
@@ -654,7 +656,7 @@ mod tests {
             #[cfg(feature = "semantic")]
             semantic_cache_dir: None,
             #[cfg(feature = "semantic")]
-            semantic_no_rerank: false,
+            semantic_rerank: false,
             #[cfg(feature = "semantic")]
             semantic_include: Vec::new(),
             #[cfg(feature = "semantic")]

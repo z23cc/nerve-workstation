@@ -102,6 +102,23 @@ pub(super) fn parse_embedding_model(model: Option<&str>) -> Result<EmbeddingMode
             Ok(EmbeddingModel::JinaEmbeddingsV2BaseCode)
         }
         "bge-small-en-v1.5" | "BAAI/bge-small-en-v1.5" => Ok(EmbeddingModel::BGESmallENV15),
+        "bge-large-en-v1.5" | "BAAI/bge-large-en-v1.5" => Ok(EmbeddingModel::BGELargeENV15),
+        "gte-large-en-v1.5" | "Alibaba-NLP/gte-large-en-v1.5" => Ok(EmbeddingModel::GTELargeENV15),
+        "mxbai-embed-large-v1" | "mixedbread-ai/mxbai-embed-large-v1" => {
+            Ok(EmbeddingModel::MxbaiEmbedLargeV1)
+        }
+        "modernbert-embed-large" | "lightonai/modernbert-embed-large" => {
+            Ok(EmbeddingModel::ModernBertEmbedLarge)
+        }
+        "nomic-embed-text-v1.5" | "nomic-ai/nomic-embed-text-v1.5" => {
+            Ok(EmbeddingModel::NomicEmbedTextV15)
+        }
+        "snowflake-arctic-embed-l" | "snowflake/snowflake-arctic-embed-l" => {
+            Ok(EmbeddingModel::SnowflakeArcticEmbedL)
+        }
+        "embeddinggemma-300m" | "onnx-community/embeddinggemma-300m-ONNX" => {
+            Ok(EmbeddingModel::EmbeddingGemma300M)
+        }
         other => Err(CtxError::Semantic(format!(
             "unsupported embedding model for semantic_search: {other}"
         ))),
@@ -111,6 +128,13 @@ pub(super) fn parse_embedding_model(model: Option<&str>) -> Result<EmbeddingMode
 pub(super) fn parse_reranker_model(model: Option<&str>) -> Result<RerankerModel, CtxError> {
     match model.unwrap_or("bge-reranker-base") {
         "bge-reranker-base" | "BAAI/bge-reranker-base" => Ok(RerankerModel::BGERerankerBase),
+        "bge-reranker-v2-m3" | "BAAI/bge-reranker-v2-m3" => Ok(RerankerModel::BGERerankerV2M3),
+        "jina-reranker-v1-turbo-en" | "jinaai/jina-reranker-v1-turbo-en" => {
+            Ok(RerankerModel::JINARerankerV1TurboEn)
+        }
+        "jina-reranker-v2-base-multilingual" | "jinaai/jina-reranker-v2-base-multilingual" => {
+            Ok(RerankerModel::JINARerankerV2BaseMultiligual)
+        }
         other => Err(CtxError::Semantic(format!(
             "unsupported reranker model for semantic_search: {other}"
         ))),
@@ -121,6 +145,12 @@ pub(super) fn embedding_dimension(model: &EmbeddingModel) -> usize {
     match model {
         EmbeddingModel::JinaEmbeddingsV2BaseCode => 768,
         EmbeddingModel::BGESmallENV15 => 384,
+        EmbeddingModel::BGELargeENV15
+        | EmbeddingModel::GTELargeENV15
+        | EmbeddingModel::MxbaiEmbedLargeV1
+        | EmbeddingModel::ModernBertEmbedLarge
+        | EmbeddingModel::SnowflakeArcticEmbedL => 1024,
+        EmbeddingModel::NomicEmbedTextV15 | EmbeddingModel::EmbeddingGemma300M => 768,
         _ => 768,
     }
 }
