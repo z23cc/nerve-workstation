@@ -12,11 +12,18 @@
 //! scale).
 
 use crate::{
-    cancel::CancelToken, codemap::block_span, models::CtxError, port::CatalogProvider,
-    repomap::indexed_files_cancellable, snapshot::CatalogSnapshot,
+    cancel::CancelToken,
+    codemap::block_span,
+    models::CtxError,
+    port::CatalogProvider,
+    repomap::{indexed_files_cancellable, resolve_import_reference},
+    snapshot::CatalogSnapshot,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 /// Caveat surfaced on every navigation response so callers (and models) know the
 /// results are syntactic name matches, not compiler-accurate resolution.
@@ -34,8 +41,22 @@ pub struct NavigateRequest {
     /// `find_references` only: also return the symbol's definitions.
     #[serde(default)]
     pub include_definitions: bool,
+    /// `find_references` only: drop low-confidence (ambiguous name-only) hits.
+    #[serde(default)]
+    pub confident_only: bool,
     /// Maximum locations returned per bucket.
     pub max_results: usize,
+}
+
+/// How trustworthy a syntactic reference match is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    /// The name is unambiguous (single definition), the reference shares a file
+    /// with a definition, or its file imports a defining file.
+    High,
+    /// Name-only match while multiple definitions of that name exist elsewhere.
+    Low,
 }
 
 /// One definition site for a symbol.
@@ -64,6 +85,9 @@ pub struct ReferenceLocation {
     /// Trimmed source line at `line`, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Whether this name match is unambiguous / import-backed (`high`) or a
+    /// name-only match while the name is defined in multiple places (`low`).
+    pub confidence: Confidence,
 }
 
 /// Response for `goto_definition`.
@@ -83,6 +107,9 @@ pub struct ReferencesResponse {
     pub references: Vec<ReferenceLocation>,
     /// Populated only when `include_definitions` is set.
     pub definitions: Vec<SymbolLocation>,
+    /// Number of definition sites of this name (in scope); >1 means the name is
+    /// ambiguous, so low-confidence references may belong to a different symbol.
+    pub definition_count: usize,
     pub total: usize,
     pub truncated: bool,
     pub note: String,
@@ -253,13 +280,56 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
 ) -> Result<ReferencesResponse, CtxError> {
     let files = indexed_files_cancellable(provider, snapshot, cancel)?;
     let mut sources = Sources::new(provider);
+    let lang = request.language.as_deref();
+
+    // Files (by index) that define this name, in scope — the basis for scoring
+    // each reference's confidence.
+    let def_files: HashSet<usize> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| language_matches(lang, &f.language))
+        .filter(|(_, f)| f.symbols.iter().any(|s| s.name == request.symbol))
+        .map(|(idx, _)| idx)
+        .collect();
+    // Definition sites (symbols), for the ambiguity indicator.
+    let definition_count: usize = files
+        .iter()
+        .filter(|f| language_matches(lang, &f.language))
+        .map(|f| {
+            f.symbols
+                .iter()
+                .filter(|s| s.name == request.symbol)
+                .count()
+        })
+        .sum();
+    let unambiguous = definition_count <= 1;
+
+    // A referencing file is high-confidence if it also defines the name or
+    // imports a file that does (reusing the repo-map import resolver).
+    let imports_a_definer = |idx: usize| -> bool {
+        files[idx].references.iter().any(|reference| {
+            reference.kind == "import"
+                && resolve_import_reference(&files, idx, reference)
+                    .is_some_and(|target| def_files.contains(&target))
+        })
+    };
+
     let mut references = Vec::new();
-    for file in &files {
-        if !language_matches(request.language.as_deref(), &file.language) {
+    for (idx, file) in files.iter().enumerate() {
+        if !language_matches(lang, &file.language) {
             continue;
         }
+        let file_is_confident = unambiguous || def_files.contains(&idx) || imports_a_definer(idx);
+        let confidence = if file_is_confident {
+            Confidence::High
+        } else {
+            Confidence::Low
+        };
         for reference in &file.references {
             if reference.name == request.symbol {
+                if request.confident_only && confidence == Confidence::Low {
+                    continue;
+                }
                 let text = sources.line(&file.path, &file.abs_path, reference.line);
                 references.push(ReferenceLocation {
                     path: file.path.clone(),
@@ -268,6 +338,7 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
                     kind: reference.kind.clone(),
                     language: file.language.clone(),
                     text,
+                    confidence,
                 });
             }
         }
@@ -314,6 +385,7 @@ pub fn find_references_cancellable<P: CatalogProvider + Sync>(
         symbol: request.symbol.clone(),
         references,
         definitions,
+        definition_count,
         total,
         truncated,
         note: NAV_NOTE.to_string(),
@@ -540,6 +612,7 @@ mod tests {
             symbol: symbol.to_string(),
             language: None,
             include_definitions: false,
+            confident_only: false,
             max_results: 200,
         }
     }
@@ -595,6 +668,47 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("make_target")
+        );
+    }
+
+    #[test]
+    fn ambiguous_name_marks_low_confidence_and_confident_only_filters() {
+        // `helper` defined in two unrelated files; a third file references it
+        // without importing either -> ambiguous, low confidence.
+        let (_dir, provider, snapshot) = temp_provider(&[
+            ("a.rs", "pub fn helper() {}\n"),
+            ("b.rs", "pub fn helper() {}\n"),
+            ("user.rs", "pub fn run() { helper(); }\n"),
+        ]);
+        let response = find_references(&provider, &snapshot, &request("helper")).expect("nav");
+        assert_eq!(response.definition_count, 2, "two definitions of helper");
+        let user_ref = response
+            .references
+            .iter()
+            .find(|r| r.path == "user.rs")
+            .expect("user ref");
+        assert_eq!(user_ref.confidence, Confidence::Low);
+
+        // confident_only drops the ambiguous user.rs reference.
+        let mut req = request("helper");
+        req.confident_only = true;
+        let filtered = find_references(&provider, &snapshot, &req).expect("nav");
+        assert!(!filtered.references.iter().any(|r| r.path == "user.rs"));
+    }
+
+    #[test]
+    fn unambiguous_name_is_high_confidence() {
+        let (_dir, provider, snapshot) = temp_provider(&[
+            ("target.rs", "pub fn only_one() {}\n"),
+            ("caller.rs", "pub fn run() { only_one(); }\n"),
+        ]);
+        let response = find_references(&provider, &snapshot, &request("only_one")).expect("nav");
+        assert_eq!(response.definition_count, 1);
+        assert!(
+            response
+                .references
+                .iter()
+                .all(|r| r.confidence == Confidence::High)
         );
     }
 

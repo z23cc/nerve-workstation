@@ -77,6 +77,19 @@ pub enum SearchMode {
     Both,
 }
 
+/// Output mode for content search, mirroring ripgrep / Claude Code's Grep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    /// Full content matches with line/column/context (default).
+    #[default]
+    Content,
+    /// Only the set of files that contain a match (paths + counts).
+    FilesWithMatches,
+    /// Per-file match counts only.
+    Count,
+}
+
 /// Search options independent of transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRequest {
@@ -85,9 +98,20 @@ pub struct SearchRequest {
     pub regex: bool,
     pub max_results: usize,
     pub context_lines: usize,
+    /// Lines of context before a match; `None` falls back to `context_lines`.
+    pub context_before: Option<usize>,
+    /// Lines of context after a match; `None` falls back to `context_lines`.
+    pub context_after: Option<usize>,
     pub max_content_files: usize,
     pub max_content_bytes: u64,
     pub whole_word: bool,
+    /// Glob whitelist on the relative path (file matches if it matches ANY).
+    pub include: Vec<String>,
+    /// Glob blacklist on the relative path (file dropped if it matches ANY).
+    pub exclude: Vec<String>,
+    /// Extension whitelist (without dot, case-insensitive), e.g. ["rs", "ts"].
+    pub extensions: Vec<String>,
+    pub output_mode: OutputMode,
 }
 
 impl Default for SearchRequest {
@@ -98,11 +122,26 @@ impl Default for SearchRequest {
             regex: false,
             max_results: 50,
             context_lines: 2,
+            context_before: None,
+            context_after: None,
             max_content_files: 2_048,
             max_content_bytes: 64 * 1024 * 1024,
             whole_word: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            extensions: Vec::new(),
+            output_mode: OutputMode::Content,
         }
     }
+}
+
+/// A file with its content-match count, returned for `files_with_matches`/`count`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileMatchCount {
+    pub root_id: String,
+    pub path: String,
+    pub display_path: String,
+    pub count: usize,
 }
 
 /// A path match returned by file_search.
@@ -209,6 +248,10 @@ pub struct SearchBudget {
 pub struct SearchResponse {
     pub path_matches: Vec<PathSearchMatch>,
     pub content_matches: Vec<ContentSearchMatch>,
+    /// Populated for `files_with_matches` / `count` output modes (instead of
+    /// `content_matches`); empty for the default `content` mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_files: Vec<FileMatchCount>,
     pub diagnostics: Vec<Diagnostic>,
     pub totals: SearchTotals,
 }

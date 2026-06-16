@@ -99,9 +99,7 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
             regex: false,
             max_results: max_files.saturating_mul(4).max(50),
             context_lines: SLICE_RADIUS,
-            max_content_files: 2_048,
-            max_content_bytes: 64 * 1024 * 1024,
-            whole_word: false,
+            ..SearchRequest::default()
         },
         cancel,
     )?;

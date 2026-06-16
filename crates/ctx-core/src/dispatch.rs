@@ -196,7 +196,7 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "file_search",
-            "description": "Search allowed roots by path and/or file content.",
+            "description": "Search allowed roots by path and/or file content. Narrow scope with `extensions`/`include`/`exclude` globs; use `output_mode` to get just matching files or counts; `context_before`/`context_after` override symmetric `context_lines`.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pattern"],
@@ -207,6 +207,12 @@ pub fn tool_specs() -> Value {
                     "regex": { "type": "boolean", "default": false },
                     "max_results": { "type": "integer", "default": 50 },
                     "context_lines": { "type": "integer", "default": 2 },
+                    "context_before": { "type": "integer", "description": "Lines of context before each match (overrides context_lines)." },
+                    "context_after": { "type": "integer", "description": "Lines of context after each match (overrides context_lines)." },
+                    "output_mode": { "type": "string", "enum": ["content", "files_with_matches", "count"], "default": "content", "description": "content: full matches; files_with_matches: matching files only; count: per-file counts." },
+                    "extensions": { "type": "array", "items": { "type": "string" }, "description": "Extension whitelist without dot, e.g. [\"rs\",\"ts\"]." },
+                    "include": { "type": "array", "items": { "type": "string" }, "description": "Glob whitelist on path, e.g. [\"src/**\",\"*.rs\"]." },
+                    "exclude": { "type": "array", "items": { "type": "string" }, "description": "Glob blacklist on path, e.g. [\"**/target/**\"]." },
                     "max_content_files": { "type": "integer", "default": 2048 },
                     "max_content_bytes": { "type": "integer", "default": 67108864 },
                     "whole_word": { "type": "boolean", "default": false }
@@ -317,6 +323,7 @@ pub fn tool_specs() -> Value {
                     "symbol": { "type": "string", "description": "Exact symbol name (case-sensitive)." },
                     "language": { "type": "string", "description": "Optional display-language filter, e.g. rust, typescript, tsx, python." },
                     "include_definitions": { "type": "boolean", "default": false, "description": "Also return the symbol's definitions." },
+                    "confident_only": { "type": "boolean", "default": false, "description": "Drop low-confidence (ambiguous name-only) references." },
                     "max_results": { "type": "integer", "default": 200 }
                 }
             }
@@ -771,7 +778,16 @@ impl ToolText for crate::SearchResponse {
                 ));
             }
         }
-        if self.path_matches.is_empty() && self.content_matches.is_empty() {
+        if !self.match_files.is_empty() {
+            out.push_str("matching files:\n");
+            for f in &self.match_files {
+                out.push_str(&format!("  {} ({})\n", f.display_path, f.count));
+            }
+        }
+        if self.path_matches.is_empty()
+            && self.content_matches.is_empty()
+            && self.match_files.is_empty()
+        {
             out.push_str("(no matches)\n");
         }
         let totals = &self.totals;
@@ -910,9 +926,23 @@ impl ToolText for crate::navigate::ReferencesResponse {
             out.push_str(&format!("(no references to {})\n", self.symbol));
             return out;
         }
-        out.push_str("references:\n");
+        if self.definition_count > 1 {
+            out.push_str(&format!(
+                "references ({} definitions of this name \u{2014} low-confidence may be unrelated):\n",
+                self.definition_count
+            ));
+        } else {
+            out.push_str("references:\n");
+        }
         for r in &self.references {
-            out.push_str(&format!("  {}:{} {}\n", r.display_path, r.line, r.kind));
+            let mark = match r.confidence {
+                crate::navigate::Confidence::High => "",
+                crate::navigate::Confidence::Low => "  [low]",
+            };
+            out.push_str(&format!(
+                "  {}:{} {}{}\n",
+                r.display_path, r.line, r.kind, mark
+            ));
         }
         if self.truncated {
             out.push_str(&format!(
@@ -1102,6 +1132,22 @@ struct FileSearchArgs {
     max_content_bytes: u64,
     #[serde(default)]
     whole_word: bool,
+    #[serde(default, deserialize_with = "lenient_opt_usize")]
+    context_before: Option<usize>,
+    #[serde(default, deserialize_with = "lenient_opt_usize")]
+    context_after: Option<usize>,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    extensions: Vec<String>,
+    #[serde(default = "default_output_mode")]
+    output_mode: String,
+}
+
+fn default_output_mode() -> String {
+    "content".to_string()
 }
 
 impl FileSearchArgs {
@@ -1116,9 +1162,19 @@ impl FileSearchArgs {
             regex: self.regex,
             max_results: self.max_results,
             context_lines: self.context_lines,
+            context_before: self.context_before,
+            context_after: self.context_after,
             max_content_files: self.max_content_files,
             max_content_bytes: self.max_content_bytes,
             whole_word: self.whole_word,
+            include: self.include,
+            exclude: self.exclude,
+            extensions: self.extensions,
+            output_mode: match self.output_mode.as_str() {
+                "files_with_matches" | "files" => crate::OutputMode::FilesWithMatches,
+                "count" => crate::OutputMode::Count,
+                _ => crate::OutputMode::Content,
+            },
         }
     }
 }
@@ -1566,6 +1622,8 @@ struct NavigateArgs {
     language: Option<String>,
     #[serde(default)]
     include_definitions: bool,
+    #[serde(default)]
+    confident_only: bool,
     #[serde(
         default = "default_nav_max_results",
         deserialize_with = "lenient_usize"
@@ -1579,6 +1637,7 @@ impl NavigateArgs {
             symbol: self.symbol,
             language: self.language,
             include_definitions: self.include_definitions,
+            confident_only: self.confident_only,
             max_results: self.max_results.max(1),
         }
     }
@@ -1882,7 +1941,10 @@ mod tests {
         let file_tokens = sc["files"][0]["token_count"].as_u64().expect("token_count");
         let total = sc["total_tokens"].as_u64().expect("total_tokens");
         assert!(file_tokens > 0, "per-file token_count should be positive");
-        assert_eq!(total, file_tokens, "total_tokens == sum of file token_counts");
+        assert_eq!(
+            total, file_tokens,
+            "total_tokens == sum of file token_counts"
+        );
     }
 
     #[test]

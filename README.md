@@ -77,7 +77,10 @@ that need mid-request interruption should use the C ABI cancellation surface.
   top-k ordering, nucleo/Smith-Waterman fuzzy path scoring, BM25-style content
   relevance ranking, ripgrep-style smart-case, optional `whole_word`,
   binary-file skipping for content search, and real content file/byte budget
-  limits (`max_content_files`, `max_content_bytes`).
+  limits (`max_content_files`, `max_content_bytes`). Scope with `extensions` and
+  `include`/`exclude` globs (gitignore-style: `*.rs`, `src/**`, `**/target/**`);
+  pick an `output_mode` (`content` / `files_with_matches` / `count`); and set
+  asymmetric `context_before` / `context_after` (overriding `context_lines`).
 - `read_file` — read a file from an allowed root with an optional line range
   (`start_line`/`end_line`, or `start_line` + `limit`; `offset` is accepted as an
   alias for `start_line`), preserving selected trailing newlines and returning
@@ -98,8 +101,11 @@ that need mid-request interruption should use the C ABI cancellation surface.
   Definition/reference sites carry `kind`, signature, and an inline source-line
   snippet; `call_hierarchy` resolves callers (incoming, by enclosing definition)
   and callees (outgoing, from the symbol's block). Optional `language` filter.
-  Not a scope/type resolver: results may include unrelated same-name symbols and
-  miss aliases/re-exports.
+  `find_references` scores each hit's `confidence` (high when the name is
+  unambiguous, shares a file with a definition, or its file imports a defining
+  file; low otherwise) and reports `definition_count`; `confident_only` drops the
+  ambiguous hits. Still not a full scope/type resolver — aliases/re-exports and
+  cross-language same-name collisions remain best-effort.
 - `edit` / `write` / `delete` / `move` — root-policy-gated file mutations. `edit`
   has four modes (`replace`, `patch`, `apply_patch`, `hashline`); hashline binds
   each change to a content tag so a stale edit is refused. Responses carry a

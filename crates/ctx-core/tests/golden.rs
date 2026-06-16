@@ -95,12 +95,9 @@ fn golden_file_search_literal_regex_and_path() {
         &SearchRequest {
             pattern: "needle".to_string(),
             mode: SearchMode::Both,
-            regex: false,
             max_results: 20,
             context_lines: 1,
-            max_content_files: 2_048,
-            max_content_bytes: 64 * 1024 * 1024,
-            whole_word: false,
+            ..SearchRequest::default()
         },
     )
     .expect("literal search");
@@ -113,9 +110,7 @@ fn golden_file_search_literal_regex_and_path() {
             regex: true,
             max_results: 20,
             context_lines: 1,
-            max_content_files: 2_048,
-            max_content_bytes: 64 * 1024 * 1024,
-            whole_word: false,
+            ..SearchRequest::default()
         },
     )
     .expect("regex search");
@@ -125,12 +120,9 @@ fn golden_file_search_literal_regex_and_path() {
         &SearchRequest {
             pattern: "nested".to_string(),
             mode: SearchMode::Path,
-            regex: false,
             max_results: 20,
             context_lines: 0,
-            max_content_files: 2_048,
-            max_content_bytes: 64 * 1024 * 1024,
-            whole_word: false,
+            ..SearchRequest::default()
         },
     )
     .expect("path search");

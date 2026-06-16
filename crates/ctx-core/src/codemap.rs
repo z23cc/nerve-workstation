@@ -84,10 +84,14 @@ pub fn render_file_codemap(file: &FileCodeStructure) -> String {
     out.push('\n');
     for symbol in &file.symbols {
         match &symbol.signature {
-            Some(signature) => {
-                out.push_str(&format!("  {} ({}): {}\n", symbol.kind, symbol.line, signature))
-            }
-            None => out.push_str(&format!("  {} {} ({})\n", symbol.kind, symbol.name, symbol.line)),
+            Some(signature) => out.push_str(&format!(
+                "  {} ({}): {}\n",
+                symbol.kind, symbol.line, signature
+            )),
+            None => out.push_str(&format!(
+                "  {} {} ({})\n",
+                symbol.kind, symbol.name, symbol.line
+            )),
         }
         for member in &symbol.members {
             match &member.signature {

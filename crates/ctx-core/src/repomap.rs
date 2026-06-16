@@ -417,7 +417,7 @@ fn reference_sort_key(reference: &CodeReference) -> (&str, &str, usize, Option<&
     )
 }
 
-fn resolve_import_reference(
+pub(crate) fn resolve_import_reference(
     files: &[IndexedFile],
     referencer_idx: usize,
     reference: &CodeReference,

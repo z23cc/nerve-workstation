@@ -28,12 +28,11 @@ fn search_request(pattern: String, mode: SearchMode) -> SearchRequest {
     SearchRequest {
         pattern,
         mode,
-        regex: false,
         max_results: 20,
         context_lines: 3,
         max_content_files: 128,
         max_content_bytes: 2 * 1024 * 1024,
-        whole_word: false,
+        ..SearchRequest::default()
     }
 }
 

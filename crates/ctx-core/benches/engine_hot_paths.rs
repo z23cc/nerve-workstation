@@ -75,12 +75,11 @@ fn content_request() -> SearchRequest {
     SearchRequest {
         pattern: "needle".to_string(),
         mode: SearchMode::Content,
-        regex: false,
         max_results: 10_000,
         context_lines: 1,
         max_content_files: FILE_COUNT + 128,
         max_content_bytes: 512 * 1024 * 1024,
-        whole_word: false,
+        ..SearchRequest::default()
     }
 }
 
@@ -88,12 +87,11 @@ fn path_request() -> SearchRequest {
     SearchRequest {
         pattern: "module_4/file".to_string(),
         mode: SearchMode::Path,
-        regex: false,
         max_results: 10_000,
         context_lines: 0,
         max_content_files: 0,
         max_content_bytes: 0,
-        whole_word: false,
+        ..SearchRequest::default()
     }
 }
 

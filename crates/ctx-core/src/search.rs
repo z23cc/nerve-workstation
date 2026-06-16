@@ -81,6 +81,9 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
         whole_word: request.whole_word,
         fuzzy_pattern: fuzzy_pattern.as_ref(),
     };
+    let filter = EntryFilter::build(request)?;
+    let context_before = request.context_before.unwrap_or(request.context_lines);
+    let context_after = request.context_after.unwrap_or(request.context_lines);
 
     let mut path_matches = Vec::new();
     if matches!(request.mode, SearchMode::Path | SearchMode::Both) {
@@ -94,6 +97,9 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
                         || PathMatcherState::new(case_sensitive),
                         |state, entry| {
                             cancel.check_cancelled()?;
+                            if !filter.accepts(&entry.rel_path) {
+                                return Ok(None);
+                            }
                             Ok(path_score(&entry.rel_path, path_query, state).map(|score| {
                                 PathSearchMatch {
                                     root_id: entry.root_id.clone(),
@@ -118,6 +124,9 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
                     .iter()
                     .map(|entry| {
                         cancel.check_cancelled()?;
+                        if !filter.accepts(&entry.rel_path) {
+                            return Ok(None);
+                        }
                         Ok(
                             path_score(&entry.rel_path, path_query, &mut state).map(|score| {
                                 PathSearchMatch {
@@ -156,6 +165,7 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
     let binary_files_skipped = AtomicUsize::new(0);
     let mut content_exhausted = false;
     let mut content_matches = Vec::new();
+    let mut match_files: Vec<FileMatchCount> = Vec::new();
     let mut ranking_stats = Vec::new();
 
     if matches!(request.mode, SearchMode::Content | SearchMode::Both) && !request.pattern.is_empty()
@@ -170,6 +180,9 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
         let mut content_entries = Vec::new();
         for entry in &snapshot.entries {
             cancel.check_cancelled()?;
+            if !filter.accepts(&entry.rel_path) {
+                continue;
+            }
             if content_entries.len() >= max_content_files
                 || planned_bytes.saturating_add(entry.size) > max_content_bytes
             {
@@ -221,7 +234,8 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
                         root_id: &entry.root_id,
                         path: &entry.rel_path,
                         display_path: &display_path,
-                        context_lines: request.context_lines,
+                        context_before,
+                        context_after,
                         pattern: &request.pattern,
                         regex: regex.as_ref(),
                         ac: ac.as_ref(),
@@ -256,10 +270,25 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
         }
 
         cancel.check_cancelled()?;
-        apply_content_relevance_scores(&mut content_matches, &ranking_stats, &ranking_query);
-        content_matches.sort_by(content_match_cmp);
-        if content_matches.len() > max_results {
-            content_matches.truncate(max_results);
+        match request.output_mode {
+            OutputMode::Content => {
+                apply_content_relevance_scores(
+                    &mut content_matches,
+                    &ranking_stats,
+                    &ranking_query,
+                );
+                content_matches.sort_by(content_match_cmp);
+                if content_matches.len() > max_results {
+                    content_matches.truncate(max_results);
+                }
+            }
+            OutputMode::FilesWithMatches | OutputMode::Count => {
+                match_files = collapse_to_files(&content_matches);
+                if match_files.len() > max_results {
+                    match_files.truncate(max_results);
+                }
+                content_matches = Vec::new();
+            }
         }
     }
 
@@ -269,6 +298,7 @@ pub fn search_snapshot_cancellable<P: CatalogProvider + Sync>(
     Ok(SearchResponse {
         path_matches,
         content_matches,
+        match_files,
         diagnostics,
         totals: SearchTotals {
             scanned_files: snapshot.entries.len(),
@@ -489,7 +519,8 @@ struct ContentMatchInput<'a> {
     root_id: &'a str,
     path: &'a str,
     display_path: &'a str,
-    context_lines: usize,
+    context_before: usize,
+    context_after: usize,
     pattern: &'a str,
     regex: Option<&'a Regex>,
     ac: Option<&'a AhoCorasick>,
@@ -522,7 +553,7 @@ fn content_matches_for_file(
                 line: line_number,
                 column: col0 + 1,
                 text: trim_preview(line),
-                context: line_context(&lines, idx, input.context_lines),
+                context: line_context(&lines, idx, input.context_before, input.context_after),
             });
         }
     }
@@ -781,9 +812,14 @@ fn normalized_doc_len(text: &str) -> usize {
     token_len.max(text.lines().count()).max(1)
 }
 
-fn line_context(lines: &[&str], match_idx: usize, context_lines: usize) -> Vec<LineContext> {
-    let start = match_idx.saturating_sub(context_lines);
-    let end = (match_idx + context_lines + 1).min(lines.len());
+fn line_context(
+    lines: &[&str],
+    match_idx: usize,
+    context_before: usize,
+    context_after: usize,
+) -> Vec<LineContext> {
+    let start = match_idx.saturating_sub(context_before);
+    let end = (match_idx + context_after + 1).min(lines.len());
     (start..end)
         .map(|idx| LineContext {
             line: idx + 1,
@@ -841,6 +877,133 @@ pub fn fuzz_match_content(
     Ok(matches.occurrence_count)
 }
 
+/// Path filter applied to both buckets: an extension whitelist plus glob
+/// include/exclude lists (ripgrep / Claude Code Grep parity).
+struct EntryFilter {
+    extensions: Vec<String>,
+    include: Vec<Regex>,
+    exclude: Vec<Regex>,
+}
+
+impl EntryFilter {
+    fn build(request: &SearchRequest) -> Result<Self, CtxError> {
+        let extensions = request
+            .extensions
+            .iter()
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
+            .collect();
+        Ok(Self {
+            extensions,
+            include: compile_globs(&request.include)?,
+            exclude: compile_globs(&request.exclude)?,
+        })
+    }
+
+    /// True if `rel_path` passes the extension whitelist, matches some include
+    /// glob (when any are set), and matches no exclude glob.
+    fn accepts(&self, rel_path: &str) -> bool {
+        if !self.extensions.is_empty() {
+            let ext = rel_path
+                .rsplit_once('.')
+                .map(|(_, ext)| ext.to_ascii_lowercase())
+                .unwrap_or_default();
+            if !self.extensions.contains(&ext) {
+                return false;
+            }
+        }
+        if !self.include.is_empty() && !self.include.iter().any(|re| re.is_match(rel_path)) {
+            return false;
+        }
+        if self.exclude.iter().any(|re| re.is_match(rel_path)) {
+            return false;
+        }
+        true
+    }
+}
+
+fn compile_globs(globs: &[String]) -> Result<Vec<Regex>, CtxError> {
+    globs
+        .iter()
+        .filter(|glob| !glob.is_empty())
+        .map(|glob| Ok(Regex::new(&glob_to_regex(glob))?))
+        .collect()
+}
+
+/// Translate a gitignore/ripgrep-style glob to an anchored regex. `*` matches
+/// within a path segment, `**` across segments, `?` one non-slash char. A glob
+/// without a `/` matches the basename at any depth (e.g. `*.rs`).
+fn glob_to_regex(glob: &str) -> String {
+    let mut re = String::from("(?s)^");
+    if !glob.contains('/') {
+        re.push_str("(?:.*/)?");
+    }
+    let bytes = glob.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'*' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                    i += 2;
+                    if i < bytes.len() && bytes[i] == b'/' {
+                        i += 1;
+                        re.push_str("(?:.*/)?");
+                    } else {
+                        re.push_str(".*");
+                    }
+                } else {
+                    re.push_str("[^/]*");
+                    i += 1;
+                }
+            }
+            b'?' => {
+                re.push_str("[^/]");
+                i += 1;
+            }
+            byte => {
+                let ch = byte as char;
+                if "\\.[]{}()+-^$|".contains(ch) {
+                    re.push('\\');
+                }
+                re.push(ch);
+                i += 1;
+            }
+        }
+    }
+    re.push('$');
+    re
+}
+
+/// Collapse content matches to one entry per file with its matched-line count,
+/// ordered by count (desc) then display path, for files/count output modes.
+fn collapse_to_files(matches: &[ContentSearchMatch]) -> Vec<FileMatchCount> {
+    use std::collections::BTreeMap;
+    let mut by_path: BTreeMap<&str, (&str, &str, usize)> = BTreeMap::new();
+    for m in matches {
+        let entry = by_path.entry(m.path.as_str()).or_insert((
+            m.root_id.as_str(),
+            m.display_path.as_str(),
+            0,
+        ));
+        entry.2 += 1;
+    }
+    let mut files: Vec<FileMatchCount> = by_path
+        .into_iter()
+        .map(|(path, (root_id, display_path, count))| FileMatchCount {
+            root_id: root_id.to_string(),
+            path: path.to_string(),
+            display_path: display_path.to_string(),
+            count,
+        })
+        .collect();
+    files.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then(a.display_path.cmp(&b.display_path))
+    });
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,13 +1014,113 @@ mod tests {
         SearchRequest {
             pattern: pattern.to_string(),
             mode,
-            regex: false,
             max_results,
             context_lines: 0,
-            max_content_files: 2_048,
-            max_content_bytes: 64 * 1024 * 1024,
-            whole_word: false,
+            ..SearchRequest::default()
         }
+    }
+
+    fn filtered(pattern: &str, f: impl FnOnce(&mut SearchRequest)) -> SearchRequest {
+        let mut req = SearchRequest {
+            pattern: pattern.to_string(),
+            mode: SearchMode::Content,
+            ..SearchRequest::default()
+        };
+        f(&mut req);
+        req
+    }
+
+    #[test]
+    fn glob_to_regex_segment_and_recursive_semantics() {
+        // bare glob with no slash matches basename at any depth
+        let any = Regex::new(&glob_to_regex("*.rs")).unwrap();
+        assert!(any.is_match("a.rs"));
+        assert!(any.is_match("src/deep/b.rs"));
+        assert!(!any.is_match("a.txt"));
+        // anchored dir glob: * stays within a segment
+        let scoped = Regex::new(&glob_to_regex("src/*.rs")).unwrap();
+        assert!(scoped.is_match("src/a.rs"));
+        assert!(!scoped.is_match("src/deep/a.rs"));
+        // ** crosses segments
+        let deep = Regex::new(&glob_to_regex("src/**/*.rs")).unwrap();
+        assert!(deep.is_match("src/deep/a.rs"));
+        assert!(deep.is_match("src/a.rs"));
+    }
+
+    #[test]
+    fn extension_and_glob_filters_narrow_results() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.rs"), "needle\n").expect("w");
+        fs::write(dir.path().join("b.txt"), "needle\n").expect("w");
+        std::fs::create_dir(dir.path().join("vendor")).expect("mkdir");
+        fs::write(dir.path().join("vendor/c.rs"), "needle\n").expect("w");
+        let (provider, snapshot) = provider_for(dir.path());
+
+        let by_ext = search_snapshot(
+            &provider,
+            &snapshot,
+            &filtered("needle", |r| r.extensions = vec!["rs".into()]),
+        )
+        .expect("ext");
+        assert!(
+            by_ext
+                .content_matches
+                .iter()
+                .all(|m| m.path.ends_with(".rs"))
+        );
+        assert_eq!(by_ext.content_matches.len(), 2);
+
+        let excluded = search_snapshot(
+            &provider,
+            &snapshot,
+            &filtered("needle", |r| {
+                r.extensions = vec!["rs".into()];
+                r.exclude = vec!["vendor/**".into()];
+            }),
+        )
+        .expect("exclude");
+        assert_eq!(excluded.content_matches.len(), 1);
+        assert_eq!(excluded.content_matches[0].path, "a.rs");
+    }
+
+    #[test]
+    fn output_mode_files_and_count_collapse_to_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.rs"), "needle\nneedle\n").expect("w");
+        fs::write(dir.path().join("b.rs"), "needle\n").expect("w");
+        let (provider, snapshot) = provider_for(dir.path());
+
+        let files = search_snapshot(
+            &provider,
+            &snapshot,
+            &filtered("needle", |r| r.output_mode = OutputMode::FilesWithMatches),
+        )
+        .expect("files");
+        assert!(files.content_matches.is_empty());
+        assert_eq!(files.match_files.len(), 2);
+        // ordered by count desc: a.rs (2) before b.rs (1)
+        assert_eq!(files.match_files[0].path, "a.rs");
+        assert_eq!(files.match_files[0].count, 2);
+    }
+
+    #[test]
+    fn asymmetric_context_before_after() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), "l1\nl2\nMATCH\nl4\nl5\n").expect("w");
+        let (provider, snapshot) = provider_for(dir.path());
+        let resp = search_snapshot(
+            &provider,
+            &snapshot,
+            &filtered("MATCH", |r| {
+                r.context_before = Some(2);
+                r.context_after = Some(0);
+            }),
+        )
+        .expect("ctx");
+        let ctx = &resp.content_matches[0].context;
+        // lines 1,2,3 (two before + the match), none after
+        assert_eq!(ctx.first().unwrap().line, 1);
+        assert_eq!(ctx.last().unwrap().line, 3);
     }
 
     fn provider_for(dir: &Path) -> (FsCatalogProvider, CatalogSnapshot) {
