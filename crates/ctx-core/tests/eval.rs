@@ -92,6 +92,7 @@ fn eval_query(
     q: &EvalQuery,
     k: usize,
     rerank: bool,
+    mode: SemanticSearchMode,
 ) -> Outcome {
     let response = index
         .search(
@@ -100,7 +101,7 @@ fn eval_query(
             &SemanticSearchRequest {
                 query: q.query.clone(),
                 max_results: k,
-                mode: SemanticSearchMode::Hybrid,
+                mode,
                 rerank,
             },
             &CancelToken::never(),
@@ -141,6 +142,11 @@ fn semantic_search_recall_baseline() {
     let k = env_usize("EVAL_K", 10);
     let rerank = env_flag("EVAL_RERANK");
     let reranker_model = std::env::var("EVAL_RERANKER").ok().filter(|v| !v.is_empty());
+    let embedding_model = std::env::var("EVAL_EMBEDDER").ok().filter(|v| !v.is_empty());
+    let mode = match std::env::var("EVAL_MODE").ok().as_deref() {
+        Some("semantic") | Some("dense") => SemanticSearchMode::Semantic,
+        _ => SemanticSearchMode::Hybrid,
+    };
 
     let policy = RootPolicy::new(vec![root.clone()]).expect("root policy");
     let provider = FsCatalogProvider::new(
@@ -153,6 +159,7 @@ fn semantic_search_recall_baseline() {
         enabled: true,
         rerank,
         reranker_model: reranker_model.clone(),
+        embedding_model: embedding_model.clone(),
         ..SemanticRuntimeConfig::disabled()
     };
     let index = config
@@ -167,7 +174,8 @@ fn semantic_search_recall_baseline() {
 
     println!();
     println!(
-        "repo-level retrieval eval   (k={k}, rerank={rerank}, reranker={}, n={n})",
+        "repo-level retrieval eval   (k={k}, mode={mode:?}, embedder={}, rerank={rerank}, reranker={}, n={n})",
+        embedding_model.as_deref().unwrap_or("jina-v2-base-code"),
         reranker_model.as_deref().unwrap_or("default")
     );
     println!("{:<18} {:>5} {:>5} {:>4}  top-1 path", "query", "hit", "rank", "sym");
@@ -179,7 +187,7 @@ fn semantic_search_recall_baseline() {
     let mut symbol_total = 0usize;
     let mut symbol_hits = 0usize;
     for q in &set.queries {
-        let o = eval_query(&index, &provider, &snapshot, q, k, rerank);
+        let o = eval_query(&index, &provider, &snapshot, q, k, rerank, mode);
         if let Some(r) = o.rank {
             file_hits += 1;
             mrr_sum += 1.0 / r as f64;
