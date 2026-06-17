@@ -1,46 +1,52 @@
 use crate::xai;
-use ctx_core::{
-    WorkspaceRegistry, handle_tool_call_json_with_resolver, tool_specs as core_tool_specs,
-};
+use ctx_core::WorkspaceRegistry;
+use ctx_runtime::{Runtime, RuntimeError, RuntimeToolAdapter};
 use serde_json::Value;
 
-pub(crate) fn tool_specs() -> Value {
-    let mut tools = core_tool_specs().as_array().cloned().unwrap_or_default();
-    tools.extend(xai::tool_specs());
-    Value::Array(tools)
-}
+pub(crate) type CtxRuntime = Runtime<WorkspaceRegistry>;
 
-pub(crate) fn handle_tool_call(
-    registry: &WorkspaceRegistry,
-    params: &Value,
-) -> std::result::Result<Value, String> {
-    match xai::handle_tool_call(registry, params) {
-        Ok(Some(value)) => return Ok(value),
-        Ok(None) => {}
-        Err(err) => return Err(err.to_string()),
+struct XaiToolAdapter;
+
+impl RuntimeToolAdapter<WorkspaceRegistry> for XaiToolAdapter {
+    fn tool_specs(&self) -> Vec<Value> {
+        xai::tool_specs()
     }
 
-    serde_json::to_string(params)
-        .map_err(|err| err.to_string())
-        .and_then(|request| {
-            handle_tool_call_json_with_resolver(registry, &request).map_err(|err| err.to_string())
-        })
-        .and_then(|response| serde_json::from_str(&response).map_err(|err| err.to_string()))
+    fn handle_tool_call(
+        &self,
+        registry: &WorkspaceRegistry,
+        params: &Value,
+    ) -> Result<Option<Value>, RuntimeError> {
+        xai::handle_tool_call(registry, params)
+            .map_err(|err| RuntimeError::adapter(err.to_string()))
+    }
+}
+
+pub(crate) fn runtime(registry: WorkspaceRegistry) -> CtxRuntime {
+    Runtime::new(registry).with_adapter(XaiToolAdapter)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctx_core::{FsCatalogProvider, WorkspaceRegistry};
+    use std::collections::HashSet;
 
     #[test]
-    fn tool_specs_include_core_and_xai_tools() {
-        let specs = tool_specs();
+    fn runtime_tool_specs_include_core_and_xai_tools() {
+        let registry: WorkspaceRegistry<FsCatalogProvider> = WorkspaceRegistry::new();
+        let runtime = runtime(registry);
+        let specs = runtime.tool_specs();
         let names: Vec<_> = specs
             .as_array()
             .expect("tool specs array")
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect();
+        let mut seen = HashSet::new();
+        for name in &names {
+            assert!(seen.insert(*name), "duplicate tool spec: {name}");
+        }
         assert!(names.contains(&"file_search"));
         assert!(names.contains(&"web_search"));
         assert!(names.contains(&"x_search"));

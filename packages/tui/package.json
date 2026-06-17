@@ -1,0 +1,14 @@
+{
+  "type": "module",
+  "name": "@ctx-mcp/tui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript TUI frontend scaffolding for ctx-mcp runtime daemon",
+  "scripts": {
+    "smoke": "node --experimental-strip-types src/cli/smoke.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=26"
+  }
+}

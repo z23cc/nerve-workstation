@@ -1,5 +1,5 @@
 use crate::workspace::ServeArgs;
-use crate::{auth, commands, server};
+use crate::{auth, commands, daemon, server};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
@@ -18,6 +18,8 @@ struct Cli {
 enum CommandKind {
     /// Run a synchronous JSON-RPC stdio MCP-like server.
     Serve(ServeArgs),
+    /// Run the human-facing runtime daemon.
+    Daemon(daemon::DaemonArgs),
     /// Print local toolchain diagnostics.
     Doctor,
     /// Inspect configuration.
@@ -60,6 +62,7 @@ pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         CommandKind::Serve(args) => server::serve(args),
+        CommandKind::Daemon(args) => daemon::run(args),
         CommandKind::Doctor => commands::doctor::doctor(),
         CommandKind::Config(args) => match args.command {
             ConfigCommand::Roots(serve_args) => commands::config::config_roots(serve_args),
@@ -79,6 +82,9 @@ mod tests {
 
     #[test]
     fn cli_parses_warm_cache_and_auth() {
+        let daemon = Cli::try_parse_from(["ctx-mcp", "daemon", "--stdio", "--root", "."])
+            .expect("daemon parse");
+        assert!(matches!(daemon.command, CommandKind::Daemon(_)));
         let warm = Cli::try_parse_from(["ctx-mcp", "warm"]).expect("warm parse");
         assert!(matches!(warm.command, CommandKind::Warm(_)));
         let purge = Cli::try_parse_from(["ctx-mcp", "cache", "purge"]).expect("purge parse");

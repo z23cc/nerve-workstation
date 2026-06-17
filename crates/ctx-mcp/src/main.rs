@@ -3,6 +3,9 @@
 mod auth;
 mod cli;
 mod commands;
+mod daemon;
+mod jobs;
+mod rpc;
 mod server;
 mod tools;
 mod workspace;

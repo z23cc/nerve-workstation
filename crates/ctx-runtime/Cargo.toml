@@ -1,5 +1,5 @@
 [package]
-name = "ctx-mcp"
+name = "ctx-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,19 +8,13 @@ repository.workspace = true
 
 [features]
 default = []
-semantic = ["ctx-core/semantic", "ctx-runtime/semantic"]
+semantic = ["ctx-core/semantic"]
 
 [dependencies]
-anyhow.workspace = true
-base64.workspace = true
-clap.workspace = true
 ctx-core = { path = "../ctx-core" }
-ctx-runtime = { path = "../ctx-runtime" }
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-ureq.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,12 +1,11 @@
+use crate::rpc::{RpcMessage, jsonrpc_error, jsonrpc_result, write_response};
 use crate::{tools, workspace};
 use anyhow::{Context, Result};
-use ctx_core::WorkspaceRegistry;
-use serde::Deserialize;
 use serde_json::{Value, json};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 
 pub(crate) fn serve(args: workspace::ServeArgs) -> Result<()> {
-    let registry = workspace::registry(&args)?;
+    let runtime = tools::runtime(workspace::registry(&args)?);
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut initialized = false;
@@ -27,7 +26,7 @@ pub(crate) fn serve(args: workspace::ServeArgs) -> Result<()> {
             }
         };
 
-        let maybe_response = handle_message(&registry, &mut initialized, request);
+        let maybe_response = handle_message(&runtime, &mut initialized, request);
         if let Some(response) = maybe_response {
             write_response(&mut stdout, response)?;
         }
@@ -35,22 +34,8 @@ pub(crate) fn serve(args: workspace::ServeArgs) -> Result<()> {
     Ok(())
 }
 
-fn write_response(mut out: impl Write, value: Value) -> Result<()> {
-    serde_json::to_writer(&mut out, &value).context("failed to encode response")?;
-    writeln!(out).context("failed to write response")?;
-    out.flush().context("failed to flush response")
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct RpcMessage {
-    pub(crate) id: Option<Value>,
-    pub(crate) method: String,
-    #[serde(default)]
-    pub(crate) params: Value,
-}
-
 pub(crate) fn handle_message(
-    registry: &WorkspaceRegistry,
+    runtime: &tools::CtxRuntime,
     initialized: &mut bool,
     message: RpcMessage,
 ) -> Option<Value> {
@@ -69,21 +54,13 @@ pub(crate) fn handle_message(
             None
         }
         _ if !*initialized => Some(jsonrpc_error(id, -32002, "not initialized")),
-        "tools/list" => Some(jsonrpc_result(id, json!({ "tools": tools::tool_specs() }))),
-        "tools/call" => Some(match tools::handle_tool_call(registry, &message.params) {
+        "tools/list" => Some(jsonrpc_result(id, json!({ "tools": runtime.tool_specs() }))),
+        "tools/call" => Some(match runtime.handle_tool_call(&message.params) {
             Ok(value) => jsonrpc_result(id, value),
-            Err(err) => jsonrpc_error(id, -32000, err),
+            Err(err) => jsonrpc_error(id, -32000, err.to_string()),
         }),
         _ => Some(jsonrpc_error(id, -32601, "method not found")),
     }
-}
-
-fn jsonrpc_result(id: Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn jsonrpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
 }
 
 #[cfg(test)]
@@ -100,9 +77,10 @@ mod tests {
         registry
             .add_workspace("default", vec![dir.path().to_path_buf()])
             .expect("workspace");
+        let runtime = tools::runtime(registry);
         let mut initialized = false;
         let response = handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(1)),
@@ -129,11 +107,12 @@ mod tests {
             }],
         ))
         .expect("registry");
-        assert_eq!(registry.len(), 2);
+        let runtime = tools::runtime(registry);
+        assert_eq!(runtime.resolver().len(), 2);
 
         let mut initialized = true;
         let response = handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(1)),
@@ -175,10 +154,10 @@ mod tests {
         args.semantic_embedding_model = Some("mock".to_string());
         args.semantic_reranker_model = Some("mock".to_string());
 
-        let registry = registry(&args).expect("registry");
+        let runtime = tools::runtime(registry(&args).expect("registry"));
         let mut initialized = true;
         let response = handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(1)),
@@ -207,15 +186,17 @@ mod tests {
         fs::write(default_dir.path().join("default.txt"), "alpha\n").expect("default write");
         fs::write(dynamic_dir.path().join("dynamic.txt"), "dynamic\n").expect("dynamic write");
 
-        let registry = registry(&args_with(
-            vec![default_dir.path().to_path_buf()],
-            Vec::new(),
-        ))
-        .expect("registry");
+        let runtime = tools::runtime(
+            registry(&args_with(
+                vec![default_dir.path().to_path_buf()],
+                Vec::new(),
+            ))
+            .expect("registry"),
+        );
         let mut initialized = true;
 
         let add = handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(1)),
@@ -237,7 +218,7 @@ mod tests {
         );
 
         let search = handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(2)),
@@ -259,7 +240,7 @@ mod tests {
         );
 
         handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(3)),
@@ -273,7 +254,7 @@ mod tests {
         .expect("remove response");
 
         let missing = handle_message(
-            &registry,
+            &runtime,
             &mut initialized,
             RpcMessage {
                 id: Some(json!(4)),

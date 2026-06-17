@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ctx-core", "crates/ctx-mcp", "crates/ctx-ffi"]
+members = ["crates/ctx-core", "crates/ctx-runtime", "crates/ctx-mcp", "crates/ctx-ffi"]
 exclude = ["fuzz"]
 resolver = "3"
 

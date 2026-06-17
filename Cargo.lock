@@ -707,12 +707,24 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "ctx-core",
+ "ctx-runtime",
  "rand 0.8.6",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "ureq",
+]
+
+[[package]]
+name = "ctx-runtime"
+version = "0.0.29"
+dependencies = [
+ "ctx-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

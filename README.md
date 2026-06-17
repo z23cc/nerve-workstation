@@ -68,6 +68,55 @@ The stdio loop pins MCP `protocolVersion` `2024-11-05` and is **fail-closed**: n
 `--root` means catalog/read/search are refused. Numeric params also accept
 integer-valued strings (e.g. `"limit": "120"`).
 
+## Runtime daemon for TUI / frontends
+
+Human-facing frontends should use the runtime daemon instead of MCP:
+
+```bash
+ctx-mcp daemon --stdio --root /abs/path/to/project
+```
+
+Protocol v2 is a small JSON-RPC 2.0 subset over newline-delimited JSON (NDJSON)
+on stdio. Each stdin line is one request object; each stdout line is one response
+or notification. Event notifications use method `runtime/event`. Requests with an
+`id` receive a response; notifications without `id` do not.
+
+Stable methods:
+
+- `runtime/info` — protocol v2 metadata and capabilities.
+- `runtime/tools/list` — runtime-visible tools.
+- `runtime/jobs/start` — start `{ "job_id"?: string, "command": RuntimeCommand }`.
+- `runtime/jobs/get` — get `{ "job_id": string, "include_result"?: boolean }`.
+- `runtime/jobs/list` — list jobs with `{ "include_terminal"?: boolean, "include_results"?: boolean, "limit"?: number }`.
+- `runtime/jobs/cancel` — cooperatively cancel `{ "job_id": string }`.
+- `runtime/command` — legacy synchronous helper retained for existing clients.
+
+`RuntimeCommand` is `{ "kind": "ping" }`, `{ "kind": "tool.list" }`, or
+`{ "kind": "tool.call", "name": string, "arguments"?: object }`. New clients
+should prefer `runtime/jobs/*`; job state is in-memory and disappears when the
+daemon exits. Job events are `job_started`, coarse `job_progress`,
+`job_cancel_requested`, and terminal `job_completed` / `job_failed` /
+`job_cancelled`. Cancellation is cooperative; core tools check cancellation, while
+some adapter or network calls may only stop after the current operation returns.
+
+Example job request:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"runtime/jobs/start","params":{"job_id":"ping-1","command":{"kind":"ping"}}}
+```
+
+Example output (timestamps shortened; background progress/terminal events can interleave with the start response after `job_started`):
+
+```json
+{"jsonrpc":"2.0","method":"runtime/event","params":{"command":"ping","job_id":"ping-1","tool_name":null,"type":"job_started"}}
+{"jsonrpc":"2.0","id":1,"result":{"job":{"job_id":"ping-1","status":"running","command":"ping","tool_name":null,"created_at_ms":0,"started_at_ms":0,"updated_at_ms":0,"finished_at_ms":null,"cancel_requested":false,"result":null,"error":null}}}
+{"jsonrpc":"2.0","method":"runtime/event","params":{"current":null,"job_id":"ping-1","message":"executing runtime command","stage":"executing","total":null,"type":"job_progress"}}
+{"jsonrpc":"2.0","method":"runtime/event","params":{"job_id":"ping-1","type":"job_completed"}}
+```
+
+`runtime/command` still emits legacy `command_started` and terminal
+`command_completed` / `command_failed` events before its JSON-RPC response.
+
 ## xAI Grok OAuth
 
 `ctx-mcp` can store xAI Grok OAuth credentials for integrations that want to
@@ -135,6 +184,10 @@ cargo test                                    # add --features semantic for the 
 cargo clippy --all-targets -- -D warnings     # functions <=100 lines, nesting capped
 cargo fmt --check
 ./Scripts/check-file-size.sh                  # files <=600 non-test lines
+
+# Optional frontend adapter smoke check
+cargo build -p ctx-mcp
+(cd packages/tui && npm run smoke -- --root ../..)
 ```
 
 Building requires a C toolchain (tree-sitter grammars compile `parser.c`).
@@ -142,8 +195,10 @@ Conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
 
 ## Internals & design
 
-- **Layout**: `crates/ctx-core` (engine + tools), `crates/ctx-mcp` (stdio MCP
-  binary + CLI: `serve`/`doctor`/`config`/`install`), `crates/ctx-ffi` (C ABI).
+- **Layout**: `crates/ctx-core` (engine + tools), `crates/ctx-runtime`
+  (transport-neutral runtime + tool-adapter composition), `crates/ctx-mcp` (stdio
+  MCP binary + CLI: `serve`/`daemon`/`doctor`/`config`/`install`), `crates/ctx-ffi`
+  (C ABI), `packages/tui` (TypeScript frontend backend adapter).
 - **Snapshot-centered**: filesystem access is behind a `CatalogProvider` port;
   the core operates on immutable `CatalogSnapshot` values. Codemap parses cache by
   `(mtime, size)`.
