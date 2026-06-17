@@ -126,9 +126,13 @@ ctx-mcp auth status --refresh   # refresh if expiring, then print status
 ctx-mcp auth logout             # non-interactive removal
 ```
 
-Tokens are stored in `~/.ctx-mcp/auth.json` by default. Set
-`CTX_MCP_HOME` or `CTX_MCP_AUTH_FILE` to override the location. The stored
-bearer is only sent to `https://api.x.ai/v1` or another `https://*.x.ai` URL.
+Tokens are stored under the platform config directory by default (for example
+`~/Library/Application Support/ctx-mcp/auth.json` on macOS or
+`$XDG_CONFIG_HOME/ctx-mcp/auth.json` on Linux). If an existing legacy
+`~/.ctx-mcp/auth.json` is present, ctx-mcp keeps using it. Set `CTX_MCP_HOME` or
+`CTX_MCP_AUTH_FILE` to override the location. Tokens are stored in the OS
+keychain when available, with a private-file JSON fallback. The stored bearer is
+only sent to `https://api.x.ai/v1` or another `https://*.x.ai` URL.
 
 The MCP server always lists Grok-backed tools, but they require `ctx-mcp auth
 login xai` before use: `xai_models`, `xai_responses`, `x_search` (preferred X

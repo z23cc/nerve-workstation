@@ -12,6 +12,7 @@ semantic = ["dep:fastembed", "dep:hnsw_rs", "dep:sha2"]
 
 [dependencies]
 aho-corasick.workspace = true
+globset.workspace = true
 memchr.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true

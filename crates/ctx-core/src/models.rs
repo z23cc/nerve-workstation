@@ -56,6 +56,8 @@ pub enum CtxError {
     EntryLimitExceeded { limit: usize },
     #[error("invalid regex: {0}")]
     InvalidRegex(#[from] regex::Error),
+    #[error("invalid glob: {0}")]
+    InvalidGlob(#[from] globset::Error),
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,

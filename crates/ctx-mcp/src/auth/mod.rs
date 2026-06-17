@@ -3,14 +3,11 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
-    net::{TcpListener, TcpStream},
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
     thread::sleep,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +22,7 @@ const REDIRECT_PORT: u16 = 56_121;
 const REDIRECT_PATH: &str = "/callback";
 const REFRESH_SKEW_SECONDS: u64 = 3_600;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct AuthStore {
     #[serde(default)]
     providers: BTreeMap<String, XaiProviderState>,
@@ -172,6 +169,14 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
         let token = format!("{header}.{payload}.sig");
         assert_eq!(jwt_expiry(&token), Some(4_102_444_800));
+    }
+
+    #[test]
+    fn keyring_accounts_are_scoped_by_auth_file_path() {
+        let first = store::keyring_account_for_path(Path::new("/tmp/a/auth.json"));
+        let second = store::keyring_account_for_path(Path::new("/tmp/b/auth.json"));
+        assert_ne!(first, second);
+        assert!(first.starts_with("xai-oauth:"));
     }
 
     #[test]

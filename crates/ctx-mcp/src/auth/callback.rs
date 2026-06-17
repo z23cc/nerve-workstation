@@ -1,5 +1,7 @@
-use super::util::percent_decode;
 use super::*;
+use std::net::TcpListener;
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use url::form_urlencoded;
 
 pub(super) struct OAuthCallback {
     pub(super) code: Option<String>,
@@ -9,21 +11,20 @@ pub(super) struct OAuthCallback {
     pub(super) manual_paste: bool,
 }
 
-#[derive(Debug)]
 pub(super) struct LoopbackServer {
-    listener: TcpListener,
+    server: Server,
     pub(super) redirect_uri: String,
 }
+
 pub(super) fn start_loopback_server() -> Result<LoopbackServer> {
     let listener = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT))
         .or_else(|_| TcpListener::bind((REDIRECT_HOST, 0)))
         .context("failed to bind xAI OAuth loopback listener")?;
-    listener
-        .set_nonblocking(true)
-        .context("failed to configure xAI OAuth loopback listener")?;
     let port = listener.local_addr()?.port();
+    let server = Server::from_listener(listener, None)
+        .map_err(|err| anyhow!("failed to start xAI OAuth loopback server: {err}"))?;
     Ok(LoopbackServer {
-        listener,
+        server,
         redirect_uri: format!("http://{REDIRECT_HOST}:{port}{REDIRECT_PATH}"),
     })
 }
@@ -35,112 +36,88 @@ pub(super) fn wait_for_callback(
 ) -> Result<OAuthCallback> {
     let deadline = Instant::now() + timeout;
     loop {
-        match server.listener.accept() {
-            Ok((mut stream, _addr)) => {
-                if let Some(callback) = handle_callback_stream(&mut stream, expected_state)? {
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for xAI OAuth callback");
+        }
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(250));
+        match server.server.recv_timeout(wait) {
+            Ok(Some(request)) => {
+                if let Some(callback) = handle_callback_request(request, expected_state)? {
                     return Ok(callback);
                 }
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    bail!("timed out waiting for xAI OAuth callback");
-                }
-                sleep(Duration::from_millis(100));
-            }
+            Ok(None) => {}
             Err(err) => return Err(err).context("failed while waiting for xAI OAuth callback"),
         }
     }
 }
 
-pub(super) fn handle_callback_stream(
-    stream: &mut TcpStream,
+pub(super) fn handle_callback_request(
+    request: Request,
     expected_state: &str,
 ) -> Result<Option<OAuthCallback>> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .context("failed to configure OAuth callback read timeout")?;
-    let mut buffer = [0_u8; 8192];
-    let read = match stream.read(&mut buffer) {
-        Ok(read) => read,
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(err) => return Err(err).context("failed to read OAuth callback"),
-    };
-    let request = String::from_utf8_lossy(&buffer[..read]);
-    let Some((method, target)) = request_line_parts(&request) else {
-        write_http_response(stream, 400, "invalid OAuth callback request")?;
-        return Ok(None);
-    };
-    if method == "OPTIONS" {
-        write_http_response(stream, 204, "")?;
+    let method = request.method().clone();
+    let target = request.url().to_string();
+    if method == Method::Options {
+        respond_http(request, 204, "")?;
         return Ok(None);
     }
-    if method != "GET" {
-        write_http_response(stream, 405, "method not allowed")?;
+    if method != Method::Get {
+        respond_http(request, 405, "method not allowed")?;
         return Ok(None);
     }
     if target.split('?').next() != Some(REDIRECT_PATH) {
-        write_http_response(stream, 404, "not found")?;
+        respond_http(request, 404, "not found")?;
         return Ok(None);
     }
     if !target.contains('?') {
-        write_http_response(stream, 400, "OAuth callback missing query parameters")?;
+        respond_http(request, 400, "OAuth callback missing query parameters")?;
         return Ok(None);
     }
-    let callback = parse_callback_target(target, false)?;
+    let callback = parse_callback_target(&target, false)?;
     let terminal = callback.error.is_some() || callback.code.is_some();
     if !terminal {
-        write_http_response(stream, 400, "OAuth callback missing code or error")?;
+        respond_http(request, 400, "OAuth callback missing code or error")?;
         return Ok(None);
     }
     if callback.state.as_deref() != Some(expected_state) {
-        write_http_response(stream, 400, "OAuth callback state mismatch")?;
+        respond_http(request, 400, "OAuth callback state mismatch")?;
         return Ok(None);
     }
-    write_http_response(
-        stream,
+    respond_http(
+        request,
         200,
         "ctx-mcp login complete; return to the terminal",
     )?;
     Ok(Some(callback))
 }
 
-pub(super) fn request_line_parts(request: &str) -> Option<(&str, &str)> {
-    let mut parts = request.lines().next()?.split_whitespace();
-    Some((parts.next()?, parts.next()?))
-}
-
-pub(super) fn write_http_response(
-    stream: &mut TcpStream,
-    status: u16,
-    message: &str,
-) -> Result<()> {
-    let reason = match status {
-        200 => "OK",
-        204 => "No Content",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        _ => "OK",
-    };
+pub(super) fn respond_http(request: Request, status: u16, message: &str) -> Result<()> {
     let body = if status == 204 {
         String::new()
     } else {
         format!("<html><body><p>{message}</p></body></html>")
     };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Private-Network: true\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )?;
-    Ok(())
+    let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+    for (name, value) in [
+        ("Content-Type", "text/html; charset=utf-8"),
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+        ("Access-Control-Allow-Headers", "*"),
+        ("Access-Control-Allow-Private-Network", "true"),
+        ("Connection", "close"),
+    ] {
+        response.add_header(static_header(name, value));
+    }
+    request
+        .respond(response)
+        .context("failed to write OAuth callback response")
+}
+
+fn static_header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static HTTP header is valid")
 }
 
 pub(super) fn prompt_manual_callback() -> Result<OAuthCallback> {
@@ -199,33 +176,13 @@ pub(super) fn validate_callback(callback: &OAuthCallback, expected_state: &str) 
 }
 
 pub(super) fn parse_query(query: &str) -> Result<BTreeMap<String, String>> {
-    let mut params = BTreeMap::new();
-    for part in query.split('&').filter(|value| !value.is_empty()) {
-        let (key, value) = part.split_once('=').unwrap_or((part, ""));
-        params.insert(percent_decode(key)?, percent_decode(value)?);
-    }
-    Ok(params)
+    Ok(form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect())
 }
 
 pub(super) fn try_open_browser(url: &str) {
-    let result = browser_command(url)
-        .and_then(|(program, args)| Command::new(program).args(args).status().ok());
-    if !matches!(result, Some(status) if status.success()) {
+    if open::that(url).is_err() {
         println!("Could not open the browser automatically; use the URL above.");
-    }
-}
-
-pub(super) fn browser_command(url: &str) -> Option<(&'static str, Vec<&str>)> {
-    #[cfg(target_os = "macos")]
-    {
-        Some(("open", vec![url]))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Some(("cmd", vec!["/C", "start", "", url]))
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        Some(("xdg-open", vec![url]))
     }
 }

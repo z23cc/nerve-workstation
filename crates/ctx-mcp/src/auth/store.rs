@@ -1,12 +1,16 @@
 use super::*;
+use directories::BaseDirs;
+use fs4::TryLockError;
+
+const KEYRING_SERVICE: &str = "ctx-mcp";
 
 pub(super) struct AuthLock {
-    path: PathBuf,
+    file: fs::File,
 }
 
 impl Drop for AuthLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = fs4::FileExt::unlock(&self.file);
     }
 }
 
@@ -44,7 +48,10 @@ pub(super) fn load_store(path: &Path) -> Result<AuthStore> {
     if text.trim().is_empty() {
         return Ok(AuthStore::default());
     }
-    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    let mut store: AuthStore = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    hydrate_keyring_tokens(path, &mut store);
+    Ok(store)
 }
 
 pub(super) fn save_store(path: &Path, store: &AuthStore) -> Result<()> {
@@ -53,7 +60,8 @@ pub(super) fn save_store(path: &Path, store: &AuthStore) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let bytes = serde_json::to_vec_pretty(store).context("failed to encode auth store")?;
+    let store = prepare_store_for_save(path, store);
+    let bytes = serde_json::to_vec_pretty(&store).context("failed to encode auth store")?;
     write_private_file(&tmp, &bytes)?;
     replace_file(&tmp, path).with_context(|| format!("failed to save {}", path.display()))
 }
@@ -72,14 +80,76 @@ pub(super) fn auth_home() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(path).join("ctx-mcp"));
     }
-    #[cfg(target_os = "windows")]
-    if let Ok(path) = std::env::var("APPDATA") {
-        return Ok(PathBuf::from(path).join("ctx-mcp"));
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return Ok(PathBuf::from(home).join(".ctx-mcp"));
+    if let Some(base_dirs) = BaseDirs::new() {
+        let legacy_home = base_dirs.home_dir().join(".ctx-mcp");
+        if legacy_home.join("auth.json").exists() {
+            return Ok(legacy_home);
+        }
+        return Ok(base_dirs.config_dir().join("ctx-mcp"));
     }
     bail!("could not determine auth directory; set CTX_MCP_HOME or CTX_MCP_AUTH_FILE")
+}
+
+fn prepare_store_for_save(path: &Path, store: &AuthStore) -> AuthStore {
+    let mut store = store.clone();
+    if let Some(state) = store.providers.get_mut(PROVIDER_ID)
+        && let Some(tokens) = state.tokens.as_ref()
+        && save_keyring_tokens(path, tokens)
+    {
+        state.tokens = None;
+    }
+    store
+}
+
+fn hydrate_keyring_tokens(path: &Path, store: &mut AuthStore) {
+    if let Some(state) = store.providers.get_mut(PROVIDER_ID)
+        && state.tokens.is_none()
+        && let Some(tokens) = load_keyring_tokens(path)
+    {
+        state.tokens = Some(tokens);
+    }
+}
+
+fn save_keyring_tokens(path: &Path, tokens: &XaiTokens) -> bool {
+    if keyring_disabled() {
+        return false;
+    }
+    let Ok(payload) = serde_json::to_string(tokens) else {
+        return false;
+    };
+    keyring_entry(path)
+        .and_then(|entry| entry.set_password(&payload))
+        .is_ok()
+}
+
+fn load_keyring_tokens(path: &Path) -> Option<XaiTokens> {
+    if keyring_disabled() {
+        return None;
+    }
+    let payload = keyring_entry(path).ok()?.get_password().ok()?;
+    serde_json::from_str(&payload).ok()
+}
+
+pub(super) fn delete_xai_keyring_tokens(path: &Path) {
+    if keyring_disabled() {
+        return;
+    }
+    if let Ok(entry) = keyring_entry(path) {
+        let _ = entry.delete_credential();
+    }
+}
+
+fn keyring_entry(path: &Path) -> keyring::Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, &keyring_account_for_path(path))
+}
+
+pub(super) fn keyring_account_for_path(path: &Path) -> String {
+    let id = URL_SAFE_NO_PAD.encode(path.to_string_lossy().as_bytes());
+    format!("{PROVIDER_ID}:{id}")
+}
+
+fn keyring_disabled() -> bool {
+    cfg!(test) || std::env::var_os("CTX_MCP_AUTH_DISABLE_KEYRING").is_some()
 }
 
 pub(super) fn acquire_auth_lock(auth_path: &Path) -> Result<AuthLock> {
@@ -88,47 +158,33 @@ pub(super) fn acquire_auth_lock(auth_path: &Path) -> Result<AuthLock> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let lock_path = auth_path.with_file_name("auth.json.lock");
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(mut file) => {
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => {
+                file.set_len(0)?;
                 writeln!(file, "pid={}", std::process::id()).ok();
-                return Ok(AuthLock { path: lock_path });
+                file.sync_all().ok();
+                return Ok(AuthLock { file });
             }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                if remove_stale_lock(&lock_path)? {
-                    continue;
-                }
+            Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     bail!("timed out waiting for auth lock: {}", lock_path.display());
                 }
                 sleep(Duration::from_millis(100));
             }
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to create {}", lock_path.display()));
+            Err(TryLockError::Error(err)) => {
+                return Err(err).with_context(|| format!("failed to lock {}", lock_path.display()));
             }
         }
     }
-}
-
-pub(super) fn remove_stale_lock(lock_path: &Path) -> Result<bool> {
-    let stale_after = Duration::from_secs(300);
-    let stale = fs::metadata(lock_path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|elapsed| elapsed > stale_after);
-    if stale {
-        fs::remove_file(lock_path).with_context(|| {
-            format!("failed to remove stale auth lock: {}", lock_path.display())
-        })?;
-    }
-    Ok(stale)
 }
 
 #[cfg(unix)]

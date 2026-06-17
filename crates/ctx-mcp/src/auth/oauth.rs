@@ -5,11 +5,15 @@ use super::callback::{
 use super::commands::LoginArgs;
 use super::http::{http_get_json, http_post_form_json};
 use super::util::{
-    client_id, env_base_url, form_encode, optional_string, pkce_challenge, preferred_redirect_uri,
-    random_urlsafe, required_string, validate_inference_base_url, validate_loopback_redirect_uri,
+    client_id, env_base_url, optional_string, preferred_redirect_uri, random_urlsafe,
+    required_string, validate_inference_base_url, validate_loopback_redirect_uri,
     validate_oauth_endpoint,
 };
 use super::*;
+use oauth2::{
+    AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+    TokenUrl, basic::BasicClient,
+};
 
 pub(super) fn run_loopback_login(args: &LoginArgs) -> Result<LoginCredentials> {
     let discovery = discover_xai(Duration::from_secs(args.timeout_seconds))?;
@@ -23,8 +27,7 @@ pub(super) fn run_loopback_login(args: &LoginArgs) -> Result<LoginCredentials> {
         (server.redirect_uri.clone(), Some(server))
     };
     validate_loopback_redirect_uri(&redirect_uri)?;
-    let authorize_url =
-        build_authorize_url(&discovery, &redirect_uri, &pkce.challenge, &state, &nonce);
+    let authorize_url = build_authorize_url(&discovery, &redirect_uri, &pkce, &state, &nonce)?;
 
     println!("Open this URL to authorize ctx-mcp with xAI:");
     println!("{authorize_url}");
@@ -54,8 +57,8 @@ pub(super) fn run_loopback_login(args: &LoginArgs) -> Result<LoginCredentials> {
         &discovery,
         code,
         &redirect_uri,
-        &pkce.verifier,
-        &pkce.challenge,
+        pkce.verifier.secret(),
+        pkce.challenge.as_str(),
         Duration::from_secs(args.timeout_seconds),
     )?;
     Ok(LoginCredentials {
@@ -74,14 +77,13 @@ pub(super) struct LoginCredentials {
 
 #[derive(Debug)]
 struct Pkce {
-    verifier: String,
-    challenge: String,
+    verifier: PkceCodeVerifier,
+    challenge: PkceCodeChallenge,
 }
 
 impl Pkce {
     fn generate() -> Self {
-        let verifier = random_urlsafe(32);
-        let challenge = pkce_challenge(&verifier);
+        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         Self {
             verifier,
             challenge,
@@ -101,31 +103,30 @@ pub(super) fn discover_xai(timeout: Duration) -> Result<XaiDiscovery> {
     })
 }
 
-pub(super) fn build_authorize_url(
+fn build_authorize_url(
     discovery: &XaiDiscovery,
     redirect_uri: &str,
-    challenge: &str,
+    pkce: &Pkce,
     state: &str,
     nonce: &str,
-) -> String {
-    let client_id = client_id();
-    let params = [
-        ("response_type", "code"),
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", redirect_uri),
-        ("scope", SCOPE),
-        ("code_challenge", challenge),
-        ("code_challenge_method", "S256"),
-        ("state", state),
-        ("nonce", nonce),
-        ("plan", "generic"),
-        ("referrer", "ctx-mcp"),
-    ];
-    format!(
-        "{}?{}",
-        discovery.authorization_endpoint,
-        form_encode(params.iter().copied())
-    )
+) -> Result<String> {
+    let client = BasicClient::new(ClientId::new(client_id()))
+        .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint.clone())?)
+        .set_token_uri(TokenUrl::new(discovery.token_endpoint.clone())?)
+        .set_redirect_uri(RedirectUrl::new(redirect_uri.to_string())?);
+    let request = client
+        .authorize_url(|| CsrfToken::new(state.to_string()))
+        .add_scopes(
+            SCOPE
+                .split_whitespace()
+                .map(|scope| Scope::new(scope.to_string())),
+        )
+        .set_pkce_challenge(pkce.challenge.clone())
+        .add_extra_param("nonce", nonce.to_string())
+        .add_extra_param("plan", "generic")
+        .add_extra_param("referrer", "ctx-mcp");
+    let (url, _csrf) = request.url();
+    Ok(url.to_string())
 }
 
 pub(super) fn exchange_code_for_tokens(

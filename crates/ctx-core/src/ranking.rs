@@ -5,7 +5,7 @@
 //! the tokenization helpers here.
 
 use crate::{models::CtxError, models::SearchRequest};
-use regex::Regex;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use std::collections::{HashMap, HashSet};
 
 const SCORE_SCALE: f64 = 1_000_000.0;
@@ -213,8 +213,8 @@ pub(crate) struct EntryFilterConfig {
 /// include/exclude lists (ripgrep / Claude Code Grep parity).
 pub(crate) struct EntryFilter {
     extensions: Vec<String>,
-    include: Vec<Regex>,
-    exclude: Vec<Regex>,
+    include: GlobSet,
+    exclude: GlobSet,
 }
 
 impl EntryFilter {
@@ -252,55 +252,35 @@ impl EntryFilter {
                 return false;
             }
         }
-        if !self.include.is_empty() && !self.include.iter().any(|re| re.is_match(rel_path)) {
+        if !self.include.is_empty() && !self.include.is_match(rel_path) {
             return false;
         }
-        if self.exclude.iter().any(|re| re.is_match(rel_path)) {
+        if self.exclude.is_match(rel_path) {
             return false;
         }
         true
     }
 }
 
-pub(crate) fn compile_globs(globs: &[String]) -> Result<Vec<Regex>, CtxError> {
-    globs
-        .iter()
-        .filter(|glob| !glob.is_empty())
-        .map(|glob| Ok(Regex::new(&glob_to_regex(glob))?))
-        .collect()
+pub(crate) fn compile_globs(globs: &[String]) -> Result<GlobSet, CtxError> {
+    let mut builder = GlobSetBuilder::new();
+    for glob in globs.iter().filter(|glob| !glob.is_empty()) {
+        builder.add(
+            GlobBuilder::new(&search_glob_pattern(glob))
+                .literal_separator(true)
+                .build()?,
+        );
+    }
+    Ok(builder.build()?)
 }
 
-/// Translate a gitignore/ripgrep-style glob to an anchored regex. `*` matches
-/// within a path segment, `**` across segments, `?` one non-slash char. A glob
-/// without a `/` matches the basename at any depth (e.g. `*.rs`).
-pub(crate) fn glob_to_regex(glob: &str) -> String {
-    let mut re = String::from("(?s)^");
-    if !glob.contains('/') {
-        re.push_str("(?:.*/)?");
+/// Normalize user-facing search globs before handing them to `globset`.
+/// A glob without `/` keeps the existing API behavior: match the basename at
+/// any depth, e.g. `*.rs` accepts both `a.rs` and `src/deep/b.rs`.
+pub(crate) fn search_glob_pattern(glob: &str) -> String {
+    if glob.contains('/') {
+        glob.to_string()
+    } else {
+        format!("**/{glob}")
     }
-    let chars: Vec<char> = glob.chars().collect();
-    let mut idx = 0usize;
-    while idx < chars.len() {
-        match chars[idx] {
-            '*' => {
-                if chars.get(idx + 1) == Some(&'*') {
-                    idx += 1;
-                    if chars.get(idx + 1) == Some(&'/') {
-                        idx += 1;
-                        re.push_str("(?:.*/)?");
-                    } else {
-                        re.push_str(".*");
-                    }
-                } else {
-                    re.push_str("[^/]*");
-                }
-            }
-            '?' => re.push_str("[^/]"),
-            '/' => re.push('/'),
-            c => re.push_str(&regex::escape(&c.to_string())),
-        }
-        idx += 1;
-    }
-    re.push('$');
-    re
 }

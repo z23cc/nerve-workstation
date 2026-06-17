@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(test)]
+use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
+use url::Url;
 
 pub(super) fn required_string(value: &Value, key: &str) -> Result<String> {
     value
@@ -35,7 +38,7 @@ pub(super) fn validate_inference_base_url(value: Option<&str>) -> Result<String>
         .trim_end_matches('/');
     let uri = parse_https_xai_uri(candidate, "xAI base_url")?;
     let host = uri
-        .host()
+        .host_str()
         .ok_or_else(|| anyhow!("xAI base_url must include a host: {candidate}"))?;
     if !is_xai_api_host(host) {
         bail!("xAI base_url host `{host}` must be an xAI API subdomain");
@@ -53,31 +56,25 @@ pub(super) fn validate_loopback_redirect_uri(uri: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn parse_https_xai_uri(url: &str, label: &str) -> Result<ureq::http::Uri> {
-    let uri = url
-        .parse::<ureq::http::Uri>()
-        .with_context(|| format!("{label} must be a valid URI: {url}"))?;
-    if uri.scheme_str() != Some("https") {
-        bail!("{label} must be an HTTPS URL: {url}");
+pub(super) fn parse_https_xai_uri(value: &str, label: &str) -> Result<Url> {
+    let uri = Url::parse(value).with_context(|| format!("{label} must be a valid URL: {value}"))?;
+    if uri.scheme() != "https" {
+        bail!("{label} must be an HTTPS URL: {value}");
     }
-    let authority = uri
-        .authority()
-        .ok_or_else(|| anyhow!("{label} must include a host: {url}"))?;
-    if authority.as_str().contains('@') {
-        bail!("{label} must not include userinfo: {url}");
+    if !uri.username().is_empty() || uri.password().is_some() {
+        bail!("{label} must not include userinfo: {value}");
     }
     let host = uri
-        .host()
-        .ok_or_else(|| anyhow!("{label} must include a host: {url}"))?;
+        .host_str()
+        .ok_or_else(|| anyhow!("{label} must include a host: {value}"))?;
     if !is_xai_host(host) {
         bail!("{label} host `{host}` is not on the xAI origin");
     }
     Ok(uri)
 }
 
-pub(super) fn has_query(uri: &ureq::http::Uri) -> bool {
-    uri.path_and_query()
-        .is_some_and(|path_and_query| path_and_query.as_str().contains('?'))
+pub(super) fn has_query(uri: &Url) -> bool {
+    uri.query().is_some()
 }
 
 pub(super) fn is_xai_host(host: &str) -> bool {
@@ -109,9 +106,12 @@ pub(super) fn random_urlsafe(bytes_len: usize) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+#[cfg(test)]
 pub(super) fn pkce_challenge(verifier: &str) -> String {
-    let digest = Sha256::digest(verifier.as_bytes());
-    URL_SAFE_NO_PAD.encode(digest)
+    let verifier = PkceCodeVerifier::new(verifier.to_string());
+    PkceCodeChallenge::from_code_verifier_sha256(&verifier)
+        .as_str()
+        .to_string()
 }
 
 pub(super) fn access_token_is_expiring(token: &str, skew_seconds: u64) -> bool {
@@ -140,59 +140,4 @@ pub(super) fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-pub(super) fn form_encode<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
-    pairs
-        .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-pub(super) fn percent_encode(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
-pub(super) fn percent_decode(value: &str) -> Result<String> {
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut iter = value.as_bytes().iter().copied();
-    while let Some(byte) = iter.next() {
-        match byte {
-            b'+' => bytes.push(b' '),
-            b'%' => {
-                let hi = iter
-                    .next()
-                    .ok_or_else(|| anyhow!("invalid percent escape"))?;
-                let lo = iter
-                    .next()
-                    .ok_or_else(|| anyhow!("invalid percent escape"))?;
-                bytes.push(hex_pair(hi, lo)?);
-            }
-            other => bytes.push(other),
-        }
-    }
-    String::from_utf8(bytes).context("percent-decoded value was not UTF-8")
-}
-
-pub(super) fn hex_pair(hi: u8, lo: u8) -> Result<u8> {
-    let hi = hex_value(hi).ok_or_else(|| anyhow!("invalid percent escape"))?;
-    let lo = hex_value(lo).ok_or_else(|| anyhow!("invalid percent escape"))?;
-    Ok((hi << 4) | lo)
-}
-
-pub(super) fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }

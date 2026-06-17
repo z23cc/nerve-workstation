@@ -33,7 +33,7 @@ use path::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ranking::glob_to_regex;
+    use crate::ranking::{EntryFilter, EntryFilterConfig};
     use crate::{FsCatalogProvider, RootPolicy, catalog::ScanOptions};
     use std::fs;
 
@@ -58,20 +58,31 @@ mod tests {
     }
 
     #[test]
-    fn glob_to_regex_segment_and_recursive_semantics() {
-        // bare glob with no slash matches basename at any depth
-        let any = Regex::new(&glob_to_regex("*.rs")).unwrap();
-        assert!(any.is_match("a.rs"));
-        assert!(any.is_match("src/deep/b.rs"));
-        assert!(!any.is_match("a.txt"));
-        // anchored dir glob: * stays within a segment
-        let scoped = Regex::new(&glob_to_regex("src/*.rs")).unwrap();
-        assert!(scoped.is_match("src/a.rs"));
-        assert!(!scoped.is_match("src/deep/a.rs"));
-        // ** crosses segments
-        let deep = Regex::new(&glob_to_regex("src/**/*.rs")).unwrap();
-        assert!(deep.is_match("src/deep/a.rs"));
-        assert!(deep.is_match("src/a.rs"));
+    fn glob_filters_preserve_search_semantics() {
+        let bare = EntryFilter::from_config(&EntryFilterConfig {
+            include: vec!["*.rs".into()],
+            ..EntryFilterConfig::default()
+        })
+        .unwrap();
+        assert!(bare.accepts("a.rs"));
+        assert!(bare.accepts("src/deep/b.rs"));
+        assert!(!bare.accepts("a.txt"));
+
+        let scoped = EntryFilter::from_config(&EntryFilterConfig {
+            include: vec!["src/*.rs".into()],
+            ..EntryFilterConfig::default()
+        })
+        .unwrap();
+        assert!(scoped.accepts("src/a.rs"));
+        assert!(!scoped.accepts("src/deep/a.rs"));
+
+        let deep = EntryFilter::from_config(&EntryFilterConfig {
+            include: vec!["src/**/*.rs".into()],
+            ..EntryFilterConfig::default()
+        })
+        .unwrap();
+        assert!(deep.accepts("src/deep/a.rs"));
+        assert!(deep.accepts("src/a.rs"));
     }
 
     #[test]

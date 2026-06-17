@@ -141,6 +141,7 @@ fn logout(args: LogoutArgs) -> Result<()> {
     let _lock = store::acquire_auth_lock(&path)?;
     let mut store = store::load_store(&path)?;
     if store.providers.remove(PROVIDER_ID).is_some() {
+        store::delete_xai_keyring_tokens(&path);
         super::store::save_store(&path, &store)?;
         println!("Removed xAI OAuth credentials from {}", path.display());
     } else {

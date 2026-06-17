@@ -22,21 +22,29 @@ repository = "https://github.com/z23cc/context-engine-rs"
 
 [workspace.dependencies]
 anyhow = "1"
+directories = "6"
+fs4 = "1"
 aho-corasick = "1"
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
+globset = "0.4"
 memchr = "2"
 nucleo-matcher = "0.3.1"
 regex = "1"
 rayon = "1"
 base64 = "0.22"
+oauth2 = "5"
+open = "5"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 schemars = { version = "0.8", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+tiny_http = "0.12"
 ureq = { version = "3", features = ["json", "multipart"] }
+url = "2"
+keyring = "4"
 tempfile = "3"
 insta = { version = "1", features = ["json", "redactions"] }
 criterion = { version = "0.5", default-features = false }
