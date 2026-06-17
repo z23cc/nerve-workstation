@@ -360,6 +360,22 @@ mod tests {
     }
 
     #[test]
+    fn hashline_read_file_structured_content_includes_rendered_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), "one\ntwo\n").expect("write");
+        let provider = provider_for(dir.path());
+        let response = handle_tool_call(
+            &provider,
+            &json!({ "name": "read_file", "arguments": { "path": "a.txt", "view": "hashline" } }),
+        )
+        .expect("read_file hashline");
+        assert_eq!(
+            response["structuredContent"]["content"],
+            response["content"][0]["text"]
+        );
+    }
+
+    #[test]
     fn file_tree_content_text_is_ascii_not_json() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("a.txt"), "x\n").expect("write");
@@ -522,6 +538,17 @@ mod tests {
             fs::read_to_string(dir.path().join("b.txt")).expect("b.txt"),
             "hello\n"
         );
+
+        handle_tool_call(
+            &provider,
+            &json!({ "name": "write", "arguments": { "path": "a/b/c.txt", "content": "nested\n" } }),
+        )
+        .expect("nested write");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a/b/c.txt")).expect("nested file"),
+            "nested\n"
+        );
+        assert!(dir.path().join("a/b").is_dir());
 
         handle_tool_call(
             &provider,

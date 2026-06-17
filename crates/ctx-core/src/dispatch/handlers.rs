@@ -164,6 +164,7 @@ fn hashline_read_response(response: crate::ReadFileResponse) -> Result<Value, Di
         "content": [{ "type": "text", "text": view }],
         "structuredContent": {
             "path": response.display_path,
+            "content": view,
             "hashline_tag": edit::snapshot_tag(&response.content),
             "total_lines": response.total_lines,
         },
@@ -177,6 +178,7 @@ fn summary_read_response(response: crate::ReadFileResponse) -> Result<Value, Dis
         "content": [{ "type": "text", "text": view }],
         "structuredContent": {
             "path": response.display_path,
+            "content": view,
             "view": "summary",
             "total_lines": response.total_lines,
             "language": summary.language,

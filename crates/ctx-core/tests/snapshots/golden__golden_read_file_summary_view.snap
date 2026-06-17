@@ -11,6 +11,7 @@ expression: "json!({\n    \"summary\": summary, \"fallback\": fallback, \"unsupp
       }
     ],
     "structuredContent": {
+      "content": "export function broken( {\n    return 1;\n",
       "elided": false,
       "language": null,
       "parsed": false,
@@ -35,6 +36,7 @@ expression: "json!({\n    \"summary\": summary, \"fallback\": fallback, \"unsupp
       }
     ],
     "structuredContent": {
+      "content": "import alpha from 'alpha';\n… elided lines 2-4 …\nimport epsilon from 'epsilon';\n\nexport function greet(name: string): string {\n… elided lines 8-10 …\n}\n\n---\nElided ranges: summary-root/summary_sample.ts:2-4,8-10\nRe-read with read_file start_line/end_line for any range above.\n",
       "elided": true,
       "language": "typescript",
       "parsed": true,
@@ -81,6 +83,7 @@ expression: "json!({\n    \"summary\": summary, \"fallback\": fallback, \"unsupp
       }
     ],
     "structuredContent": {
+      "content": "plain text\nwith lines\n",
       "elided": false,
       "language": null,
       "parsed": false,

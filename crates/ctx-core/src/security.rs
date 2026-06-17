@@ -61,9 +61,9 @@ impl RootPolicy {
     }
 
     /// Resolve a path for writing. If it already exists this matches
-    /// [`Self::resolve_allowed`]; otherwise the parent directory must exist and
-    /// be within an allowed root, and the would-be canonical path is returned.
-    /// Used for create and move-destination targets.
+    /// [`Self::resolve_allowed`]; otherwise the nearest existing ancestor must
+    /// be a directory within an allowed root, and the would-be canonical path is
+    /// returned. Used for create and move-destination targets.
     pub fn resolve_for_write(&self, path: &Path) -> Result<PathBuf, CtxError> {
         if self.roots.is_empty() {
             return Err(CtxError::NoRoots);
@@ -88,25 +88,28 @@ impl RootPolicy {
             };
         }
 
-        let parent = candidate
-            .parent()
-            .ok_or_else(|| CtxError::OutsideRoots(candidate.clone()))?;
-        let file_name = candidate
-            .file_name()
-            .ok_or_else(|| CtxError::OutsideRoots(candidate.clone()))?;
-        let canonical_parent = parent
+        let mut ancestor = candidate.as_path();
+        while !ancestor.exists() {
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| CtxError::OutsideRoots(candidate.clone()))?;
+        }
+        let canonical_ancestor = ancestor
             .canonicalize()
-            .map_err(|err| CtxError::io(parent.to_path_buf(), err))?;
-        if !canonical_parent.is_dir() {
+            .map_err(|err| CtxError::io(ancestor.to_path_buf(), err))?;
+        if !canonical_ancestor.is_dir() {
             return Err(CtxError::io(
-                canonical_parent,
+                canonical_ancestor,
                 std::io::Error::new(
                     std::io::ErrorKind::NotADirectory,
                     "parent is not a directory",
                 ),
             ));
         }
-        let resolved = canonical_parent.join(file_name);
+        let remainder = candidate
+            .strip_prefix(ancestor)
+            .map_err(|_| CtxError::OutsideRoots(candidate.clone()))?;
+        let resolved = canonical_ancestor.join(remainder);
         if self
             .roots
             .iter()
