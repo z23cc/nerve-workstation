@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "ctx-runtime";
 pub const RUNTIME_PROTOCOL_VERSION: &str = "3";
+pub const RUNTIME_DAEMON_NAME: &str = "ctxd";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";
 pub const RUNTIME_TOOLS_LIST_METHOD: &str = "runtime/tools/list";

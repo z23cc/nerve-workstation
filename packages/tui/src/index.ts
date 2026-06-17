@@ -1,5 +1,11 @@
-export { CtxDaemonClient, type CtxDaemonClientOptions } from "./backend/ctxDaemonClient.ts";
 export {
+  CtxDaemonClient,
+  CtxDaemonClient as CtxdClient,
+  type CtxDaemonClientOptions,
+  type CtxDaemonClientOptions as CtxdClientOptions,
+} from "./backend/ctxDaemonClient.ts";
+export {
+  RUNTIME_DAEMON_NAME,
   RUNTIME_EVENT_METHOD,
   RUNTIME_INFO_METHOD,
   RUNTIME_JOB_CANCEL_METHOD,

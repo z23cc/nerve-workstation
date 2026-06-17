@@ -1,9 +1,10 @@
 # context-engine-rs
 
-A deterministic, embeddable **code-intelligence engine** exposed as an MCP server
-over stdio. One pure-Rust binary gives any MCP host (Claude Code, Codex, …) fast
+A deterministic **code-intelligence engine** exposed as an MCP server over stdio
+and `ctxd`, a local AI Workstation Runtime for frontends. One pure-Rust binary gives MCP hosts (Claude Code,
+Codex, …) and runtime clients fast
 search, codemaps, symbol navigation, structural edits, and semantic retrieval over
-a codebase — no language server, no GUI, no daemon.
+a codebase — no language server or GUI required.
 
 ## Highlights
 
@@ -20,8 +21,7 @@ a codebase — no language server, no GUI, no daemon.
   RRF (on by default; see below).
 - **Symbol navigation** (`goto_definition` / `find_references` / `call_hierarchy`)
   with confidence scoring — the structured layer agentic coders otherwise lack.
-- **Cross-platform single binary**: Homebrew bottle, Scoop, `cargo install`, or
-  embed via the C ABI.
+- **Cross-platform single binary**: Homebrew bottle, Scoop, or `cargo install`.
 
 ## Install
 
@@ -68,18 +68,25 @@ The stdio loop pins MCP `protocolVersion` `2024-11-05` and is **fail-closed**: n
 `--root` means catalog/read/search are refused. Numeric params also accept
 integer-valued strings (e.g. `"limit": "120"`).
 
-## Runtime daemon for TUI / frontends
+## `ctxd` local AI Workstation Runtime
 
-Human-facing frontends should use the runtime daemon instead of MCP:
+Human-facing frontends should use `ctxd`, the local AI Workstation Runtime, instead of MCP:
 
 ```bash
-ctx-mcp daemon --stdio --root /abs/path/to/project
+ctx-mcp ctxd --stdio --root /abs/path/to/project
 ```
+
+
+`ctx-runtime` is the protocol source of truth. MCP stdio is an agent-facing adapter,
+the runtime daemon stdio path is a transport adapter, and the TypeScript TUI backend
+is a client of the runtime protocol.
 
 Protocol v3 is a small JSON-RPC 2.0 subset over newline-delimited JSON (NDJSON)
 on stdio. Each stdin line is one request object; each stdout line is one response
-or notification. Event notifications use method `runtime/event`. Requests with an
-`id` receive a response; notifications without `id` do not.
+or notification. The daemon keeps method routing separate from stdio transport so
+future UDS or Named Pipe transports can reuse the same runtime router. Event
+notifications use method `runtime/event`. Requests with an `id` receive a response;
+notifications without `id` do not.
 
 Stable methods:
 
@@ -203,15 +210,12 @@ Conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
 ## Internals & design
 
 - **Layout**: `crates/ctx-core` (engine + tools), `crates/ctx-runtime`
-  (transport-neutral runtime + tool-adapter composition), `crates/ctx-mcp` (stdio
-  MCP binary + CLI: `serve`/`daemon`/`doctor`/`config`/`install`), `crates/ctx-ffi`
-  (C ABI), `packages/tui` (TypeScript frontend backend adapter).
+  (transport-neutral runtime protocol + tool-adapter composition), `crates/ctx-mcp` (stdio
+  MCP adapter + CLI: `serve`/`ctxd`/`doctor`/`config`/`install`), `packages/tui`
+  (TypeScript frontend backend adapter/client for `ctxd`).
 - **Snapshot-centered**: filesystem access is behind a `CatalogProvider` port;
   the core operates on immutable `CatalogSnapshot` values. Codemap parses cache by
   `(mtime, size)`.
-- **C ABI + cancellation**: `crates/ctx-ffi` exposes `ctx_engine_handle_request[_cancellable]`;
-  a `CtxCancel` token can interrupt long requests from another thread (stdio MCP is
-  synchronous and does not cancel mid-request).
 - **Determinism / parity**: golden snapshots under `crates/ctx-core/tests`; the
   RepoPrompt difference ledger lives in [`docs/parity/`](docs/parity/).
 - **Plans**: see [`docs/plans/`](docs/plans/).

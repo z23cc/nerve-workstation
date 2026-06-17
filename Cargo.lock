@@ -930,15 +930,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx-ffi"
-version = "0.0.29"
-dependencies = [
- "ctx-core",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "ctx-mcp"
 version = "0.0.29"
 dependencies = [

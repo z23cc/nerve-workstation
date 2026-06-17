@@ -18,8 +18,9 @@ struct Cli {
 enum CommandKind {
     /// Run a synchronous JSON-RPC stdio MCP-like server.
     Serve(ServeArgs),
-    /// Run the human-facing runtime daemon.
-    Daemon(daemon::DaemonArgs),
+    /// Run the local AI Workstation Runtime daemon.
+    #[command(name = "ctxd")]
+    Daemon(daemon::RuntimeDaemonArgs),
     /// Print local toolchain diagnostics.
     Doctor,
     /// Inspect configuration.
@@ -82,9 +83,9 @@ mod tests {
 
     #[test]
     fn cli_parses_warm_cache_and_auth() {
-        let daemon = Cli::try_parse_from(["ctx-mcp", "daemon", "--stdio", "--root", "."])
-            .expect("daemon parse");
-        assert!(matches!(daemon.command, CommandKind::Daemon(_)));
+        let ctxd =
+            Cli::try_parse_from(["ctx-mcp", "ctxd", "--stdio", "--root", "."]).expect("ctxd parse");
+        assert!(matches!(ctxd.command, CommandKind::Daemon(_)));
         let warm = Cli::try_parse_from(["ctx-mcp", "warm"]).expect("warm parse");
         assert!(matches!(warm.command, CommandKind::Warm(_)));
         let purge = Cli::try_parse_from(["ctx-mcp", "cache", "purge"]).expect("purge parse");

@@ -25,7 +25,7 @@ Runtime dispatch order is explicit: registered adapters are consulted first, the
 
 The TypeScript frontend package owns the human-facing backend adapter:
 
-- `backend/CtxDaemonClient` — spawns `ctx-mcp daemon --stdio`, uses protocol v3 job methods, and dispatches `runtime/event` notifications.
+- `backend/CtxdClient` — spawns `ctx-mcp ctxd --stdio`, uses protocol v3 job methods, and dispatches `runtime/event` notifications.
 - `backend/protocol.generated.ts` — generated protocol constants and TypeScript types from Rust schema.
 - `backend/types.ts` — UI-neutral `WorkstationBackend` plus frontend aliases over generated protocol types.
 - `cli/smoke.ts` — local integration smoke check that starts, polls, and lists a job through the daemon protocol.
@@ -39,7 +39,9 @@ This keeps UI components independent from MCP and from Rust process details.
 - `cli.rs` — Clap command model and top-level dispatch.
 - `workspace.rs` — root/workspace argument types, semantic runtime config, provider/registry construction.
 - `server.rs` — MCP stdio JSON-RPC loop and initialization state.
-- `daemon.rs` — human-facing runtime JSON-RPC/NDJSON daemon over stdio; routes protocol v3 job methods.
+- `daemon.rs` — thin orchestration for the preferred `ctxd` local AI Workstation Runtime command.
+- `daemon/router.rs` — human-facing runtime JSON-RPC method routing for protocol v3, independent of transport.
+- `daemon/stdio.rs` — NDJSON stdio transport for the runtime daemon; future local transports should reuse the router.
 - `daemon/tests.rs` — daemon protocol tests kept out-of-line so production file size stays below the hard cap.
 - `jobs.rs` — daemon-owned in-memory runtime job lifecycle, cancellation tokens, retention, and event emission.
 - `rpc.rs` — shared JSON-RPC response and line-writing helpers.
@@ -89,10 +91,10 @@ The public seams stay stable: `ctx_core::{get_repo_map, get_repo_map_cancellable
 
 ## Current standard
 
-- `ctx-runtime` is the stable seam for Core Runtime + multiple Adapter architecture; MCP and daemon are consumers of runtime, not the core architecture.
-- `ctx-mcp daemon --stdio` exposes protocol v3 for TUI/frontends: JSON-RPC 2.0 over NDJSON stdio, `runtime/event` notifications, and `runtime/jobs/start|get|list|cancel`.
-- `ctx-mcp serve` remains the agent-facing MCP protocol and is separate from the human-facing daemon protocol.
-- `packages/tui` provides the first TypeScript `WorkstationBackend` adapter over that daemon protocol.
+- `ctx-runtime` is the stable seam for Core Runtime + multiple Adapter architecture and the source of truth for runtime protocol constants/types; MCP and daemon are consumers of runtime, not the core architecture.
+- `ctx-mcp ctxd --stdio` is the local AI Workstation Runtime command for TUI/frontends: JSON-RPC 2.0 over NDJSON stdio, `runtime/event` notifications, and `runtime/jobs/start|get|list|cancel`.
+- `ctx-mcp serve` remains the agent-facing MCP protocol adapter and is separate from the human-facing runtime daemon protocol.
+- `packages/tui` provides the first TypeScript `WorkstationBackend` client over that runtime daemon protocol.
 - Clients execute runtime commands through the daemon job lifecycle only; the daemon does not expose the old synchronous `runtime/command` method.
 - Job progress events are coarse today; core tools cooperatively observe cancellation tokens, but the protocol does not promise detailed percentages for every operation.
 - Source file size gate is hard and passes: every source file is within 600 non-test lines.

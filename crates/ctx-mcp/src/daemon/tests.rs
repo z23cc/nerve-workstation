@@ -1,7 +1,14 @@
-use super::*;
-use crate::workspace::{args_with, registry};
+use super::router::{RuntimeDaemonRouter, runtime_event_notification};
+use crate::jobs::JobManager;
+use crate::rpc::RpcMessage;
+use crate::{
+    tools,
+    workspace::{args_with, registry},
+};
+use ctx_runtime::RuntimeEvent;
+use serde_json::{Value, json};
 use std::fs;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -30,28 +37,26 @@ fn rpc(id: impl Into<Option<Value>>, method: &str, params: Value) -> RpcMessage 
     }
 }
 
-fn output_manager(runtime: Arc<tools::CtxRuntime>) -> (Arc<JobManager>, Arc<Mutex<Vec<Value>>>) {
+fn output_router(runtime: Arc<tools::CtxRuntime>) -> (RuntimeDaemonRouter, Arc<Mutex<Vec<Value>>>) {
     let output = Arc::new(Mutex::new(Vec::new()));
     let event_output = Arc::clone(&output);
-    let jobs = Arc::new(JobManager::new(runtime, move |event| {
-        event_output
-            .lock()
-            .expect("output lock")
-            .push(event_notification(event));
-    }));
-    (jobs, output)
+    let router = RuntimeDaemonRouter::new(runtime, move |value| {
+        event_output.lock().expect("output lock").push(value);
+    });
+    (router, output)
 }
 
 fn dispatch(
-    jobs: &Arc<JobManager>,
+    router: &RuntimeDaemonRouter,
     output: &Arc<Mutex<Vec<Value>>>,
     message: RpcMessage,
 ) -> Vec<Value> {
-    handle_message_with_sink(jobs, message, |value| {
-        output.lock().expect("output lock").push(value);
-        Ok(())
-    })
-    .expect("dispatch");
+    router
+        .handle_message(message, |value| {
+            output.lock().expect("output lock").push(value);
+            Ok(())
+        })
+        .expect("dispatch");
     output.lock().expect("output lock").clone()
 }
 
@@ -85,13 +90,12 @@ fn wait_for_job_event(output: &Arc<Mutex<Vec<Value>>>, event_type: &str, job_id:
 #[test]
 fn initialize_returns_runtime_info() {
     let fixture = runtime_with_file();
-    let responses = handle_message(
-        Arc::clone(&fixture.runtime),
-        rpc(json!(1), "initialize", json!({})),
-    );
+    let (router, output) = output_router(Arc::clone(&fixture.runtime));
+    let responses = dispatch(&router, &output, rpc(json!(1), "initialize", json!({})));
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["result"]["protocol"], "ctx-runtime");
     assert_eq!(responses[0]["result"]["protocolVersion"], "3");
+    assert_eq!(responses[0]["result"]["serverInfo"]["name"], "ctxd");
     assert_eq!(
         responses[0]["result"]["capabilities"]["jobs"]["methods"][0],
         "runtime/jobs/start"
@@ -105,8 +109,10 @@ fn initialize_returns_runtime_info() {
 #[test]
 fn runtime_command_is_not_supported() {
     let fixture = runtime_with_file();
-    let responses = handle_message(
-        Arc::clone(&fixture.runtime),
+    let (router, output) = output_router(Arc::clone(&fixture.runtime));
+    let responses = dispatch(
+        &router,
+        &output,
         rpc(
             json!(7),
             "runtime/command",
@@ -121,9 +127,9 @@ fn runtime_command_is_not_supported() {
 #[test]
 fn job_start_get_and_list_track_completed_job() {
     let fixture = runtime_with_file();
-    let (jobs, output) = output_manager(Arc::clone(&fixture.runtime));
+    let (router, output) = output_router(Arc::clone(&fixture.runtime));
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(1),
@@ -139,7 +145,7 @@ fn job_start_get_and_list_track_completed_job() {
     wait_for_job_event(&output, "job_completed", "job-ok");
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(json!(2), "runtime/jobs/get", json!({ "job_id": "job-ok" })),
     );
@@ -148,7 +154,7 @@ fn job_start_get_and_list_track_completed_job() {
     assert_eq!(job["result"]["status"], "ok");
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(3),
@@ -162,7 +168,7 @@ fn job_start_get_and_list_track_completed_job() {
     assert!(listed[0]["result"].is_null());
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(4),
@@ -182,9 +188,9 @@ fn job_start_get_and_list_track_completed_job() {
 #[test]
 fn job_duplicate_and_unknown_errors_use_protocol_codes() {
     let fixture = runtime_with_file();
-    let (jobs, output) = output_manager(Arc::clone(&fixture.runtime));
+    let (router, output) = output_router(Arc::clone(&fixture.runtime));
     dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(1),
@@ -193,7 +199,7 @@ fn job_duplicate_and_unknown_errors_use_protocol_codes() {
         ),
     );
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(2),
@@ -207,7 +213,7 @@ fn job_duplicate_and_unknown_errors_use_protocol_codes() {
     );
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(json!(3), "runtime/jobs/get", json!({ "job_id": "missing" })),
     );
@@ -217,7 +223,7 @@ fn job_duplicate_and_unknown_errors_use_protocol_codes() {
     );
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(4),
@@ -234,9 +240,9 @@ fn job_duplicate_and_unknown_errors_use_protocol_codes() {
 #[test]
 fn job_failure_stores_error_and_emits_terminal_event() {
     let fixture = runtime_with_file();
-    let (jobs, output) = output_manager(Arc::clone(&fixture.runtime));
+    let (router, output) = output_router(Arc::clone(&fixture.runtime));
     dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(1),
@@ -251,7 +257,7 @@ fn job_failure_stores_error_and_emits_terminal_event() {
     assert!(failed["params"]["error"]["message"].is_string());
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(2),
@@ -279,7 +285,7 @@ fn job_cancel_requests_token_and_emits_cancelled() {
             event_output
                 .lock()
                 .expect("output lock")
-                .push(event_notification(event));
+                .push(runtime_event_notification(event));
             if block {
                 progress_tx.send(()).expect("progress send");
                 release_rx
@@ -290,9 +296,10 @@ fn job_cancel_requests_token_and_emits_cancelled() {
             }
         },
     ));
+    let router = RuntimeDaemonRouter::with_jobs(jobs);
 
     dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(1),
@@ -305,7 +312,7 @@ fn job_cancel_requests_token_and_emits_cancelled() {
         .expect("job progress");
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(2),
@@ -321,7 +328,7 @@ fn job_cancel_requests_token_and_emits_cancelled() {
     wait_for_job_event(&output, "job_cancelled", "cancel-me");
 
     let observed = dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             json!(3),
@@ -338,9 +345,9 @@ fn job_cancel_requests_token_and_emits_cancelled() {
 #[test]
 fn job_start_notification_emits_events_without_response() {
     let fixture = runtime_with_file();
-    let (jobs, output) = output_manager(Arc::clone(&fixture.runtime));
+    let (router, output) = output_router(Arc::clone(&fixture.runtime));
     dispatch(
-        &jobs,
+        &router,
         &output,
         rpc(
             None,

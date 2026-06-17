@@ -1,3 +1,9 @@
+//! Daemon-adapter job lifecycle state.
+//!
+//! `ctx-runtime` owns the protocol types and method contract. This module owns
+//! only the runtime daemon's local lifecycle mechanics: in-memory retention,
+//! thread spawning, event emission wiring, and cooperative cancellation tokens.
+
 use crate::tools;
 use ctx_core::CancelToken;
 use ctx_runtime::{

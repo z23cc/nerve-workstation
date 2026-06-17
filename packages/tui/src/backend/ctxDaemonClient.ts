@@ -90,7 +90,7 @@ export class CtxDaemonClient implements WorkstationBackend {
     if (this.#child) return;
     const child = spawn(
       this.#options.binary,
-      ["daemon", "--stdio", "--root", this.#options.root, ...this.#options.extraArgs],
+      ["ctxd", "--stdio", "--root", this.#options.root, ...this.#options.extraArgs],
       {
         cwd: this.#options.cwd,
         env: { ...process.env, ...this.#options.env },
@@ -104,7 +104,7 @@ export class CtxDaemonClient implements WorkstationBackend {
       this.#stderr += chunk.toString();
     });
     child.on("error", (error) => this.#rejectAll(error));
-    child.on("exit", (code, signal) => this.#rejectAll(new Error(`ctx-mcp daemon exited: code=${code} signal=${signal}`)));
+    child.on("exit", (code, signal) => this.#rejectAll(new Error(`ctxd runtime daemon exited: code=${code} signal=${signal}`)));
     try {
       validateRuntimeInfo(await this.info());
     } catch (error) {
@@ -118,7 +118,7 @@ export class CtxDaemonClient implements WorkstationBackend {
     this.#child = undefined;
     this.#stdout?.close();
     this.#stdout = undefined;
-    this.#rejectAll(new Error("ctx-mcp daemon stopped"));
+    this.#rejectAll(new Error("ctxd runtime daemon stopped"));
     if (!child || child.killed) return;
     child.stdin.end();
     child.kill("SIGTERM");
@@ -187,7 +187,7 @@ export class CtxDaemonClient implements WorkstationBackend {
 
   async #request(method: string, params?: JsonObject): Promise<JsonValue> {
     const child = this.#child;
-    if (!child) throw new Error("ctx-mcp daemon is not started");
+    if (!child) throw new Error("ctxd runtime daemon is not started");
     const id = this.#nextId++;
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
     return new Promise<JsonValue>((resolve, reject) => {

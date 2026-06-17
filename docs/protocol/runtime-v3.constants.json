@@ -1,4 +1,5 @@
 {
+  "RUNTIME_DAEMON_NAME": "ctxd",
   "RUNTIME_EVENT_METHOD": "runtime/event",
   "RUNTIME_INFO_METHOD": "runtime/info",
   "RUNTIME_JOB_CANCEL_METHOD": "runtime/jobs/cancel",
