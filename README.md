@@ -1,14 +1,14 @@
 # context-engine-rs
 
-A deterministic **code-intelligence engine** exposed as an MCP server over stdio
-and `ctxd`, a local AI Workstation Runtime for frontends. One pure-Rust binary gives MCP hosts (Claude Code,
-Codex, …) and runtime clients fast
-search, codemaps, symbol navigation, structural edits, and semantic retrieval over
-a codebase — no language server or GUI required.
+A deterministic **code-intelligence engine** exposed through two runtime adapters:
+agent-facing MCP over stdio, and `ctxd`, a local AI Workstation Runtime for
+frontends. One pure-Rust binary gives MCP hosts (Claude Code, Codex, …) and
+runtime clients fast search, codemaps, symbol navigation, structural edits, and
+semantic retrieval over a codebase — no language server or GUI required.
 
 ## Highlights
 
-- **27 MCP tools**: search, read, tree, codemap, repo-map, symbol nav, call
+- **29 MCP tools**: search, read, tree, codemap, repo-map, symbol nav, call
   hierarchy, structural AST search/rewrite, a 4-mode edit engine, read-only git,
   semantic search, context assembly, plus optional xAI/Grok tools when OAuth is configured.
 - **Codemap over 11 languages** (tree-sitter): signatures **with return types**,
@@ -34,10 +34,15 @@ scoop bucket add z23cc https://github.com/z23cc/scoop-bucket && scoop install ct
 
 # From source
 cargo install --path crates/ctx-mcp
+
+# Refresh an existing local source install after pulling updates
+cargo install --path crates/ctx-mcp --force
 ```
 
 macOS pours a prebuilt **bottle** (instant); other platforms build from source.
 See [`packaging/homebrew`](packaging/homebrew/README.md) for how bottles/releases work.
+If an older installed `ctx-mcp` does not recognize `ctxd`, upgrade/reinstall the
+binary or build the current source with `cargo build -p ctx-mcp`.
 
 ## Use with Claude Code / Codex (MCP)
 
