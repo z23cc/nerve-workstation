@@ -15,8 +15,8 @@ Keep public behavior stable while making the workspace easier to extend. The gui
 - `Runtime<R>` — owns a `WorkspaceResolver` and dispatches tool calls.
 - `RuntimeToolAdapter<R>` — adapter seam for provider-specific or host-specific capabilities.
 - `RuntimeError` — preserves core dispatch errors and adapter messages for transports to render.
-- `RuntimeCommand` / `RuntimeEvent` — human-facing command/event contracts for daemon and TUI hosts.
-- `RuntimeJob*` types — protocol v2 job start/get/list/cancel request and snapshot schema shared by the daemon and TypeScript backend.
+- `RuntimeCommand` / `RuntimeEvent` — human-facing job command/event contracts for daemon and TUI hosts.
+- `RuntimeJob*` types — protocol v3 job start/get/list/cancel request and snapshot schema shared by the daemon and TypeScript backend.
 
 Runtime dispatch order is explicit: registered adapters are consulted first, then the built-in `ctx-core` dispatcher handles unclaimed tools. Tool specs are de-duplicated by name with core specs kept first, so accidental adapter duplicates do not leak ambiguous tool definitions. This keeps MCP, CLI, TUI, and future daemon/Web hosts from each re-implementing tool aggregation.
 
@@ -24,7 +24,7 @@ Runtime dispatch order is explicit: registered adapters are consulted first, the
 
 The TypeScript frontend package owns the human-facing backend adapter:
 
-- `backend/CtxDaemonClient` — spawns `ctx-mcp daemon --stdio`, uses protocol v2 job methods, and dispatches `runtime/event` notifications.
+- `backend/CtxDaemonClient` — spawns `ctx-mcp daemon --stdio`, uses protocol v3 job methods, and dispatches `runtime/event` notifications.
 - `backend/types.ts` — UI-neutral `WorkstationBackend`, `RuntimeCommand`, `RuntimeJob`, and `RuntimeEvent` contracts.
 - `cli/smoke.ts` — local integration smoke check that starts, polls, and lists a job through the daemon protocol.
 
@@ -37,7 +37,7 @@ This keeps UI components independent from MCP and from Rust process details.
 - `cli.rs` — Clap command model and top-level dispatch.
 - `workspace.rs` — root/workspace argument types, semantic runtime config, provider/registry construction.
 - `server.rs` — MCP stdio JSON-RPC loop and initialization state.
-- `daemon.rs` — human-facing runtime JSON-RPC/NDJSON daemon over stdio; routes protocol v2 methods and retains legacy `runtime/command`.
+- `daemon.rs` — human-facing runtime JSON-RPC/NDJSON daemon over stdio; routes protocol v3 job methods.
 - `daemon/tests.rs` — daemon protocol tests kept out-of-line so production file size stays below the hard cap.
 - `jobs.rs` — daemon-owned in-memory runtime job lifecycle, cancellation tokens, retention, and event emission.
 - `rpc.rs` — shared JSON-RPC response and line-writing helpers.
@@ -88,10 +88,10 @@ The public seams stay stable: `ctx_core::{get_repo_map, get_repo_map_cancellable
 ## Current standard
 
 - `ctx-runtime` is the stable seam for Core Runtime + multiple Adapter architecture; MCP and daemon are consumers of runtime, not the core architecture.
-- `ctx-mcp daemon --stdio` exposes protocol v2 for TUI/frontends: JSON-RPC 2.0 over NDJSON stdio, `runtime/event` notifications, and `runtime/jobs/start|get|list|cancel`.
+- `ctx-mcp daemon --stdio` exposes protocol v3 for TUI/frontends: JSON-RPC 2.0 over NDJSON stdio, `runtime/event` notifications, and `runtime/jobs/start|get|list|cancel`.
 - `ctx-mcp serve` remains the agent-facing MCP protocol and is separate from the human-facing daemon protocol.
 - `packages/tui` provides the first TypeScript `WorkstationBackend` adapter over that daemon protocol.
-- New clients should use the daemon job lifecycle. Daemon `runtime/command` is retained as a legacy synchronous helper that streams `command_started` before execution, terminal lifecycle event after execution, then a JSON-RPC response only when the request has an `id`.
+- Clients execute runtime commands through the daemon job lifecycle only; the daemon does not expose the old synchronous `runtime/command` method.
 - Job progress events are coarse today; core tools cooperatively observe cancellation tokens, but the protocol does not promise detailed percentages for every operation.
 - Source file size gate is hard and passes: every source file is within 600 non-test lines.
 - Large modules are now deep rather than shallow: each extracted module hides real behavior behind a small parent-facing seam.

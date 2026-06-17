@@ -44,7 +44,7 @@ function parseArgs(argv: string[]): { root?: string; binary?: string } {
     if (value === "--root") parsed.root = requiredValue(argv, ++index, "--root");
     else if (value === "--binary") parsed.binary = requiredValue(argv, ++index, "--binary");
     else if (value === "--help" || value === "-h") {
-      console.log("usage: node --experimental-strip-types src/cli/smoke.ts [--root PATH] [--binary PATH]");
+      console.log("usage: bun src/cli/smoke.ts [--root PATH] [--binary PATH]");
       process.exit(0);
     } else {
       throw new Error(`unknown argument: ${value}`);

@@ -1,21 +1,10 @@
 use crate::{RuntimeCommand, RuntimeJobError};
 use serde::{Deserialize, Serialize};
 
-/// Runtime event emitted by human-facing adapters while executing commands or jobs.
+/// Runtime event emitted by human-facing adapters while executing jobs.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
-    CommandStarted {
-        command_id: String,
-        command: String,
-    },
-    CommandCompleted {
-        command_id: String,
-    },
-    CommandFailed {
-        command_id: String,
-        error: String,
-    },
     JobStarted {
         job_id: String,
         command: String,
@@ -44,29 +33,6 @@ pub enum RuntimeEvent {
 }
 
 impl RuntimeEvent {
-    #[must_use]
-    pub fn command_started(command_id: impl Into<String>, command: &RuntimeCommand) -> Self {
-        Self::CommandStarted {
-            command_id: command_id.into(),
-            command: command.name().to_string(),
-        }
-    }
-
-    #[must_use]
-    pub fn command_completed(command_id: impl Into<String>) -> Self {
-        Self::CommandCompleted {
-            command_id: command_id.into(),
-        }
-    }
-
-    #[must_use]
-    pub fn command_failed(command_id: impl Into<String>, error: impl Into<String>) -> Self {
-        Self::CommandFailed {
-            command_id: command_id.into(),
-            error: error.into(),
-        }
-    }
-
     #[must_use]
     pub fn job_started(job_id: impl Into<String>, command: &RuntimeCommand) -> Self {
         Self::JobStarted {

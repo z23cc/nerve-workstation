@@ -1,4 +1,4 @@
-import test from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { CtxDaemonClient } from "../src/backend/ctxDaemonClient.ts";
 
@@ -19,7 +19,7 @@ test("job API reports not started before start", async () => {
   await assert.rejects(() => client.cancelJob("job-1"), /not started/);
 });
 
-test("runCommand uses job-backed API and reports not started before start", async () => {
+test("runJob reports not started before start", async () => {
   const client = notStartedClient();
-  await assert.rejects(() => client.runCommand({ kind: "ping" }, { commandId: "test-ping" }), /not started/);
+  await assert.rejects(() => client.runJob({ kind: "ping" }, { jobId: "test-ping" }), /not started/);
 });

@@ -91,125 +91,31 @@ fn initialize_returns_runtime_info() {
     );
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["result"]["protocol"], "ctx-runtime");
-    assert_eq!(responses[0]["result"]["protocolVersion"], "2");
+    assert_eq!(responses[0]["result"]["protocolVersion"], "3");
     assert_eq!(
         responses[0]["result"]["capabilities"]["jobs"]["methods"][0],
         "runtime/jobs/start"
     );
+    assert_eq!(
+        responses[0]["result"]["capabilities"]["jobs"]["commandKinds"][0],
+        "ping"
+    );
 }
 
 #[test]
-fn runtime_command_emits_events_and_response() {
+fn runtime_command_is_not_supported() {
     let fixture = runtime_with_file();
     let responses = handle_message(
         Arc::clone(&fixture.runtime),
         rpc(
             json!(7),
             "runtime/command",
-            json!({
-                "command_id": "search-1",
-                "command": {
-                    "kind": "tool.call",
-                    "name": "file_search",
-                    "arguments": { "pattern": "alpha", "mode": "content" }
-                }
-            }),
+            json!({ "command": { "kind": "ping" } }),
         ),
     );
 
-    assert_eq!(responses.len(), 3);
-    assert_eq!(responses[0]["method"], "runtime/event");
-    assert_eq!(responses[0]["params"]["type"], "command_started");
-    assert_eq!(responses[0]["params"]["command_id"], "search-1");
-    assert_eq!(responses[1]["params"]["type"], "command_completed");
-    assert_eq!(
-        responses[2]["result"]["structuredContent"]["content_matches"][0]["path"],
-        "notes.txt"
-    );
-}
-
-#[test]
-fn runtime_command_failure_emits_failed_event() {
-    let fixture = runtime_with_file();
-    let responses = handle_message(
-        Arc::clone(&fixture.runtime),
-        rpc(
-            json!(9),
-            "runtime/command",
-            json!({ "command": { "kind": "tool.call", "name": "missing_tool" } }),
-        ),
-    );
-
-    assert_eq!(responses.len(), 3);
-    assert_eq!(responses[0]["params"]["command_id"], "9");
-    assert_eq!(responses[1]["params"]["type"], "command_failed");
-    assert!(responses[2]["error"]["message"].is_string());
-}
-
-#[test]
-fn malformed_runtime_command_is_invalid_params() {
-    let fixture = runtime_with_file();
-    let responses = handle_message(
-        Arc::clone(&fixture.runtime),
-        rpc(json!(3), "runtime/command", json!({})),
-    );
     assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0]["error"]["code"], -32602);
-}
-
-#[test]
-fn notification_command_emits_events_without_response() {
-    let fixture = runtime_with_file();
-    let responses = handle_message(
-        Arc::clone(&fixture.runtime),
-        rpc(
-            None,
-            "runtime/command",
-            json!({ "command": { "kind": "ping" } }),
-        ),
-    );
-    assert_eq!(responses.len(), 2);
-    assert_eq!(responses[0]["params"]["command_id"], "anonymous");
-    assert_eq!(responses[0]["params"]["type"], "command_started");
-    assert_eq!(responses[1]["params"]["type"], "command_completed");
-}
-
-#[test]
-fn explicit_null_id_gets_response() {
-    let fixture = runtime_with_file();
-    let request: RpcMessage = serde_json::from_value(json!({
-        "jsonrpc": "2.0",
-        "id": null,
-        "method": "runtime/command",
-        "params": { "command": { "kind": "ping" } }
-    }))
-    .expect("rpc message");
-    let responses = handle_message(Arc::clone(&fixture.runtime), request);
-    assert_eq!(responses.len(), 3);
-    assert!(responses[2].get("result").is_some());
-    assert_eq!(responses[2]["id"], Value::Null);
-}
-
-#[test]
-fn command_started_is_emitted_before_execution() {
-    let fixture = runtime_with_file();
-    let jobs = Arc::new(JobManager::new(Arc::clone(&fixture.runtime), |_| {}));
-    let mut observed = Vec::new();
-    let result = handle_message_with_sink(
-        &jobs,
-        rpc(
-            json!(1),
-            "runtime/command",
-            json!({ "command": { "kind": "ping" } }),
-        ),
-        |value| {
-            observed.push(value);
-            anyhow::bail!("stop after first write")
-        },
-    );
-    assert!(result.is_err());
-    assert_eq!(observed.len(), 1);
-    assert_eq!(observed[0]["params"]["type"], "command_started");
+    assert_eq!(responses[0]["error"]["code"], -32601);
 }
 
 #[test]

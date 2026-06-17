@@ -29,9 +29,6 @@ export interface RuntimeJob {
 }
 
 export type RuntimeEvent =
-  | { command_id: string; type: "command_started"; command: string }
-  | { command_id: string; type: "command_completed" }
-  | { command_id: string; type: "command_failed"; error: string }
   | { job_id: string; type: "job_started"; command: string; tool_name?: string | null }
   | {
       job_id: string;
@@ -69,6 +66,6 @@ export interface WorkstationBackend {
   getJob(jobId: string, options?: { includeResult?: boolean }): Promise<RuntimeJob>;
   listJobs(options?: { includeTerminal?: boolean; includeResults?: boolean; limit?: number }): Promise<RuntimeJob[]>;
   cancelJob(jobId: string): Promise<{ cancellation_requested: boolean; job: RuntimeJob }>;
-  runCommand(command: RuntimeCommand, options?: { commandId?: string }): Promise<JsonValue>;
+  runJob(command: RuntimeCommand, options?: { jobId?: string }): Promise<JsonValue>;
   onEvent(listener: (event: RuntimeEvent) => void): () => void;
 }

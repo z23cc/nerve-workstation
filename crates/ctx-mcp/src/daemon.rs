@@ -4,10 +4,9 @@ use crate::{tools, workspace};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use ctx_runtime::{
-    RUNTIME_COMMAND_NAMES, RuntimeCommand, RuntimeEvent, RuntimeJobCancelRequest,
-    RuntimeJobGetRequest, RuntimeJobListRequest, RuntimeJobStartRequest,
+    RUNTIME_COMMAND_NAMES, RuntimeEvent, RuntimeJobCancelRequest, RuntimeJobGetRequest,
+    RuntimeJobListRequest, RuntimeJobStartRequest,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -19,13 +18,6 @@ pub(crate) struct DaemonArgs {
     stdio: bool,
     #[command(flatten)]
     serve: workspace::ServeArgs,
-}
-
-#[derive(Debug, Deserialize)]
-struct RuntimeCommandParams {
-    #[serde(default)]
-    command_id: Option<String>,
-    command: RuntimeCommand,
 }
 
 pub(crate) fn run(args: DaemonArgs) -> Result<()> {
@@ -102,50 +94,11 @@ fn handle_message_with_sink(
             || json!({ "tools": jobs.runtime().tool_specs() }),
             &mut emit,
         ),
-        "runtime/command" => {
-            handle_runtime_command(jobs.runtime(), response_id, message.params, &mut emit)
-        }
         "runtime/jobs/start" => handle_job_start(jobs, response_id, message.params, &mut emit),
         "runtime/jobs/get" => handle_job_get(jobs, response_id, message.params, &mut emit),
         "runtime/jobs/list" => handle_job_list(jobs, response_id, message.params, &mut emit),
         "runtime/jobs/cancel" => handle_job_cancel(jobs, response_id, message.params, &mut emit),
         _ => emit_error(response_id, -32601, "method not found", &mut emit),
-    }
-}
-
-fn handle_runtime_command(
-    runtime: &tools::CtxRuntime,
-    response_id: Option<Value>,
-    params: Value,
-    emit: &mut impl FnMut(Value) -> Result<()>,
-) -> Result<()> {
-    let params = match serde_json::from_value::<RuntimeCommandParams>(params) {
-        Ok(params) => params,
-        Err(err) => return emit_error(response_id, -32602, err.to_string(), emit),
-    };
-    let command_id = params
-        .command_id
-        .unwrap_or_else(|| fallback_command_id(response_id.as_ref()));
-    emit(event_notification(RuntimeEvent::command_started(
-        command_id.clone(),
-        &params.command,
-    )))?;
-
-    match runtime.handle_command(params.command) {
-        Ok(result) => {
-            emit(event_notification(RuntimeEvent::command_completed(
-                command_id,
-            )))?;
-            emit_response_value(response_id, result, emit)
-        }
-        Err(err) => {
-            let message = err.to_string();
-            emit(event_notification(RuntimeEvent::command_failed(
-                command_id,
-                message.clone(),
-            )))?;
-            emit_error(response_id, -32000, message, emit)
-        }
     }
 }
 
@@ -253,14 +206,6 @@ fn emit_error(
     Ok(())
 }
 
-fn fallback_command_id(id: Option<&Value>) -> String {
-    match id {
-        Some(Value::String(value)) => value.clone(),
-        Some(Value::Number(value)) => value.to_string(),
-        _ => "anonymous".to_string(),
-    }
-}
-
 fn event_notification(event: RuntimeEvent) -> Value {
     json!({ "jsonrpc": "2.0", "method": "runtime/event", "params": event })
 }
@@ -268,21 +213,20 @@ fn event_notification(event: RuntimeEvent) -> Value {
 fn runtime_info() -> Value {
     json!({
         "protocol": "ctx-runtime",
-        "protocolVersion": "2",
+        "protocolVersion": "3",
         "serverInfo": { "name": "ctx-mcp-daemon", "version": env!("CARGO_PKG_VERSION") },
         "capabilities": {
             "transport": { "jsonrpc": "2.0", "framing": "ndjson" },
             "events": { "method": "runtime/event" },
-            "commands": RUNTIME_COMMAND_NAMES,
             "jobs": {
                 "methods": [
                     "runtime/jobs/start",
                     "runtime/jobs/get",
                     "runtime/jobs/list",
                     "runtime/jobs/cancel"
-                ]
-            },
-            "legacy": { "runtime/command": true }
+                ],
+                "commandKinds": RUNTIME_COMMAND_NAMES
+            }
         }
     })
 }

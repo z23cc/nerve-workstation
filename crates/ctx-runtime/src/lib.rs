@@ -214,15 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_events_serialize_as_flat_payloads() {
-        let event = RuntimeEvent::command_started("cmd-1", &RuntimeCommand::Ping);
-        let value = serde_json::to_value(event).expect("event json");
-        assert_eq!(value["command_id"], "cmd-1");
-        assert_eq!(value["type"], "command_started");
-        assert_eq!(value["command"], "ping");
-    }
-
-    #[test]
     fn job_events_serialize_as_flat_payloads() {
         let event = RuntimeEvent::job_started(
             "job-1",

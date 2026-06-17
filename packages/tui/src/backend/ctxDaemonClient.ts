@@ -147,8 +147,8 @@ export class CtxDaemonClient implements WorkstationBackend {
     return response as unknown as { cancellation_requested: boolean; job: RuntimeJob };
   }
 
-  async runCommand(command: RuntimeCommand, options: { commandId?: string } = {}): Promise<JsonValue> {
-    const jobId = options.commandId ?? `tui-command-${this.#nextJobId++}`;
+  async runJob(command: RuntimeCommand, options: { jobId?: string } = {}): Promise<JsonValue> {
+    const jobId = options.jobId ?? `tui-job-${this.#nextJobId++}`;
     const terminalEvent = this.#waitForTerminalJobEvent(jobId);
     try {
       await this.startJob(command, { jobId });

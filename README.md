@@ -76,25 +76,25 @@ Human-facing frontends should use the runtime daemon instead of MCP:
 ctx-mcp daemon --stdio --root /abs/path/to/project
 ```
 
-Protocol v2 is a small JSON-RPC 2.0 subset over newline-delimited JSON (NDJSON)
+Protocol v3 is a small JSON-RPC 2.0 subset over newline-delimited JSON (NDJSON)
 on stdio. Each stdin line is one request object; each stdout line is one response
 or notification. Event notifications use method `runtime/event`. Requests with an
 `id` receive a response; notifications without `id` do not.
 
 Stable methods:
 
-- `runtime/info` — protocol v2 metadata and capabilities.
+- `runtime/info` — protocol v3 metadata and capabilities.
 - `runtime/tools/list` — runtime-visible tools.
 - `runtime/jobs/start` — start `{ "job_id"?: string, "command": RuntimeCommand }`.
 - `runtime/jobs/get` — get `{ "job_id": string, "include_result"?: boolean }`.
 - `runtime/jobs/list` — list jobs with `{ "include_terminal"?: boolean, "include_results"?: boolean, "limit"?: number }`.
 - `runtime/jobs/cancel` — cooperatively cancel `{ "job_id": string }`.
-- `runtime/command` — legacy synchronous helper retained for existing clients.
 
 `RuntimeCommand` is `{ "kind": "ping" }`, `{ "kind": "tool.list" }`, or
-`{ "kind": "tool.call", "name": string, "arguments"?: object }`. New clients
-should prefer `runtime/jobs/*`; job state is in-memory and disappears when the
-daemon exits. Job events are `job_started`, coarse `job_progress`,
+`{ "kind": "tool.call", "name": string, "arguments"?: object }`. These kinds
+are advertised as `capabilities.jobs.commandKinds`. Clients must execute commands
+through `runtime/jobs/*`; job state is in-memory and disappears
+when the daemon exits. Job events are `job_started`, coarse `job_progress`,
 `job_cancel_requested`, and terminal `job_completed` / `job_failed` /
 `job_cancelled`. Cancellation is cooperative; core tools check cancellation, while
 some adapter or network calls may only stop after the current operation returns.
@@ -113,9 +113,6 @@ Example output (timestamps shortened; background progress/terminal events can in
 {"jsonrpc":"2.0","method":"runtime/event","params":{"current":null,"job_id":"ping-1","message":"executing runtime command","stage":"executing","total":null,"type":"job_progress"}}
 {"jsonrpc":"2.0","method":"runtime/event","params":{"job_id":"ping-1","type":"job_completed"}}
 ```
-
-`runtime/command` still emits legacy `command_started` and terminal
-`command_completed` / `command_failed` events before its JSON-RPC response.
 
 ## xAI Grok OAuth
 
@@ -178,6 +175,8 @@ full hybrid (embeddings + ANN + rerank).
 
 ## Build & quality gates
 
+Frontend workspace scripts use Bun (`packageManager: bun@1.3.14`).
+
 ```bash
 cargo build
 cargo test                                    # add --features semantic for the engine
@@ -187,7 +186,7 @@ cargo fmt --check
 
 # Optional frontend adapter smoke check
 cargo build -p ctx-mcp
-(cd packages/tui && npm run smoke -- --root ../..)
+bun run tui:smoke
 ```
 
 Building requires a C toolchain (tree-sitter grammars compile `parser.c`).

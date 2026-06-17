@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Runtime command names exposed by the human-facing daemon protocol.
+/// Runtime command kinds accepted by the human-facing daemon job protocol.
 pub const RUNTIME_COMMAND_NAMES: &[&str] = &["ping", "tool.list", "tool.call"];
 
 /// Transport-neutral command understood by human-facing runtime adapters.
