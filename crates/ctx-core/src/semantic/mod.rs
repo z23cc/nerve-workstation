@@ -49,7 +49,7 @@ pub use config::{
     EmbeddingBackend, RerankerBackend, SemanticIndexConfig, SemanticIndexScope,
     SemanticPersistenceConfig, SemanticRuntimeConfig,
 };
-pub use index::SemanticIndex;
+pub use index::{SemanticIndex, SemanticWarmResponse};
 
 use ann::*;
 use bm25::*;

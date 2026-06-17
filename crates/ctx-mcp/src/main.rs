@@ -18,6 +18,8 @@ use std::{
     str::FromStr,
 };
 
+mod cache;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ctx-mcp",
@@ -37,13 +39,17 @@ enum CommandKind {
     Doctor,
     /// Inspect configuration.
     Config(ConfigArgs),
+    /// Warm the current project's semantic index cache.
+    Warm(ServeArgs),
+    /// Manage local caches.
+    Cache(CacheArgs),
     /// Register ctx-mcp as an MCP server in Claude Code and/or Codex.
     Install(InstallArgs),
 }
 
 #[derive(Debug, Args, Clone)]
 struct ServeArgs {
-    /// Allowed root for the default workspace. Repeatable. If absent, default operations fail closed.
+    /// Allowed root for the default workspace. Repeatable. `serve` fails closed when absent; `warm`/`cache purge` default to the current directory when no roots or workspaces are supplied.
     #[arg(long = "root")]
     roots: Vec<PathBuf>,
     /// Additional named workspace as name=path. Repeat to add workspaces or multiple roots per name.
@@ -134,6 +140,18 @@ enum ConfigCommand {
     Roots(ServeArgs),
 }
 
+#[derive(Debug, Args)]
+struct CacheArgs {
+    #[command(subcommand)]
+    command: CacheCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// Delete the current project's semantic index cache.
+    Purge(ServeArgs),
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -141,6 +159,10 @@ fn main() -> Result<()> {
         CommandKind::Doctor => doctor(),
         CommandKind::Config(args) => match args.command {
             ConfigCommand::Roots(serve_args) => config_roots(serve_args),
+        },
+        CommandKind::Warm(args) => cache::warm(args),
+        CommandKind::Cache(args) => match args.command {
+            CacheCommand::Purge(serve_args) => cache::purge(serve_args),
         },
         CommandKind::Install(args) => install(args),
     }
@@ -640,6 +662,14 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
     }
 
+    #[test]
+    fn cli_parses_warm_and_cache_purge() {
+        let warm = Cli::try_parse_from(["ctx-mcp", "warm"]).expect("warm parse");
+        assert!(matches!(warm.command, CommandKind::Warm(_)));
+        let purge = Cli::try_parse_from(["ctx-mcp", "cache", "purge"]).expect("purge parse");
+        assert!(matches!(purge.command, CommandKind::Cache(_)));
+    }
+
     fn args_with(roots: Vec<PathBuf>, workspaces: Vec<WorkspaceArg>) -> ServeArgs {
         ServeArgs {
             roots,
@@ -738,6 +768,26 @@ mod tests {
             response["result"]["structuredContent"]["content_matches"][0]["path"],
             Value::String("named.txt".to_string())
         );
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn warm_and_cache_purge_use_project_cache() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let cache = tempfile::tempdir().expect("cache tempdir");
+        fs::create_dir_all(root.path().join("src")).expect("src dir");
+        fs::write(root.path().join("src/lib.rs"), "pub fn parse_config() {}\n")
+            .expect("source write");
+        let mut args = args_with(vec![root.path().to_path_buf()], Vec::new());
+        args.no_semantic = false;
+        args.semantic_embedding_model = Some("mock".to_string());
+        args.semantic_reranker_model = Some("mock".to_string());
+        args.semantic_cache_dir = Some(cache.path().to_path_buf());
+
+        cache::warm_semantic(args.clone()).expect("warm");
+        assert!(fs::read_dir(cache.path()).expect("cache dir").count() > 0);
+        cache::purge_semantic_cache(args).expect("purge");
+        assert_eq!(fs::read_dir(cache.path()).expect("cache dir").count(), 0);
     }
 
     #[cfg(feature = "semantic")]

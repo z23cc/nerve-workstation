@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub struct SemanticWarmResponse {
+    pub files_in_scope: usize,
+    pub chunks: usize,
+    pub cache_dir: Option<PathBuf>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 pub struct SemanticIndex {
     config: SemanticIndexConfig,
     embedding: Arc<dyn EmbeddingBackend>,
@@ -60,6 +68,37 @@ impl SemanticIndex {
             .last_build_error
             .lock()
             .expect("semantic build error lock") = None;
+    }
+
+    pub fn warm<P: CatalogProvider + Sync>(
+        &self,
+        provider: &P,
+        snapshot: &CatalogSnapshot,
+        cancel: &CancelToken,
+    ) -> Result<SemanticWarmResponse, CtxError> {
+        let built = self.ensure_built(provider, snapshot, cancel)?;
+        Ok(SemanticWarmResponse {
+            files_in_scope: self.scoped_entries(snapshot)?.len(),
+            chunks: built.chunks.len(),
+            cache_dir: self.cache_dir(),
+            diagnostics: built.diagnostics.clone(),
+        })
+    }
+
+    #[must_use]
+    pub fn cache_dir(&self) -> Option<PathBuf> {
+        self.config.persistence.as_ref().map(cache_workspace_dir)
+    }
+
+    pub fn purge_cache(&self) -> Result<Option<PathBuf>, CtxError> {
+        let Some(persistence) = &self.config.persistence else {
+            self.invalidate();
+            return Ok(None);
+        };
+        let dir = cache_workspace_dir(persistence);
+        clean_workspace_cache(persistence)?;
+        self.invalidate();
+        Ok(Some(dir))
     }
 
     pub fn search<P: CatalogProvider + Sync>(
@@ -341,9 +380,13 @@ impl SemanticIndex {
         std::thread::spawn(move || {
             let cancel = CancelToken::never();
             let result = match input {
-                BackgroundBuildInput::Persistent(state) => {
-                    index.build_with_persistence(&provider, &snapshot, &state, &cancel)
-                }
+                BackgroundBuildInput::Persistent(state) => index.build_with_persistence(
+                    &provider,
+                    &snapshot,
+                    &state,
+                    &cancel,
+                    Some(generation),
+                ),
                 BackgroundBuildInput::Chunks(chunk_build) => {
                     index.build_from_chunks(chunk_build, &cancel)
                 }
@@ -415,7 +458,8 @@ impl SemanticIndex {
             {
                 return Ok(Arc::clone(cached));
             }
-            let built = Arc::new(self.build_with_persistence(provider, snapshot, &state, cancel)?);
+            let built =
+                Arc::new(self.build_with_persistence(provider, snapshot, &state, cancel, None)?);
             *self.built.write().expect("semantic index lock") = Some(Arc::clone(&built));
             return Ok(built);
         }
@@ -466,6 +510,7 @@ impl SemanticIndex {
         snapshot: &CatalogSnapshot,
         state: &SnapshotFileState,
         cancel: &CancelToken,
+        write_generation: Option<u64>,
     ) -> Result<BuiltSemanticIndex, CtxError> {
         let persistence = self
             .config
@@ -482,6 +527,11 @@ impl SemanticIndex {
             &rebuild.records,
             rebuild.diagnostics.clone(),
         )?;
+        if write_generation
+            .is_some_and(|expected| self.generation.load(AtomicOrdering::SeqCst) != expected)
+        {
+            return Ok(built);
+        }
         save_or_attach_cache_diagnostic(persistence, rebuild, built)
     }
 

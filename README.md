@@ -45,6 +45,8 @@ One command registers `ctx-mcp` (idempotent, writes an absolute `--root`):
 
 ```bash
 ctx-mcp install            # both; root = current dir   (--claude / --codex / --dry-run)
+ctx-mcp warm               # optional: prebuild the current project's semantic index
+ctx-mcp cache purge        # delete the current project's semantic index cache
 ```
 
 Or configure manually — **Claude Code** (`.mcp.json`) / **Codex** (`~/.codex/config.toml`):
