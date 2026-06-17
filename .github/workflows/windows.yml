@@ -1,6 +1,6 @@
 name: windows
 
-# Builds and tests ctx-mcp on Windows and attaches ctx-mcp.exe to the release.
+# Builds and tests nerve-workstation on Windows and attaches nerve.exe to the release.
 # Fires when a release is published (e.g. by Scripts/release.sh) and can also be
 # dispatched manually against an existing tag.
 on:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach ctx-mcp.exe to (e.g. v0.0.9)"
+        description: "Release tag to build and attach nerve.exe to (e.g. v0.0.9)"
         required: true
 
 permissions:
@@ -44,25 +44,25 @@ jobs:
 
       - name: Test
         shell: bash
-        run: cargo test -p ctx-core -p ctx-mcp
+        run: cargo test -p ctx-core -p nerve-workstation
 
       - name: Build release binary
         shell: bash
         run: |
-          cargo build --release -p ctx-mcp --features semantic
-          ./target/release/ctx-mcp.exe --version
+          cargo build --release -p nerve-workstation --features semantic
+          ./target/release/nerve.exe --version
 
-      - name: Upload ctx-mcp.exe + sha256 to the release
+      - name: Upload nerve.exe + sha256 to the release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.event.release.tag_name || inputs.tag }}"
           if [[ "$tag" == v* ]] && gh release view "$tag" -R z23cc/context-engine-rs >/dev/null 2>&1; then
-            sha="$(sha256sum target/release/ctx-mcp.exe | cut -d' ' -f1)"
-            echo "$sha  ctx-mcp.exe" > ctx-mcp.exe.sha256
-            echo ">> ctx-mcp.exe sha256: $sha"
-            gh release upload "$tag" target/release/ctx-mcp.exe ctx-mcp.exe.sha256 \
+            sha="$(sha256sum target/release/nerve.exe | cut -d' ' -f1)"
+            echo "$sha  nerve.exe" > nerve.exe.sha256
+            echo ">> nerve.exe sha256: $sha"
+            gh release upload "$tag" target/release/nerve.exe nerve.exe.sha256 \
               -R z23cc/context-engine-rs --clobber
           else
             echo "no release for '$tag' — build/test verification only, skipping upload"
@@ -78,7 +78,7 @@ jobs:
           tag="${{ github.event.release.tag_name || inputs.tag }}"
           gh release view "$tag" -R z23cc/context-engine-rs >/dev/null 2>&1 || { echo "no release $tag; skipping scoop"; exit 0; }
           ver="${tag#v}"
-          sha="$(sha256sum target/release/ctx-mcp.exe | cut -d' ' -f1)"
+          sha="$(sha256sum target/release/nerve.exe | cut -d' ' -f1)"
           mkdir -p ~/.ssh
           printf '%s\n' "$SCOOP_DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
@@ -87,24 +87,24 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git clone git@github.com:z23cc/scoop-bucket.git bucket-repo
           mkdir -p bucket-repo/bucket
-          python - "$ver" "$tag" "$sha" >bucket-repo/bucket/ctx-mcp.json <<'PY'
+          python - "$ver" "$tag" "$sha" >bucket-repo/bucket/nerve-workstation.json <<'PY'
           import json, sys
           ver, tag, sha = sys.argv[1], sys.argv[2], sys.argv[3]
           base = "https://github.com/z23cc/context-engine-rs/releases/download"
           manifest = {
               "version": ver,
-              "description": "Minimal snapshot-centered context engine (MCP server over stdio)",
+              "description": "Local AI workstation runtime and MCP adapter",
               "homepage": "https://github.com/z23cc/context-engine-rs",
               "license": "MIT OR Apache-2.0",
-              "architecture": {"64bit": {"url": f"{base}/{tag}/ctx-mcp.exe", "hash": sha}},
-              "bin": "ctx-mcp.exe",
+              "architecture": {"64bit": {"url": f"{base}/{tag}/nerve.exe", "hash": sha}},
+              "bin": "nerve.exe",
               "checkver": "github",
-              "autoupdate": {"architecture": {"64bit": {"url": base + "/v$version/ctx-mcp.exe"}}},
+              "autoupdate": {"architecture": {"64bit": {"url": base + "/v$version/nerve.exe"}}},
           }
           print(json.dumps(manifest, indent=2))
           PY
           cd bucket-repo
-          git add bucket/ctx-mcp.json
-          git commit -m "ctx-mcp $ver" || { echo "no change"; exit 0; }
+          git add bucket/nerve-workstation.json
+          git commit -m "nerve-workstation $ver" || { echo "no change"; exit 0; }
           git branch -M main
           GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" git push -u origin main

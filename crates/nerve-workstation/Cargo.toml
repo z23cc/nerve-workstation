@@ -1,10 +1,16 @@
 [package]
-name = "ctx-mcp"
+name = "nerve-workstation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+autobins = false
+
+[[bin]]
+name = "nerve"
+path = "src/main.rs"
 
 [features]
 default = []

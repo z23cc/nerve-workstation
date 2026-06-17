@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 pub(crate) fn doctor() -> Result<()> {
-    println!("ctx-mcp doctor");
+    println!("nerve doctor");
     print_command_version("rustc", ["--version"])?;
     print_command_version("cargo", ["--version"])?;
     println!("default features: codemap disabled (no C compiler required)");

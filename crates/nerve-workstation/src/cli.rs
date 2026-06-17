@@ -5,9 +5,9 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "ctx-mcp",
+    name = "nerve",
     version,
-    about = "Minimal snapshot-centered context engine"
+    about = "Nerve Workstation: local AI runtime and MCP adapter"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -16,10 +16,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CommandKind {
-    /// Run a synchronous JSON-RPC stdio MCP-like server.
-    Serve(ServeArgs),
-    /// Run the local AI Workstation Runtime daemon.
-    #[command(name = "ctxd")]
+    /// Agent-facing MCP adapter commands.
+    Mcp(McpArgs),
+    /// Run the local Nerve Runtime daemon.
     Daemon(daemon::RuntimeDaemonArgs),
     /// Print local toolchain diagnostics.
     Doctor,
@@ -31,8 +30,20 @@ enum CommandKind {
     Auth(auth::AuthArgs),
     /// Manage local caches.
     Cache(CacheArgs),
-    /// Register ctx-mcp as an MCP server in Claude Code and/or Codex.
+    /// Register Nerve as an MCP server in Claude Code and/or Codex.
     Install(commands::install::InstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct McpArgs {
+    #[command(subcommand)]
+    command: McpCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Run the JSON-RPC stdio MCP server.
+    Serve(ServeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -62,7 +73,9 @@ enum CacheCommand {
 pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        CommandKind::Serve(args) => server::serve(args),
+        CommandKind::Mcp(args) => match args.command {
+            McpCommand::Serve(serve_args) => server::serve(serve_args),
+        },
         CommandKind::Daemon(args) => daemon::run(args),
         CommandKind::Doctor => commands::doctor::doctor(),
         CommandKind::Config(args) => match args.command {
@@ -83,19 +96,22 @@ mod tests {
 
     #[test]
     fn cli_parses_warm_cache_and_auth() {
-        let ctxd =
-            Cli::try_parse_from(["ctx-mcp", "ctxd", "--stdio", "--root", "."]).expect("ctxd parse");
-        assert!(matches!(ctxd.command, CommandKind::Daemon(_)));
-        let warm = Cli::try_parse_from(["ctx-mcp", "warm"]).expect("warm parse");
+        let daemon = Cli::try_parse_from(["nerve", "daemon", "--stdio", "--root", "."])
+            .expect("daemon parse");
+        assert!(matches!(daemon.command, CommandKind::Daemon(_)));
+        let mcp =
+            Cli::try_parse_from(["nerve", "mcp", "serve", "--root", "."]).expect("mcp serve parse");
+        assert!(matches!(mcp.command, CommandKind::Mcp(_)));
+        let warm = Cli::try_parse_from(["nerve", "warm"]).expect("warm parse");
         assert!(matches!(warm.command, CommandKind::Warm(_)));
-        let purge = Cli::try_parse_from(["ctx-mcp", "cache", "purge"]).expect("purge parse");
+        let purge = Cli::try_parse_from(["nerve", "cache", "purge"]).expect("purge parse");
         assert!(matches!(purge.command, CommandKind::Cache(_)));
         let login =
-            Cli::try_parse_from(["ctx-mcp", "auth", "login", "xai"]).expect("auth login parse");
+            Cli::try_parse_from(["nerve", "auth", "login", "xai"]).expect("auth login parse");
         assert!(matches!(login.command, CommandKind::Auth(_)));
-        let status = Cli::try_parse_from(["ctx-mcp", "auth", "status"]).expect("status parse");
+        let status = Cli::try_parse_from(["nerve", "auth", "status"]).expect("status parse");
         assert!(matches!(status.command, CommandKind::Auth(_)));
-        let logout = Cli::try_parse_from(["ctx-mcp", "auth", "logout"]).expect("logout parse");
+        let logout = Cli::try_parse_from(["nerve", "auth", "logout"]).expect("logout parse");
         assert!(matches!(logout.command, CommandKind::Auth(_)));
     }
 }

@@ -171,7 +171,7 @@ pub(super) fn ensure_success(response: &mut ureq::http::Response<ureq::Body>) ->
     let body = response.body_mut().read_to_string().unwrap_or_default();
     if status == 401 {
         bail!(
-            "xAI returned HTTP 401; run `ctx-mcp auth status --refresh` or `ctx-mcp auth login xai --force`. Response: {body}"
+            "xAI returned HTTP 401; run `nerve auth status --refresh` or `nerve auth login xai --force`. Response: {body}"
         );
     }
     if status == 403 {
@@ -187,5 +187,5 @@ fn is_unauthorized(response: &ureq::http::Response<ureq::Body>) -> bool {
 }
 
 pub(super) fn user_agent() -> String {
-    format!("ctx-mcp/{}", env!("CARGO_PKG_VERSION"))
+    format!("nerve/{}", env!("CARGO_PKG_VERSION"))
 }

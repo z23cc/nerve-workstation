@@ -31,7 +31,7 @@ pub(super) fn spec_xai_models() -> Value {
 pub(super) fn spec_xai_responses() -> Value {
     tool_spec::<XaiResponsesArgs>(
         "xai_responses",
-        "Call xAI /responses with arbitrary Responses API payload. Requires `ctx-mcp auth login xai` first.",
+        "Call xAI /responses with arbitrary Responses API payload. Requires `nerve auth login xai` first.",
     )
 }
 

@@ -183,23 +183,23 @@ pub(super) fn workspace_key(
 /// persistent index, so a model downloads once per machine (not per workspace).
 pub(super) fn semantic_cache_root() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(dir).join("context-engine-rs");
+        return PathBuf::from(dir).join("nerve-workstation");
     }
     if let Ok(dir) = std::env::var("LOCALAPPDATA") {
-        return PathBuf::from(dir).join("context-engine-rs");
+        return PathBuf::from(dir).join("nerve-workstation");
     }
     if let Ok(home) = std::env::var("HOME") {
         let home = PathBuf::from(home);
         #[cfg(target_os = "macos")]
         {
-            return home.join("Library/Caches/context-engine-rs");
+            return home.join("Library/Caches/nerve-workstation");
         }
         #[cfg(not(target_os = "macos"))]
         {
-            return home.join(".cache/context-engine-rs");
+            return home.join(".cache/nerve-workstation");
         }
     }
-    std::env::temp_dir().join("context-engine-rs")
+    std::env::temp_dir().join("nerve-workstation")
 }
 
 pub(super) fn default_semantic_cache_dir() -> PathBuf {

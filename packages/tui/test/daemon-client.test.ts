@@ -1,9 +1,9 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { CtxDaemonClient } from "../src/backend/ctxDaemonClient.ts";
+import { NerveClient } from "../src/backend/nerveClient.ts";
 
-function notStartedClient(): CtxDaemonClient {
-  return new CtxDaemonClient({ root: process.cwd(), binary: "ctx-mcp" });
+function notStartedClient(): NerveClient {
+  return new NerveClient({ root: process.cwd(), binary: "nerve" });
 }
 
 test("client reports not started before start", async () => {

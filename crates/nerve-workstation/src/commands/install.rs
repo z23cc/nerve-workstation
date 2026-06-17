@@ -15,7 +15,7 @@ pub(crate) struct InstallArgs {
     #[arg(long = "workspace")]
     workspaces: Vec<WorkspaceArg>,
     /// Name to register the MCP server under.
-    #[arg(long, default_value = "context-engine")]
+    #[arg(long, default_value = "nerve")]
     name: String,
     /// Configure Claude Code only (default: configure both).
     #[arg(long)]
@@ -26,7 +26,7 @@ pub(crate) struct InstallArgs {
     /// Claude Code config scope: local, user, or project.
     #[arg(long, default_value = "local")]
     scope: String,
-    /// Override the ctx-mcp executable path written into the config.
+    /// Override the nerve executable path written into the config.
     #[arg(long)]
     command: Option<PathBuf>,
     /// Print the commands that would run without executing them.
@@ -44,7 +44,7 @@ pub(crate) fn select_targets(claude: bool, codex: bool) -> (bool, bool) {
 }
 
 pub(crate) fn build_serve_args(roots: &[String], workspaces: &[(String, String)]) -> Vec<String> {
-    let mut args = vec!["serve".to_string()];
+    let mut args = vec!["mcp".to_string(), "serve".to_string()];
     for root in roots {
         args.push("--root".to_string());
         args.push(root.clone());
@@ -72,8 +72,8 @@ fn resolve_command(override_cmd: Option<PathBuf>) -> Result<String> {
     }
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let exe_str = exe.to_string_lossy();
-    if let Some(idx) = exe_str.find("/Cellar/ctx-mcp/") {
-        let linked = PathBuf::from(format!("{}/bin/ctx-mcp", &exe_str[..idx]));
+    if let Some(idx) = exe_str.find("/Cellar/nerve-workstation/") {
+        let linked = PathBuf::from(format!("{}/bin/nerve", &exe_str[..idx]));
         if linked.exists() {
             return Ok(linked.to_string_lossy().into_owned());
         }
@@ -138,7 +138,7 @@ pub(crate) fn install(args: InstallArgs) -> Result<()> {
     let serve_args = build_serve_args(&roots, &workspaces);
     let (do_claude, do_codex) = select_targets(args.claude, args.codex);
 
-    println!("ctx-mcp: {command}");
+    println!("nerve: {command}");
     println!("roots:   {}", roots.join(", "));
     if !workspaces.is_empty() {
         let rendered: Vec<String> = workspaces.iter().map(|(n, p)| format!("{n}={p}")).collect();
@@ -266,6 +266,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "mcp",
                 "serve",
                 "--root",
                 "/a",

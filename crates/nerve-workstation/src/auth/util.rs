@@ -87,13 +87,13 @@ pub(super) fn is_xai_api_host(host: &str) -> bool {
 }
 
 pub(super) fn env_base_url() -> Option<String> {
-    std::env::var("CTX_MCP_XAI_BASE_URL")
+    std::env::var("NERVE_XAI_BASE_URL")
         .ok()
         .or_else(|| std::env::var("XAI_BASE_URL").ok())
 }
 
 pub(super) fn client_id() -> String {
-    std::env::var("CTX_MCP_XAI_OAUTH_CLIENT_ID").unwrap_or_else(|_| CLIENT_ID.to_string())
+    std::env::var("NERVE_XAI_OAUTH_CLIENT_ID").unwrap_or_else(|_| CLIENT_ID.to_string())
 }
 
 pub(super) fn preferred_redirect_uri() -> String {

@@ -93,9 +93,9 @@ fn initialize_returns_runtime_info() {
     let (router, output) = output_router(Arc::clone(&fixture.runtime));
     let responses = dispatch(&router, &output, rpc(json!(1), "initialize", json!({})));
     assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0]["result"]["protocol"], "ctx-runtime");
+    assert_eq!(responses[0]["result"]["protocol"], "nerve-runtime");
     assert_eq!(responses[0]["result"]["protocolVersion"], "3");
-    assert_eq!(responses[0]["result"]["serverInfo"]["name"], "ctxd");
+    assert_eq!(responses[0]["result"]["serverInfo"]["name"], "nerve");
     assert_eq!(
         responses[0]["result"]["capabilities"]["jobs"]["methods"][0],
         "runtime/jobs/start"

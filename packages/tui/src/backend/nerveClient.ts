@@ -56,7 +56,7 @@ type JobWaiter = {
   reject: (error: Error) => void;
 };
 
-export interface CtxDaemonClientOptions {
+export interface NerveClientOptions {
   root: string;
   binary?: string;
   cwd?: string;
@@ -64,8 +64,8 @@ export interface CtxDaemonClientOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-export class CtxDaemonClient implements WorkstationBackend {
-  #options: Required<Omit<CtxDaemonClientOptions, "env">> & { env?: NodeJS.ProcessEnv };
+export class NerveClient implements WorkstationBackend {
+  #options: Required<Omit<NerveClientOptions, "env">> & { env?: NodeJS.ProcessEnv };
   #child: ChildProcessWithoutNullStreams | undefined;
   #stdout: Interface | undefined;
   #nextId = 1;
@@ -75,7 +75,7 @@ export class CtxDaemonClient implements WorkstationBackend {
   #listeners = new Set<(event: RuntimeEvent) => void>();
   #stderr = "";
 
-  constructor(options: CtxDaemonClientOptions) {
+  constructor(options: NerveClientOptions) {
     const cwd = options.cwd ?? process.cwd();
     this.#options = {
       binary: options.binary ?? defaultBinary(),
@@ -90,7 +90,7 @@ export class CtxDaemonClient implements WorkstationBackend {
     if (this.#child) return;
     const child = spawn(
       this.#options.binary,
-      ["ctxd", "--stdio", "--root", this.#options.root, ...this.#options.extraArgs],
+      ["daemon", "--stdio", "--root", this.#options.root, ...this.#options.extraArgs],
       {
         cwd: this.#options.cwd,
         env: { ...process.env, ...this.#options.env },
@@ -104,7 +104,7 @@ export class CtxDaemonClient implements WorkstationBackend {
       this.#stderr += chunk.toString();
     });
     child.on("error", (error) => this.#rejectAll(error));
-    child.on("exit", (code, signal) => this.#rejectAll(new Error(`ctxd runtime daemon exited: code=${code} signal=${signal}`)));
+    child.on("exit", (code, signal) => this.#rejectAll(new Error(`Nerve runtime daemon exited: code=${code} signal=${signal}`)));
     try {
       validateRuntimeInfo(await this.info());
     } catch (error) {
@@ -118,7 +118,7 @@ export class CtxDaemonClient implements WorkstationBackend {
     this.#child = undefined;
     this.#stdout?.close();
     this.#stdout = undefined;
-    this.#rejectAll(new Error("ctxd runtime daemon stopped"));
+    this.#rejectAll(new Error("Nerve runtime daemon stopped"));
     if (!child || child.killed) return;
     child.stdin.end();
     child.kill("SIGTERM");
@@ -187,7 +187,7 @@ export class CtxDaemonClient implements WorkstationBackend {
 
   async #request(method: string, params?: JsonObject): Promise<JsonValue> {
     const child = this.#child;
-    if (!child) throw new Error("ctxd runtime daemon is not started");
+    if (!child) throw new Error("Nerve runtime daemon is not started");
     const id = this.#nextId++;
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
     return new Promise<JsonValue>((resolve, reject) => {
@@ -287,12 +287,12 @@ function validateRuntimeInfo(info: RuntimeInfo): void {
 }
 
 function defaultBinary(): string {
-  const name = process.platform === "win32" ? "ctx-mcp.exe" : "ctx-mcp";
+  const name = process.platform === "win32" ? "nerve.exe" : "nerve";
   for (let dir = process.cwd(); ; dir = dirname(dir)) {
     const local = resolve(dir, "target", "debug", name);
     if (existsSync(local)) return local;
     const parent = dirname(dir);
     if (parent === dir) break;
   }
-  return "ctx-mcp";
+  return "nerve";
 }

@@ -1,7 +1,7 @@
-# context-engine-rs
+# Nerve Workstation
 
 A deterministic **code-intelligence engine** exposed through two runtime adapters:
-agent-facing MCP over stdio, and `ctxd`, a local AI Workstation Runtime for
+agent-facing MCP over stdio, and `nerve daemon`, a local Nerve Runtime for
 frontends. One pure-Rust binary gives MCP hosts (Claude Code, Codex, …) and
 runtime clients fast search, codemaps, symbol navigation, structural edits, and
 semantic retrieval over a codebase — no language server or GUI required.
@@ -27,62 +27,59 @@ semantic retrieval over a codebase — no language server or GUI required.
 
 ```bash
 # macOS / Linux
-brew install z23cc/tap/ctx-mcp
+brew install z23cc/tap/nerve-workstation
 
 # Windows
-scoop bucket add z23cc https://github.com/z23cc/scoop-bucket && scoop install ctx-mcp
+scoop bucket add z23cc https://github.com/z23cc/scoop-bucket && scoop install nerve-workstation
 
 # From source
-cargo install --path crates/ctx-mcp
+cargo install --path crates/nerve-workstation
 
 # Refresh an existing local source install after pulling updates
-cargo install --path crates/ctx-mcp --force
+cargo install --path crates/nerve-workstation --force
 ```
 
 macOS pours a prebuilt **bottle** (instant); other platforms build from source.
 See [`packaging/homebrew`](packaging/homebrew/README.md) for how bottles/releases work.
-If an older installed `ctx-mcp` does not recognize `ctxd`, upgrade/reinstall the
-binary or build the current source with `cargo build -p ctx-mcp`.
-
 ## Use with Claude Code / Codex (MCP)
 
-One command registers `ctx-mcp` (idempotent, writes an absolute `--root`):
+One command registers Nerve as an MCP server (idempotent, writes an absolute `--root`):
 
 ```bash
-ctx-mcp install            # both; root = current dir   (--claude / --codex / --dry-run)
-ctx-mcp warm               # optional: prebuild the current project's semantic index
-ctx-mcp cache purge        # delete the current project's semantic index cache
-ctx-mcp auth login xai     # optional: browser OAuth for xAI Grok subscription access
-ctx-mcp auth status        # show xAI OAuth status without printing secrets
-ctx-mcp auth logout        # remove stored xAI OAuth credentials
+nerve install            # both; root = current dir   (--claude / --codex / --dry-run)
+nerve warm               # optional: prebuild the current project's semantic index
+nerve cache purge        # delete the current project's semantic index cache
+nerve auth login xai     # optional: browser OAuth for xAI Grok subscription access
+nerve auth status        # show xAI OAuth status without printing secrets
+nerve auth logout        # remove stored xAI OAuth credentials
 ```
 
 Or configure manually — **Claude Code** (`.mcp.json`) / **Codex** (`~/.codex/config.toml`):
 
 ```json
-{ "mcpServers": { "context-engine": {
-  "command": "ctx-mcp", "args": ["serve", "--root", "/abs/path/to/project"] } } }
+{ "mcpServers": { "nerve": {
+  "command": "nerve", "args": ["mcp", "serve", "--root", "/abs/path/to/project"] } } }
 ```
 ```toml
-[mcp_servers.context-engine]
-command = "ctx-mcp"
-args = ["serve", "--root", "/abs/path/to/project"]
+[mcp_servers.nerve]
+command = "nerve"
+args = ["mcp", "serve", "--root", "/abs/path/to/project"]
 ```
 
 The stdio loop pins MCP `protocolVersion` `2024-11-05` and is **fail-closed**: no
 `--root` means catalog/read/search are refused. Numeric params also accept
 integer-valued strings (e.g. `"limit": "120"`).
 
-## `ctxd` local AI Workstation Runtime
+## `nerve daemon` local AI Workstation Runtime
 
-Human-facing frontends should use `ctxd`, the local AI Workstation Runtime, instead of MCP:
+Human-facing frontends should use `nerve daemon`, the local Nerve Runtime, instead of MCP:
 
 ```bash
-ctx-mcp ctxd --stdio --root /abs/path/to/project
+nerve daemon --stdio --root /abs/path/to/project
 ```
 
 
-`ctx-runtime` is the protocol source of truth. MCP stdio is an agent-facing adapter,
+`ctx-runtime` is the Rust schema source of truth for the `nerve-runtime` protocol. MCP stdio is an agent-facing adapter,
 the runtime daemon stdio path is a transport adapter, and the TypeScript TUI backend
 is a client of the runtime protocol.
 
@@ -128,25 +125,23 @@ Example output (timestamps shortened; background progress/terminal events can in
 
 ## xAI Grok OAuth
 
-`ctx-mcp` can store xAI Grok OAuth credentials for integrations that want to
+`nerve` can store xAI Grok OAuth credentials for integrations that want to
 reuse a SuperGrok / X Premium+ browser subscription path instead of an API key:
 
 ```bash
-ctx-mcp auth login xai          # opens the xAI browser OAuth PKCE flow
-ctx-mcp auth login xai --force  # discard reuse and start a fresh login
-ctx-mcp auth status --refresh   # refresh if expiring, then print status
-ctx-mcp auth logout             # non-interactive removal
+nerve auth login xai          # opens the xAI browser OAuth PKCE flow
+nerve auth login xai --force  # discard reuse and start a fresh login
+nerve auth status --refresh   # refresh if expiring, then print status
+nerve auth logout             # non-interactive removal
 ```
 
 Tokens are stored under the platform config directory by default (for example
-`~/Library/Application Support/ctx-mcp/auth.json` on macOS or
-`$XDG_CONFIG_HOME/ctx-mcp/auth.json` on Linux). If an existing legacy
-`~/.ctx-mcp/auth.json` is present, ctx-mcp keeps using it. Set `CTX_MCP_HOME` or
-`CTX_MCP_AUTH_FILE` to override the location. Tokens are stored in the OS
+`~/Library/Application Support/nerve/auth.json` on macOS or
+`$XDG_CONFIG_HOME/nerve/auth.json` on Linux). Set `NERVE_HOME` or `NERVE_AUTH_FILE` to override the location. Tokens are stored in the OS
 keychain when available, with a private-file JSON fallback. The stored bearer is
 only sent to `https://api.x.ai/v1` or another `https://*.x.ai` URL.
 
-The MCP server always lists Grok-backed tools, but they require `ctx-mcp auth
+The MCP server always lists Grok-backed tools, but they require `nerve auth
 login xai` before use: `xai_models`, `xai_responses`, `x_search` (preferred X
 search), `xai_x_search` (explicit alias), `web_search` (preferred generic web
 search), `xai_web_search` (explicit alias), `xai_image_generate`, `xai_tts`,
@@ -173,12 +168,12 @@ Grok/API entitlement.
 immediately** while the dense index warms in the background, then auto-upgrades to
 full hybrid (embeddings + ANN + rerank).
 
-- **Model**: downloaded once **per machine** to `~/Library/Caches/context-engine-rs`
+- **Model**: downloaded once **per machine** to `~/Library/Caches/nerve-workstation`
   (`~/.cache/...` on Linux), shared across all projects — never re-downloaded per
   directory. ~300 MB on first semantic use.
 - **Index**: persisted **per project** (keyed by canonical roots + model + scope +
   version), so projects stay isolated and a warm index loads instantly.
-- **Opt out**: `serve --no-semantic`. If you never call `semantic_search`, nothing
+- **Opt out**: `nerve mcp serve --no-semantic`. If you never call `semantic_search`, nothing
   is downloaded or built.
 - **Tune**: `--semantic-cache-dir`, `--semantic-model-cache-dir`, `--semantic-no-rerank`,
   and scope flags (`--semantic-include` / `--semantic-exclude` / `--semantic-extension`).
@@ -205,7 +200,7 @@ bun run protocol:check
 bun run protocol:generate
 
 # Optional frontend adapter smoke check
-cargo build -p ctx-mcp
+cargo build -p nerve-workstation --bin nerve
 bun run tui:smoke
 ```
 
@@ -215,9 +210,9 @@ Conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
 ## Internals & design
 
 - **Layout**: `crates/ctx-core` (engine + tools), `crates/ctx-runtime`
-  (transport-neutral runtime protocol + tool-adapter composition), `crates/ctx-mcp` (stdio
-  MCP adapter + CLI: `serve`/`ctxd`/`doctor`/`config`/`install`), `packages/tui`
-  (TypeScript frontend backend adapter/client for `ctxd`).
+  (transport-neutral runtime protocol + tool-adapter composition), `crates/nerve-workstation` (stdio
+  MCP adapter + CLI: `mcp serve`/`daemon`/`doctor`/`config`/`install`), `packages/tui`
+  (TypeScript frontend backend adapter/client for `nerve daemon`).
 - **Snapshot-centered**: filesystem access is behind a `CatalogProvider` port;
   the core operates on immutable `CatalogSnapshot` values. Codemap parses cache by
   `(mtime, size)`.

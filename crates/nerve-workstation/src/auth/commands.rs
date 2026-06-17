@@ -177,7 +177,7 @@ fn try_reuse_existing() -> Result<bool> {
         }
     }
     println!("Existing xAI OAuth credentials found.");
-    println!("Use `ctx-mcp auth login xai --force` to sign in again.");
+    println!("Use `nerve auth login xai --force` to sign in again.");
     Ok(true)
 }
 

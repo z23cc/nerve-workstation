@@ -1,8 +1,8 @@
-import { CtxDaemonClient } from "../backend/ctxDaemonClient.ts";
+import { NerveClient } from "../backend/nerveClient.ts";
 import type { RuntimeEvent, RuntimeJob } from "../backend/types.ts";
 
 const args = parseArgs(process.argv.slice(2));
-const client = new CtxDaemonClient({
+const client = new NerveClient({
   root: args.root ?? process.cwd(),
   binary: args.binary,
   cwd: process.cwd(),
@@ -19,7 +19,7 @@ try {
   const listed = await client.listJobs({ includeTerminal: true, includeResults: false, limit: 10 });
   const ok = job.status === "completed" && typeof job.result === "object" && !Array.isArray(job.result) && job.result?.status === "ok";
   if (!ok) throw new Error(`smoke ping job did not complete successfully: ${job.status}`);
-  console.log(JSON.stringify({ ok, daemon: info.serverInfo, started, job, listed, events }, null, 2));
+  console.log(JSON.stringify({ ok, runtime: info.serverInfo, started, job, listed, events }, null, 2));
 } finally {
   await client.stop();
 }

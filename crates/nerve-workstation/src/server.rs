@@ -45,7 +45,7 @@ pub(crate) fn handle_message(
             id,
             json!({
                 "protocolVersion": "2024-11-05",
-                "serverInfo": { "name": "ctx-mcp", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "nerve", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "tools": { "listChanged": false } }
             }),
         )),

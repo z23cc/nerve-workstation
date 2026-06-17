@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add an Augment-style semantic retrieval layer to ctx-mcp — local code embeddings
+Add an Augment-style semantic retrieval layer to Nerve Workstation — local code embeddings
 + ANN + cross-encoder rerank, fused with the existing BM25 — so an agent gets
 intent-based ("where is the code that does X") recall, not just lexical/structural
 matches. Open-source components only; effect (retrieval quality) is the priority.
@@ -45,7 +45,7 @@ Current state (from explore probes):
   `FileSearchArgs` ~`1113`). `search_snapshot_cancellable` is the search entry
   (`search.rs:36`). We already extract tree-sitter symbols (`code_symbols_for_path`
   on the `CatalogProvider` trait, `port.rs:63`) — the natural chunk unit.
-- **serve wiring.** `ServeArgs` (`crates/ctx-mcp/src/main.rs` ~`43-52`) has
+- **serve wiring.** `ServeArgs` (`crates/nerve-workstation/src/main.rs` ~`43-52`) has
   `--root/--workspace/--max-entries`; no cache-dir flag yet.
 
 Open-source stack (from research, June 2026):
@@ -103,7 +103,7 @@ Key attachment points (seams):
 - New feature-gated `semantic_index() -> Option<Arc<SemanticIndex>>` default method
   (returns `None`) on `CatalogProvider` (`port.rs`).
 - Tool pattern in `dispatch.rs` (`file_search` arm ~`447`) → `semantic_search` arm + `ToolText`.
-- `ServeArgs` (`crates/ctx-mcp/src/main.rs` ~`43`) → `--semantic-*` flags flowing into registry/providers.
+- `ServeArgs` (`crates/nerve-workstation/src/main.rs` ~`43`) → `--semantic-*` flags flowing into registry/providers.
 - New request/response types in `models.rs`, following the existing transport-neutral pattern.
 
 ## Work Items
@@ -112,7 +112,7 @@ MVP = prove hybrid retrieval quality with an **in-memory** index (no persistence
 Types and the index core come before provider wiring (a field can't precede its type).
 
 1. **Feature gate + deps skeleton.** `ctx-core` `semantic` feature (non-wasm):
-   `fastembed`, `hnsw_rs`, `sha2`. `ctx-mcp` `semantic = ["ctx-core/semantic"]`.
+   `fastembed`, `hnsw_rs`, `sha2`. `nerve-workstation` `semantic = ["ctx-core/semantic"]`.
    Prove the default (non-semantic) build/footprint is unchanged.
 2. **Shared `ranking` module.** Extract tokenizer + scoring primitives from
    `search.rs` (`file_search` byte-identical, goldens prove it); expose

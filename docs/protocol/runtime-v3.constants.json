@@ -1,5 +1,5 @@
 {
-  "RUNTIME_DAEMON_NAME": "ctxd",
+  "RUNTIME_DAEMON_NAME": "nerve",
   "RUNTIME_EVENT_METHOD": "runtime/event",
   "RUNTIME_INFO_METHOD": "runtime/info",
   "RUNTIME_JOB_CANCEL_METHOD": "runtime/jobs/cancel",
@@ -12,7 +12,7 @@
     "runtime/jobs/cancel"
   ],
   "RUNTIME_JOB_START_METHOD": "runtime/jobs/start",
-  "RUNTIME_PROTOCOL_NAME": "ctx-runtime",
+  "RUNTIME_PROTOCOL_NAME": "nerve-runtime",
   "RUNTIME_PROTOCOL_VERSION": "3",
   "RUNTIME_TOOLS_LIST_METHOD": "runtime/tools/list"
 }

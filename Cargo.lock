@@ -930,30 +930,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx-mcp"
-version = "0.0.30"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "ctx-core",
- "ctx-runtime",
- "directories",
- "fs4",
- "keyring",
- "oauth2",
- "open",
- "rand 0.8.6",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "tiny_http",
- "ureq",
- "url",
-]
-
-[[package]]
 name = "ctx-runtime"
 version = "0.0.30"
 dependencies = [
@@ -2486,6 +2462,30 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+]
+
+[[package]]
+name = "nerve-workstation"
+version = "0.0.30"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "ctx-core",
+ "ctx-runtime",
+ "directories",
+ "fs4",
+ "keyring",
+ "oauth2",
+ "open",
+ "rand 0.8.6",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiny_http",
+ "ureq",
+ "url",
 ]
 
 [[package]]

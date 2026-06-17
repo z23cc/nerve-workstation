@@ -20,7 +20,7 @@ minimal vertical slice.
 
 ## Capture method
 
-- Rust engine: `target/debug/ctx-mcp serve --root <fixture>`.
+- Rust engine: `target/debug/nerve mcp serve --root <fixture>`.
 - RepoPrompt reference: `/Users/USER/WorkSpace/repoprompt-ce/.claude/worktrees/headless-eval/.build/arm64-apple-macosx/debug/repoprompt-headless` with a temporary `--state-dir`, then `config roots add <fixture> --name fixture`, then `serve`.
 - JSON-RPC sequence: `initialize -> notifications/initialized -> tools/list -> tools/call`.
 - Calls were sent sequentially and each response was awaited before the next call.

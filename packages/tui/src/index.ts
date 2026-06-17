@@ -1,9 +1,4 @@
-export {
-  CtxDaemonClient,
-  CtxDaemonClient as CtxdClient,
-  type CtxDaemonClientOptions,
-  type CtxDaemonClientOptions as CtxdClientOptions,
-} from "./backend/ctxDaemonClient.ts";
+export { NerveClient, type NerveClientOptions } from "./backend/nerveClient.ts";
 export {
   RUNTIME_DAEMON_NAME,
   RUNTIME_EVENT_METHOD,

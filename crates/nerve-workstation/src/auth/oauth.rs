@@ -29,7 +29,7 @@ pub(super) fn run_loopback_login(args: &LoginArgs) -> Result<LoginCredentials> {
     validate_loopback_redirect_uri(&redirect_uri)?;
     let authorize_url = build_authorize_url(&discovery, &redirect_uri, &pkce, &state, &nonce)?;
 
-    println!("Open this URL to authorize ctx-mcp with xAI:");
+    println!("Open this URL to authorize Nerve with xAI:");
     println!("{authorize_url}");
     if !args.no_browser && !args.manual_paste {
         try_open_browser(&authorize_url);
@@ -124,7 +124,7 @@ fn build_authorize_url(
         .set_pkce_challenge(pkce.challenge.clone())
         .add_extra_param("nonce", nonce.to_string())
         .add_extra_param("plan", "generic")
-        .add_extra_param("referrer", "ctx-mcp");
+        .add_extra_param("referrer", "nerve");
     let (url, _csrf) = request.url();
     Ok(url.to_string())
 }

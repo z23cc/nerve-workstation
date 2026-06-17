@@ -1,16 +1,16 @@
 # Homebrew distribution
 
-`ctx-mcp` (the binary from `crates/ctx-mcp`) is published through a Homebrew tap.
+`nerve-workstation` publishes the `nerve` binary through a Homebrew tap.
 
 ```bash
-brew install z23cc/tap/ctx-mcp
-ctx-mcp --version
+brew install z23cc/tap/nerve-workstation
+nerve --version
 ```
 
 ## How it works
 
 - **Tap repo:** [`z23cc/homebrew-tap`](https://github.com/z23cc/homebrew-tap)
-  holds `Formula/ctx-mcp.rb`. The shorthand `z23cc/tap` expands to it.
+  holds `Formula/nerve-workstation.rb`. The shorthand `z23cc/tap` expands to it.
 - **Bottles (poured, no compile):** the formula ships real Homebrew **bottles**.
   A bottle is poured, not built, so installs are instant and **skip Homebrew's
   build-from-source Xcode-version gate** (which blocks installs on pre-release
@@ -58,7 +58,7 @@ macOS 27 machine to add an `arm64_golden_gate` bottle so this machine pours too:
 ```bash
 git checkout main && git pull          # get the released version into Cargo.toml
 Scripts/release.sh --bottle-only
-brew upgrade z23cc/tap/ctx-mcp         # now pours the golden_gate bottle
+brew upgrade z23cc/tap/nerve-workstation         # now pours the golden_gate bottle
 ```
 
 It builds the binary from the **released tag's exact source** (isolated), uploads

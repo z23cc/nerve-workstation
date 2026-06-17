@@ -1,9 +1,9 @@
 {
   "type": "module",
-  "name": "@ctx-mcp/tui",
+  "name": "@nerve-workstation/tui",
   "version": "0.0.0",
   "private": true,
-  "description": "TypeScript TUI frontend scaffolding for ctx-mcp runtime daemon",
+  "description": "TypeScript TUI frontend scaffolding for Nerve runtime daemon",
   "scripts": {
     "smoke": "bun src/cli/smoke.ts",
     "test": "bun test test/*.test.ts",

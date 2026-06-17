@@ -86,11 +86,7 @@ pub(super) fn handle_callback_request(
         respond_http(request, 400, "OAuth callback state mismatch")?;
         return Ok(None);
     }
-    respond_http(
-        request,
-        200,
-        "ctx-mcp login complete; return to the terminal",
-    )?;
+    respond_http(request, 200, "Nerve login complete; return to the terminal")?;
     Ok(Some(callback))
 }
 

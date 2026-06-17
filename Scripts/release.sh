@@ -24,8 +24,8 @@ set -euo pipefail
 OWNER="z23cc"
 REPO="context-engine-rs"
 TAP_REPO="homebrew-tap"
-FORMULA="ctx-mcp"
-BIN="ctx-mcp"
+FORMULA="nerve-workstation"
+BIN="nerve"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -65,8 +65,8 @@ bottle_tag() { brew ruby -e 'require "utils/bottles"; puts Utils::Bottles.tag' 2
 # Uses globals: OWNER REPO BIN NEW SRC_URL SRC_SHA HAS_BOTTLE BTAG BOTTLE_ROOT BOTTLE_SHA
 gen_formula() {
   cat <<EOF
-class CtxMcp < Formula
-  desc "Minimal snapshot-centered context engine (MCP server over stdio)"
+class NerveWorkstation < Formula
+  desc "Local AI workstation runtime and MCP adapter"
   homepage "https://github.com/$OWNER/$REPO"
   url "$SRC_URL"
   sha256 "$SRC_SHA"
@@ -86,7 +86,7 @@ EOF
   depends_on "rust" => :build
 
   def install
-    system "cargo", "install", "--features", "semantic", *std_cargo_args(path: "crates/ctx-mcp")
+    system "cargo", "install", "--features", "semantic", *std_cargo_args(path: "crates/nerve-workstation")
   end
 
   test do
@@ -101,15 +101,15 @@ EOF
 build_bottle() {
   local srcdir="$1"
   echo ">> building Homebrew bottle ($BTAG)"
-  ( cd "$srcdir" && cargo build --release -p ctx-mcp --features semantic )
+  ( cd "$srcdir" && cargo build --release -p nerve-workstation --features semantic )
   "$srcdir/target/release/$BIN" --version >/dev/null # smoke test: abort if it can't run
-  local keg="$TMP/bottle/$BIN/$NEW"
+  local keg="$TMP/bottle/$FORMULA/$NEW"
   rm -rf "$TMP/bottle"; mkdir -p "$keg/bin" "$keg/.brew"
   cp "$srcdir/target/release/$BIN" "$keg/bin/$BIN"
   [[ -f "$srcdir/LICENSE" ]] && cp "$srcdir/LICENSE" "$keg/LICENSE"
-  gen_formula 0 >"$keg/.brew/$BIN.rb"
-  BOTTLE="$TMP/${BIN}-${NEW}.${BTAG}.bottle.tar.gz"
-  ( cd "$TMP/bottle" && tar -czf "$BOTTLE" "$BIN/$NEW" )
+  gen_formula 0 >"$keg/.brew/$FORMULA.rb"
+  BOTTLE="$TMP/${FORMULA}-${NEW}.${BTAG}.bottle.tar.gz"
+  ( cd "$TMP/bottle" && tar -czf "$BOTTLE" "$FORMULA/$NEW" )
   BOTTLE_SHA="$(shasum -a 256 "$BOTTLE" | awk '{print $1}')"
   BOTTLE_ROOT="https://github.com/$OWNER/$REPO/releases/download/$TAG"
 }

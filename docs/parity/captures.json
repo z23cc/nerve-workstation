@@ -727,7 +727,7 @@
   },
   "rust": {
     "cmd": [
-      "/Users/USER/WorkSpace/context-engine-rs/target/debug/ctx-mcp",
+      "/Users/USER/WorkSpace/context-engine-rs/target/debug/nerve",
       "serve",
       "--root",
       "/Users/USER/WorkSpace/context-engine-rs/crates/ctx-core/tests/fixtures"
@@ -744,7 +744,7 @@
           },
           "protocolVersion": "2024-11-05",
           "serverInfo": {
-            "name": "ctx-mcp",
+            "name": "nerve",
             "version": "0.1.0"
           }
         }

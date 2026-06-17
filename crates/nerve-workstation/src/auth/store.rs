@@ -2,7 +2,7 @@ use super::*;
 use directories::BaseDirs;
 use fs4::TryLockError;
 
-const KEYRING_SERVICE: &str = "ctx-mcp";
+const KEYRING_SERVICE: &str = "nerve";
 
 pub(super) struct AuthLock {
     file: fs::File,
@@ -17,10 +17,10 @@ impl Drop for AuthLock {
 pub(super) fn xai_state_and_tokens(store: &AuthStore) -> Result<(XaiProviderState, XaiTokens)> {
     let state =
         store.providers.get(PROVIDER_ID).cloned().ok_or_else(|| {
-            anyhow!("no xAI OAuth credentials stored; run `ctx-mcp auth login xai`")
+            anyhow!("no xAI OAuth credentials stored; run `nerve auth login xai`")
         })?;
     let tokens = state.tokens.clone().ok_or_else(|| {
-        anyhow!("xAI OAuth state is missing tokens; run `ctx-mcp auth login xai --force`")
+        anyhow!("xAI OAuth state is missing tokens; run `nerve auth login xai --force`")
     })?;
     Ok((state, tokens))
 }
@@ -67,27 +67,23 @@ pub(super) fn save_store(path: &Path, store: &AuthStore) -> Result<()> {
 }
 
 pub(super) fn auth_file_path() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("CTX_MCP_AUTH_FILE") {
+    if let Ok(path) = std::env::var("NERVE_AUTH_FILE") {
         return Ok(PathBuf::from(path));
     }
     Ok(auth_home()?.join("auth.json"))
 }
 
 pub(super) fn auth_home() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("CTX_MCP_HOME") {
+    if let Ok(path) = std::env::var("NERVE_HOME") {
         return Ok(PathBuf::from(path));
     }
     if let Ok(path) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(path).join("ctx-mcp"));
+        return Ok(PathBuf::from(path).join("nerve"));
     }
     if let Some(base_dirs) = BaseDirs::new() {
-        let legacy_home = base_dirs.home_dir().join(".ctx-mcp");
-        if legacy_home.join("auth.json").exists() {
-            return Ok(legacy_home);
-        }
-        return Ok(base_dirs.config_dir().join("ctx-mcp"));
+        return Ok(base_dirs.config_dir().join("nerve"));
     }
-    bail!("could not determine auth directory; set CTX_MCP_HOME or CTX_MCP_AUTH_FILE")
+    bail!("could not determine auth directory; set NERVE_HOME or NERVE_AUTH_FILE")
 }
 
 fn prepare_store_for_save(path: &Path, store: &AuthStore) -> AuthStore {
@@ -149,7 +145,7 @@ pub(super) fn keyring_account_for_path(path: &Path) -> String {
 }
 
 fn keyring_disabled() -> bool {
-    cfg!(test) || std::env::var_os("CTX_MCP_AUTH_DISABLE_KEYRING").is_some()
+    cfg!(test) || std::env::var_os("NERVE_AUTH_DISABLE_KEYRING").is_some()
 }
 
 pub(super) fn acquire_auth_lock(auth_path: &Path) -> Result<AuthLock> {

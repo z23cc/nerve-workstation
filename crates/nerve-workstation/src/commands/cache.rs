@@ -27,7 +27,7 @@ pub(crate) fn warm(args: ServeArgs) -> Result<()> {
     #[cfg(not(feature = "semantic"))]
     {
         let _ = args;
-        bail!("ctx-mcp was built without semantic support; rebuild with --features semantic")
+        bail!("nerve was built without semantic support; rebuild with --features semantic")
     }
 }
 
@@ -39,7 +39,7 @@ pub(crate) fn purge(args: ServeArgs) -> Result<()> {
     #[cfg(not(feature = "semantic"))]
     {
         let _ = args;
-        bail!("ctx-mcp was built without semantic support; rebuild with --features semantic")
+        bail!("nerve was built without semantic support; rebuild with --features semantic")
     }
 }
 
