@@ -50,7 +50,7 @@ struct ServeArgs {
     #[arg(long = "workspace")]
     workspaces: Vec<WorkspaceArg>,
     /// Maximum catalog entries per workspace.
-    #[arg(long, default_value_t = 10_000)]
+    #[arg(long, default_value_t = 100_000)]
     max_entries: usize,
     /// Disable the built-in semantic_search index (on by default).
     #[cfg(feature = "semantic")]
@@ -644,7 +644,7 @@ mod tests {
         ServeArgs {
             roots,
             workspaces,
-            max_entries: 10_000,
+            max_entries: 100_000,
             #[cfg(feature = "semantic")]
             no_semantic: true,
             #[cfg(feature = "semantic")]

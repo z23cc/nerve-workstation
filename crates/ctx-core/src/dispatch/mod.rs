@@ -352,6 +352,10 @@ mod tests {
         )
         .expect("read_file");
         assert_eq!(response["content"][0]["text"], json!("one\ntwo\nthree\n"));
+        assert_eq!(
+            response["structuredContent"]["content"],
+            json!("one\ntwo\nthree\n")
+        );
         assert_eq!(response["structuredContent"]["total_lines"], json!(3));
     }
 

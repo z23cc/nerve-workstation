@@ -142,8 +142,20 @@ where
     match view.as_str() {
         "hashline" => hashline_read_response(response),
         "summary" => summary_read_response(response),
-        _ => tool_response_text(&response),
+        _ => raw_read_response(response),
     }
+}
+
+fn raw_read_response(response: crate::ReadFileResponse) -> Result<Value, DispatchError> {
+    let text = response.content.clone();
+    let mut structured = serde_json::to_value(&response)?;
+    if let Value::Object(fields) = &mut structured {
+        fields.insert("content".to_string(), Value::String(text.clone()));
+    }
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": structured,
+    }))
 }
 
 fn hashline_read_response(response: crate::ReadFileResponse) -> Result<Value, DispatchError> {

@@ -51,6 +51,7 @@ pub enum CtxError {
     OutsideRoots(PathBuf),
     #[error("path traversal is not allowed: {0}")]
     PathTraversal(String),
+    #[deprecated(note = "catalog scans now truncate with diagnostics instead of erroring")]
     #[error("entry limit exceeded after {limit} entries")]
     EntryLimitExceeded { limit: usize },
     #[error("invalid regex: {0}")]

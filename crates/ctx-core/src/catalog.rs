@@ -5,6 +5,8 @@
 //! the same `CatalogProvider` port.
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::codemap::path_language_name;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::port::FileSignature;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::security::RootPolicy;
@@ -23,12 +25,16 @@ use ignore::WalkBuilder;
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, Weak},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
-    fmt, fs,
-    sync::Mutex,
+    fmt, fs, mem,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -399,6 +405,7 @@ mod memory_batch;
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
+    /// Maximum entries returned in a snapshot; scans above this size are truncated with a diagnostic.
     pub max_entries: usize,
     pub snapshot_cache_ttl: Duration,
 }
@@ -407,8 +414,8 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            max_entries: 10_000,
-            snapshot_cache_ttl: Duration::from_millis(1_000),
+            max_entries: 100_000,
+            snapshot_cache_ttl: Duration::from_millis(5_000),
         }
     }
 }
@@ -444,6 +451,15 @@ struct ProviderCache {
     snapshot: RwLock<Option<CachedSnapshot>>,
     codemap: RwLock<HashMap<PathBuf, CachedCodeSymbols>>,
     selection: RwLock<Selection>,
+    codemap_warming: Mutex<Option<CodemapWarmInProgress>>,
+    generation: AtomicU64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+struct CodemapWarmInProgress {
+    generation: u64,
+    cancel: CancelToken,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -525,20 +541,33 @@ impl FsCatalogProvider {
         }
 
         let snapshot = Arc::new(self.scan_snapshot_cancellable(cancel)?);
+        let generation = self.cache.generation.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         *guard = Some(CachedSnapshot {
             created_at: now,
             snapshot: Arc::clone(&snapshot),
         });
+        drop(guard);
+        self.start_codemap_warming(Arc::clone(&snapshot), generation);
         Ok(snapshot)
     }
 
     pub fn invalidate(&self) {
         *self.cache.snapshot.write().expect("snapshot cache lock") = None;
+        self.cache.generation.fetch_add(1, AtomicOrdering::SeqCst);
         self.cache
             .codemap
             .write()
             .expect("codemap cache lock")
             .clear();
+        if let Some(warming) = self
+            .cache
+            .codemap_warming
+            .lock()
+            .expect("codemap warming lock")
+            .take()
+        {
+            warming.cancel.cancel();
+        }
         #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
         if let Some(index) = &self.semantic_index {
             index.invalidate();
@@ -559,24 +588,20 @@ impl FsCatalogProvider {
     }
 
     fn scan_snapshot_cancellable(&self, cancel: &CancelToken) -> Result<CatalogSnapshot, CtxError> {
-        let entries = Arc::new(Mutex::new(Vec::new()));
-        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let mut entries = Vec::new();
+        let mut diagnostics = Vec::new();
 
         for root in self.policy.roots() {
             cancel.check_cancelled()?;
-            scan_root(root, Arc::clone(&entries), Arc::clone(&diagnostics), cancel);
+            let scan_output = scan_root(root, cancel);
+            entries.extend(scan_output.entries);
+            diagnostics.extend(scan_output.diagnostics);
             cancel.check_cancelled()?;
         }
 
         finalize_snapshot(
-            Arc::try_unwrap(entries)
-                .expect("entries references dropped")
-                .into_inner()
-                .expect("entries lock"),
-            Arc::try_unwrap(diagnostics)
-                .expect("diagnostics references dropped")
-                .into_inner()
-                .expect("diagnostics lock"),
+            entries,
+            diagnostics,
             self.policy.roots(),
             self.options.max_entries,
             cancel,
@@ -591,6 +616,125 @@ impl FsCatalogProvider {
         })
     }
 
+    fn start_codemap_warming(&self, snapshot: Arc<CatalogSnapshot>, generation: u64) {
+        if snapshot
+            .entries
+            .iter()
+            .all(|entry| path_language_name(&entry.rel_path).is_none())
+        {
+            return;
+        }
+        let cancel = CancelToken::never();
+        {
+            let mut warming = self
+                .cache
+                .codemap_warming
+                .lock()
+                .expect("codemap warming lock");
+            // Snapshot cache TTL/invalidation can rebuild snapshots frequently. One
+            // best-effort warmer per provider generation is enough because cache
+            // entries are signature-checked, and stale generations are forbidden
+            // from inserting below. Replacing a generation cancels the older warmer
+            // instead of letting duplicate parsers compete for the same cache.
+            if warming
+                .as_ref()
+                .is_some_and(|current| current.generation == generation)
+            {
+                return;
+            }
+            if let Some(previous) = warming.take() {
+                previous.cancel.cancel();
+            }
+            *warming = Some(CodemapWarmInProgress {
+                generation,
+                cancel: cancel.clone(),
+            });
+        }
+
+        let cache = Arc::downgrade(&self.cache);
+        let policy = self.policy.clone();
+        std::thread::spawn(move || {
+            Self::warm_codemap_for_snapshot(&cache, &policy, &snapshot, generation, &cancel);
+            if let Some(cache) = cache.upgrade() {
+                let mut warming = cache.codemap_warming.lock().expect("codemap warming lock");
+                if warming
+                    .as_ref()
+                    .is_some_and(|current| current.generation == generation)
+                {
+                    *warming = None;
+                }
+            }
+        });
+    }
+
+    fn warm_codemap_for_snapshot(
+        cache: &Weak<ProviderCache>,
+        policy: &RootPolicy,
+        snapshot: &CatalogSnapshot,
+        generation: u64,
+        cancel: &CancelToken,
+    ) {
+        for entry in &snapshot.entries {
+            let Some(cache) = cache.upgrade() else {
+                return;
+            };
+            if cancel.check_cancelled().is_err()
+                || cache.generation.load(AtomicOrdering::SeqCst) != generation
+            {
+                return;
+            }
+            if path_language_name(&entry.rel_path).is_none() {
+                continue;
+            }
+            let Ok(allowed) = policy.resolve_allowed(&entry.abs_path) else {
+                continue;
+            };
+            let _ =
+                Self::code_symbols_for_allowed(&cache, &allowed, &entry.rel_path, Some(generation));
+        }
+    }
+
+    fn code_symbols_for_allowed(
+        cache: &ProviderCache,
+        allowed: &Path,
+        rel_path: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<CodeSymbolsResult, CtxError> {
+        let signature = Self::file_signature(allowed)?;
+        if let Some(cached) = cache
+            .codemap
+            .read()
+            .expect("codemap cache lock")
+            .get(allowed)
+            .filter(|cached| cached.signature == signature)
+        {
+            return Ok((*cached.symbols).clone());
+        }
+
+        let bytes = fs::read(allowed).map_err(|err| CtxError::io(allowed, err))?;
+        let source = String::from_utf8_lossy(&bytes);
+        let parsed: CodeSymbolsResult =
+            symbols_for_path(&source, rel_path).map(|maybe| maybe.map(Arc::new));
+        let generation_current = |expected_generation: Option<u64>| {
+            expected_generation.is_none_or(|generation| {
+                cache.generation.load(AtomicOrdering::SeqCst) == generation
+            })
+        };
+        if generation_current(expected_generation) {
+            let mut codemap = cache.codemap.write().expect("codemap cache lock");
+            if generation_current(expected_generation) {
+                codemap.insert(
+                    allowed.to_path_buf(),
+                    CachedCodeSymbols {
+                        signature,
+                        symbols: Arc::new(parsed.clone()),
+                    },
+                );
+            }
+        }
+        Ok(parsed)
+    }
+
     #[cfg(test)]
     fn codemap_cache_len(&self) -> usize {
         self.cache.codemap.read().expect("codemap cache lock").len()
@@ -598,12 +742,7 @@ impl FsCatalogProvider {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn scan_root(
-    root: &RootRef,
-    entries: Arc<Mutex<Vec<CatalogEntry>>>,
-    diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
-    cancel: &CancelToken,
-) {
+fn scan_root(root: &RootRef, cancel: &CancelToken) -> ScanRootOutput {
     let mut builder = WalkBuilder::new(&root.path);
     let filter_cancel = cancel.clone();
     builder
@@ -616,13 +755,20 @@ fn scan_root(
     let context = ScanRootContext {
         root_path: root.path.clone(),
         root_id: root.id.clone(),
-        entries,
-        diagnostics,
         cancel: cancel.clone(),
     };
+    let (sender, receiver) = mpsc::channel();
     builder
         .build_parallel()
-        .run(|| scan_worker(context.clone()));
+        .run(|| scan_worker(context.clone(), sender.clone()));
+    drop(sender);
+
+    let mut output = ScanRootOutput::default();
+    for worker_output in receiver {
+        output.entries.extend(worker_output.entries);
+        output.diagnostics.extend(worker_output.diagnostics);
+    }
+    output
 }
 
 fn include_walk_entry(entry: &ignore::DirEntry, cancel: &CancelToken) -> bool {
@@ -638,22 +784,64 @@ fn include_walk_entry(entry: &ignore::DirEntry, cancel: &CancelToken) -> bool {
 struct ScanRootContext {
     root_path: PathBuf,
     root_id: String,
-    entries: Arc<Mutex<Vec<CatalogEntry>>>,
-    diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
     cancel: CancelToken,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ScanRootOutput {
+    entries: Vec<CatalogEntry>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ScanWorkerState {
+    context: ScanRootContext,
+    entries: Vec<CatalogEntry>,
+    diagnostics: Vec<Diagnostic>,
+    sender: Option<mpsc::Sender<ScanRootOutput>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ScanWorkerState {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(ScanRootOutput {
+                entries: mem::take(&mut self.entries),
+                diagnostics: mem::take(&mut self.diagnostics),
+            });
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn scan_worker(
     context: ScanRootContext,
+    sender: mpsc::Sender<ScanRootOutput>,
 ) -> Box<dyn FnMut(Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState + Send> {
-    Box::new(move |dent| scan_entry(dent, &context))
+    let mut state = ScanWorkerState {
+        context,
+        entries: Vec::new(),
+        diagnostics: Vec::new(),
+        sender: Some(sender),
+    };
+    Box::new(move |dent| {
+        let ScanWorkerState {
+            context,
+            entries,
+            diagnostics,
+            sender: _,
+        } = &mut state;
+        scan_entry(dent, context, entries, diagnostics)
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn scan_entry(
     dent: Result<ignore::DirEntry, ignore::Error>,
     context: &ScanRootContext,
+    entries: &mut Vec<CatalogEntry>,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> ignore::WalkState {
     if context.cancel.is_cancelled() {
         return ignore::WalkState::Quit;
@@ -661,7 +849,7 @@ fn scan_entry(
     let dent = match dent {
         Ok(dent) => dent,
         Err(err) => {
-            push_scan_diagnostic(&context.diagnostics, None, err.to_string());
+            push_scan_diagnostic(diagnostics, None, err.to_string());
             return ignore::WalkState::Continue;
         }
     };
@@ -672,46 +860,36 @@ fn scan_entry(
     let metadata = match dent.metadata() {
         Ok(metadata) => metadata,
         Err(err) => {
-            push_scan_diagnostic(
-                &context.diagnostics,
-                Some(path.to_path_buf()),
-                err.to_string(),
-            );
+            push_scan_diagnostic(diagnostics, Some(path.to_path_buf()), err.to_string());
             return ignore::WalkState::Continue;
         }
     };
-    push_catalog_entry(path, metadata.len(), context);
+    push_catalog_entry(entries, path, metadata.len(), context);
     ignore::WalkState::Continue
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn push_scan_diagnostic(
-    diagnostics: &Arc<Mutex<Vec<Diagnostic>>>,
-    path: Option<PathBuf>,
-    message: String,
-) {
-    diagnostics
-        .lock()
-        .expect("diagnostics lock")
-        .push(Diagnostic { path, message });
+fn push_scan_diagnostic(diagnostics: &mut Vec<Diagnostic>, path: Option<PathBuf>, message: String) {
+    diagnostics.push(Diagnostic { path, message });
 }
 
-fn push_catalog_entry(path: &Path, size: u64, context: &ScanRootContext) {
+fn push_catalog_entry(
+    entries: &mut Vec<CatalogEntry>,
+    path: &Path,
+    size: u64,
+    context: &ScanRootContext,
+) {
     let rel_path = path
         .strip_prefix(&context.root_path)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    context
-        .entries
-        .lock()
-        .expect("entries lock")
-        .push(CatalogEntry {
-            root_id: context.root_id.clone(),
-            rel_path,
-            abs_path: path.to_path_buf(),
-            size,
-        });
+    entries.push(CatalogEntry {
+        root_id: context.root_id.clone(),
+        rel_path,
+        abs_path: path.to_path_buf(),
+        size,
+    });
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -723,10 +901,22 @@ fn finalize_snapshot(
     cancel: &CancelToken,
 ) -> Result<CatalogSnapshot, CtxError> {
     cancel.check_cancelled()?;
+    entries.sort_by(|left, right| {
+        left.rel_path
+            .cmp(&right.rel_path)
+            .then_with(|| left.root_id.cmp(&right.root_id))
+            .then_with(|| left.abs_path.cmp(&right.abs_path))
+    });
     if entries.len() > max_entries {
-        return Err(CtxError::EntryLimitExceeded { limit: max_entries });
+        let dropped = entries.len() - max_entries;
+        entries.truncate(max_entries);
+        diagnostics.push(Diagnostic {
+            path: None,
+            message: format!(
+                "catalog scan truncated to {max_entries} entries; dropped {dropped} entries due to max_entries limit"
+            ),
+        });
     }
-    entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
     diagnostics.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
@@ -841,34 +1031,7 @@ impl CatalogProvider for FsCatalogProvider {
         rel_path: &str,
     ) -> Result<CodeSymbolsResult, CtxError> {
         let allowed = self.policy.resolve_allowed(path)?;
-        let signature = Self::file_signature(&allowed)?;
-        if let Some(cached) = self
-            .cache
-            .codemap
-            .read()
-            .expect("codemap cache lock")
-            .get(&allowed)
-            .filter(|cached| cached.signature == signature)
-        {
-            return Ok((*cached.symbols).clone());
-        }
-
-        let bytes = fs::read(&allowed).map_err(|err| CtxError::io(&allowed, err))?;
-        let source = String::from_utf8_lossy(&bytes);
-        let parsed: CodeSymbolsResult =
-            symbols_for_path(&source, rel_path).map(|maybe| maybe.map(Arc::new));
-        self.cache
-            .codemap
-            .write()
-            .expect("codemap cache lock")
-            .insert(
-                allowed,
-                CachedCodeSymbols {
-                    signature,
-                    symbols: Arc::new(parsed.clone()),
-                },
-            );
-        Ok(parsed)
+        Self::code_symbols_for_allowed(&self.cache, &allowed, rel_path, None)
     }
 
     #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
@@ -953,7 +1116,7 @@ mod memory_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{io::Write, sync::Mutex, thread, time::Duration as StdDuration};
 
     fn paths(snapshot: &CatalogSnapshot) -> Vec<&str> {
         snapshot
@@ -982,6 +1145,32 @@ mod tests {
     }
 
     #[test]
+    fn max_entries_truncates_with_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("b.txt"), "b").expect("b");
+        fs::write(dir.path().join("a.txt"), "a").expect("a");
+        fs::write(dir.path().join("c.txt"), "c").expect("c");
+
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+            ScanOptions {
+                max_entries: 2,
+                ..ScanOptions::default()
+            },
+        );
+        let snapshot = provider.snapshot().expect("snapshot");
+
+        assert_eq!(paths(&snapshot), vec!["a.txt", "b.txt"]);
+        assert_eq!(snapshot.diagnostics.len(), 1);
+        assert_eq!(snapshot.diagnostics[0].path, None);
+        assert!(
+            snapshot.diagnostics[0]
+                .message
+                .contains("catalog scan truncated to 2 entries; dropped 1 entries")
+        );
+    }
+
+    #[test]
     fn cache_reuses_snapshot_within_ttl() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("a.txt"), "a").expect("a");
@@ -996,7 +1185,7 @@ mod tests {
         fs::write(dir.path().join("b.txt"), "b").expect("b");
         let second = provider.snapshot_arc().expect("second");
         assert!(Arc::ptr_eq(&first, &second));
-        *now.lock().expect("clock") += Duration::from_secs(2);
+        *now.lock().expect("clock") += Duration::from_secs(6);
         let third = provider.snapshot_arc().expect("third");
         assert!(!Arc::ptr_eq(&first, &third));
         assert_eq!(paths(&third), vec!["a.txt", "b.txt"]);
@@ -1017,6 +1206,86 @@ mod tests {
             .expect("parse");
         assert_eq!(provider.codemap_cache_len(), 1);
         provider.invalidate();
+        assert_eq!(provider.codemap_cache_len(), 0);
+    }
+
+    #[test]
+    fn snapshot_starts_background_codemap_warming() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("lib.rs"), "pub fn warmed() {}\n").expect("write lib");
+        fs::write(dir.path().join("notes.txt"), "plain text\n").expect("write notes");
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+            ScanOptions::default(),
+        );
+
+        let snapshot = provider.snapshot().expect("snapshot");
+        assert_eq!(paths(&snapshot), vec!["lib.rs", "notes.txt"]);
+
+        for _ in 0..100 {
+            if provider.codemap_cache_len() == 1 {
+                return;
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        assert_eq!(provider.codemap_cache_len(), 1);
+    }
+
+    #[test]
+    fn stale_codemap_warmer_does_not_insert_after_invalidation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("lib.rs"), "pub fn stale() {}\n").expect("write lib");
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+            ScanOptions::default(),
+        );
+        let snapshot = provider
+            .scan_snapshot_cancellable(&CancelToken::never())
+            .expect("snapshot");
+        let stale_generation = provider.cache.generation.load(AtomicOrdering::SeqCst);
+
+        provider.invalidate();
+        FsCatalogProvider::warm_codemap_for_snapshot(
+            &Arc::downgrade(&provider.cache),
+            &provider.policy,
+            &snapshot,
+            stale_generation,
+            &CancelToken::never(),
+        );
+
+        assert_eq!(provider.codemap_cache_len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codemap_warmer_revalidates_root_policy_before_reading() {
+        use std::os::unix::fs as unix_fs;
+
+        let root = tempfile::tempdir().expect("root tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let inside_path = root.path().join("lib.rs");
+        let outside_path = outside.path().join("lib.rs");
+        fs::write(&inside_path, "pub fn inside() {}\n").expect("write inside");
+        fs::write(&outside_path, "pub fn outside() {}\n").expect("write outside");
+        let provider = FsCatalogProvider::new(
+            RootPolicy::new(vec![root.path().to_path_buf()]).expect("policy"),
+            ScanOptions::default(),
+        );
+        let snapshot = provider
+            .scan_snapshot_cancellable(&CancelToken::never())
+            .expect("snapshot");
+        let generation = provider.cache.generation.load(AtomicOrdering::SeqCst);
+
+        fs::remove_file(&inside_path).expect("remove inside");
+        unix_fs::symlink(&outside_path, &inside_path).expect("symlink outside");
+        FsCatalogProvider::warm_codemap_for_snapshot(
+            &Arc::downgrade(&provider.cache),
+            &provider.policy,
+            &snapshot,
+            generation,
+            &CancelToken::never(),
+        );
+
         assert_eq!(provider.codemap_cache_len(), 0);
     }
 }

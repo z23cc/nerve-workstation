@@ -11,6 +11,7 @@ expression: response
     }
   ],
   "structuredContent": {
+    "content": "pub fn alpha_needle() -> &'static str {\n    \"needle alpha\"\n}\n",
     "display_path": "fixtures/alpha.rs",
     "first_line": 24,
     "last_line": 26,
