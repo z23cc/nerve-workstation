@@ -16,7 +16,8 @@ Keep public behavior stable while making the workspace easier to extend. The gui
 - `RuntimeToolAdapter<R>` — adapter seam for provider-specific or host-specific capabilities.
 - `RuntimeError` — preserves core dispatch errors and adapter messages for transports to render.
 - `RuntimeCommand` / `RuntimeEvent` — human-facing job command/event contracts for daemon and TUI hosts.
-- `RuntimeJob*` types — protocol v3 job start/get/list/cancel request and snapshot schema shared by the daemon and TypeScript backend.
+- `RuntimeJob*` / `RuntimeInfo` / `RuntimeToolSpec` types — protocol v3 job start/get/list/cancel request, runtime metadata, and tool schema shared by the daemon and TypeScript backend.
+- `protocol_codegen.rs` plus `export-runtime-protocol` — generates Rust-owned protocol schema/constants under `docs/protocol/`; `packages/tui/scripts/generate-protocol.ts` feeds that schema into `json-schema-to-typescript` so Rust protocol schema stays the source of truth for TypeScript clients without a custom TS compiler.
 
 Runtime dispatch order is explicit: registered adapters are consulted first, then the built-in `ctx-core` dispatcher handles unclaimed tools. Tool specs are de-duplicated by name with core specs kept first, so accidental adapter duplicates do not leak ambiguous tool definitions. This keeps MCP, CLI, TUI, and future daemon/Web hosts from each re-implementing tool aggregation.
 
@@ -25,7 +26,8 @@ Runtime dispatch order is explicit: registered adapters are consulted first, the
 The TypeScript frontend package owns the human-facing backend adapter:
 
 - `backend/CtxDaemonClient` — spawns `ctx-mcp daemon --stdio`, uses protocol v3 job methods, and dispatches `runtime/event` notifications.
-- `backend/types.ts` — UI-neutral `WorkstationBackend`, `RuntimeCommand`, `RuntimeJob`, and `RuntimeEvent` contracts.
+- `backend/protocol.generated.ts` — generated protocol constants and TypeScript types from Rust schema.
+- `backend/types.ts` — UI-neutral `WorkstationBackend` plus frontend aliases over generated protocol types.
 - `cli/smoke.ts` — local integration smoke check that starts, polls, and lists a job through the daemon protocol.
 
 This keeps UI components independent from MCP and from Rust process details.

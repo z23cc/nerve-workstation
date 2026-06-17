@@ -2,6 +2,18 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createInterface, type Interface } from "node:readline";
 import { dirname, resolve } from "node:path";
+import {
+  RUNTIME_EVENT_METHOD,
+  RUNTIME_INFO_METHOD,
+  RUNTIME_JOB_CANCEL_METHOD,
+  RUNTIME_JOB_GET_METHOD,
+  RUNTIME_JOB_LIST_METHOD,
+  RUNTIME_JOB_METHODS,
+  RUNTIME_JOB_START_METHOD,
+  RUNTIME_PROTOCOL_NAME,
+  RUNTIME_PROTOCOL_VERSION,
+  RUNTIME_TOOLS_LIST_METHOD,
+} from "./protocol.generated.ts";
 import type {
   JsonObject,
   JsonValue,
@@ -9,6 +21,7 @@ import type {
   RuntimeEvent,
   RuntimeInfo,
   RuntimeJob,
+  RuntimeJobCancelResponse,
   RuntimeToolSpec,
   WorkstationBackend,
 } from "./types.ts";
@@ -92,7 +105,12 @@ export class CtxDaemonClient implements WorkstationBackend {
     });
     child.on("error", (error) => this.#rejectAll(error));
     child.on("exit", (code, signal) => this.#rejectAll(new Error(`ctx-mcp daemon exited: code=${code} signal=${signal}`)));
-    await this.info();
+    try {
+      validateRuntimeInfo(await this.info());
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
@@ -107,16 +125,16 @@ export class CtxDaemonClient implements WorkstationBackend {
   }
 
   async info(): Promise<RuntimeInfo> {
-    return (await this.#request("runtime/info")) as RuntimeInfo;
+    return (await this.#request(RUNTIME_INFO_METHOD)) as RuntimeInfo;
   }
 
   async listTools(): Promise<RuntimeToolSpec[]> {
-    const response = (await this.#request("runtime/tools/list")) as JsonObject;
+    const response = (await this.#request(RUNTIME_TOOLS_LIST_METHOD)) as JsonObject;
     return (response.tools as RuntimeToolSpec[] | undefined) ?? [];
   }
 
   async startJob(command: RuntimeCommand, options: { jobId?: string } = {}): Promise<RuntimeJob> {
-    const response = (await this.#request("runtime/jobs/start", {
+    const response = (await this.#request(RUNTIME_JOB_START_METHOD, {
       job_id: options.jobId,
       command: command as unknown as JsonObject,
     })) as JsonObject;
@@ -124,7 +142,7 @@ export class CtxDaemonClient implements WorkstationBackend {
   }
 
   async getJob(jobId: string, options: { includeResult?: boolean } = {}): Promise<RuntimeJob> {
-    const response = (await this.#request("runtime/jobs/get", {
+    const response = (await this.#request(RUNTIME_JOB_GET_METHOD, {
       job_id: jobId,
       include_result: options.includeResult ?? true,
     })) as JsonObject;
@@ -134,7 +152,7 @@ export class CtxDaemonClient implements WorkstationBackend {
   async listJobs(
     options: { includeTerminal?: boolean; includeResults?: boolean; limit?: number } = {},
   ): Promise<RuntimeJob[]> {
-    const response = (await this.#request("runtime/jobs/list", {
+    const response = (await this.#request(RUNTIME_JOB_LIST_METHOD, {
       include_terminal: options.includeTerminal ?? true,
       include_results: options.includeResults ?? false,
       limit: options.limit ?? 100,
@@ -142,9 +160,9 @@ export class CtxDaemonClient implements WorkstationBackend {
     return (response.jobs as unknown as RuntimeJob[] | undefined) ?? [];
   }
 
-  async cancelJob(jobId: string): Promise<{ cancellation_requested: boolean; job: RuntimeJob }> {
-    const response = (await this.#request("runtime/jobs/cancel", { job_id: jobId })) as JsonObject;
-    return response as unknown as { cancellation_requested: boolean; job: RuntimeJob };
+  async cancelJob(jobId: string): Promise<RuntimeJobCancelResponse> {
+    const response = (await this.#request(RUNTIME_JOB_CANCEL_METHOD, { job_id: jobId })) as JsonObject;
+    return response as unknown as RuntimeJobCancelResponse;
   }
 
   async runJob(command: RuntimeCommand, options: { jobId?: string } = {}): Promise<JsonValue> {
@@ -199,7 +217,7 @@ export class CtxDaemonClient implements WorkstationBackend {
   }
 
   #handleNotification(message: RpcNotification): void {
-    if (message.method !== "runtime/event") return;
+    if (message.method !== RUNTIME_EVENT_METHOD) return;
     const event = message.params as RuntimeEvent;
     this.#handleJobEvent(event);
     for (const listener of this.#listeners) listener(event);
@@ -252,6 +270,19 @@ export class CtxDaemonClient implements WorkstationBackend {
       for (const waiter of waiters) waiter.reject(reason);
     }
     this.#jobWaiters.clear();
+  }
+}
+
+function validateRuntimeInfo(info: RuntimeInfo): void {
+  if (info.protocol !== RUNTIME_PROTOCOL_NAME) throw new Error(`unsupported runtime protocol: ${info.protocol}`);
+  if (info.protocolVersion !== RUNTIME_PROTOCOL_VERSION) {
+    throw new Error(`unsupported runtime protocol version: ${info.protocolVersion}`);
+  }
+  if (info.capabilities.events.method !== RUNTIME_EVENT_METHOD) {
+    throw new Error(`unsupported runtime event method: ${info.capabilities.events.method}`);
+  }
+  for (const method of RUNTIME_JOB_METHODS) {
+    if (!info.capabilities.jobs.methods.includes(method)) throw new Error(`missing runtime job method: ${method}`);
   }
 }
 

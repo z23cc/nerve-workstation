@@ -1,11 +1,13 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Runtime command kinds accepted by the human-facing daemon job protocol.
 pub const RUNTIME_COMMAND_NAMES: &[&str] = &["ping", "tool.list", "tool.call"];
 
 /// Transport-neutral command understood by human-facing runtime adapters.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "kind")]
 pub enum RuntimeCommand {
     /// Lightweight health check used by clients before opening a real session.
@@ -19,7 +21,7 @@ pub enum RuntimeCommand {
     ToolCall {
         name: String,
         #[serde(default = "default_arguments")]
-        arguments: Value,
+        arguments: BTreeMap<String, Value>,
     },
 }
 
@@ -42,6 +44,6 @@ impl RuntimeCommand {
     }
 }
 
-fn default_arguments() -> Value {
-    json!({})
+fn default_arguments() -> BTreeMap<String, Value> {
+    BTreeMap::new()
 }

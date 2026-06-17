@@ -1,0 +1,618 @@
+{
+  "definitions": {
+    "RuntimeCapabilities": {
+      "properties": {
+        "events": {
+          "$ref": "#/definitions/RuntimeEventCapabilities"
+        },
+        "jobs": {
+          "$ref": "#/definitions/RuntimeJobCapabilities"
+        },
+        "transport": {
+          "$ref": "#/definitions/RuntimeTransportCapabilities"
+        }
+      },
+      "required": [
+        "events",
+        "jobs",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "RuntimeCommand": {
+      "description": "Transport-neutral command understood by human-facing runtime adapters.",
+      "oneOf": [
+        {
+          "description": "Lightweight health check used by clients before opening a real session.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "ping"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Return all runtime tool specifications.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "tool.list"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Execute one MCP-style tool through the runtime dispatcher.",
+          "properties": {
+            "arguments": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "kind": {
+              "enum": [
+                "tool.call"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeEvent": {
+      "description": "Runtime event emitted by human-facing adapters while executing jobs.",
+      "oneOf": [
+        {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "tool_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "job_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "job_progress"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "message",
+            "stage",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_cancel_requested"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_completed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "$ref": "#/definitions/RuntimeJobError"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_cancelled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeEventCapabilities": {
+      "properties": {
+        "method": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "RuntimeInfo": {
+      "properties": {
+        "capabilities": {
+          "$ref": "#/definitions/RuntimeCapabilities"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "string"
+        },
+        "serverInfo": {
+          "$ref": "#/definitions/RuntimeServerInfo"
+        }
+      },
+      "required": [
+        "capabilities",
+        "protocol",
+        "protocolVersion",
+        "serverInfo"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobCancelRequest": {
+      "description": "Request payload for `runtime/jobs/cancel`.",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobCancelResponse": {
+      "properties": {
+        "cancellation_requested": {
+          "type": "boolean"
+        },
+        "job": {
+          "$ref": "#/definitions/RuntimeJobSnapshot"
+        }
+      },
+      "required": [
+        "cancellation_requested",
+        "job"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobCapabilities": {
+      "properties": {
+        "commandKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "methods": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "commandKinds",
+        "methods"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobError": {
+      "description": "Structured error stored on failed runtime jobs.",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobGetRequest": {
+      "description": "Request payload for `runtime/jobs/get`.",
+      "properties": {
+        "include_result": {
+          "default": true,
+          "type": "boolean"
+        },
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobListRequest": {
+      "description": "Request payload for `runtime/jobs/list`.",
+      "properties": {
+        "include_results": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include_terminal": {
+          "default": true,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeJobListResponse": {
+      "properties": {
+        "jobs": {
+          "items": {
+            "$ref": "#/definitions/RuntimeJobSnapshot"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "jobs"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobResponse": {
+      "properties": {
+        "job": {
+          "$ref": "#/definitions/RuntimeJobSnapshot"
+        }
+      },
+      "required": [
+        "job"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobSnapshot": {
+      "description": "Snapshot of a runtime job owned by a transport/daemon implementation.",
+      "properties": {
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "command": {
+          "type": "string"
+        },
+        "created_at_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RuntimeJobError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finished_at_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "result": true,
+        "started_at_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/RuntimeJobStatus"
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cancel_requested",
+        "command",
+        "created_at_ms",
+        "job_id",
+        "status",
+        "updated_at_ms"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobStartRequest": {
+      "description": "Request payload for `runtime/jobs/start`.",
+      "properties": {
+        "command": {
+          "$ref": "#/definitions/RuntimeCommand"
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "RuntimeJobStatus": {
+      "description": "Status values used by daemon-owned runtime jobs.",
+      "enum": [
+        "running",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "RuntimeServerInfo": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "RuntimeToolSpec": {
+      "additionalProperties": true,
+      "description": "Runtime-visible tool specification shape shared with frontend clients.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "RuntimeToolsListResponse": {
+      "properties": {
+        "tools": {
+          "items": {
+            "$ref": "#/definitions/RuntimeToolSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tools"
+      ],
+      "type": "object"
+    },
+    "RuntimeTransportCapabilities": {
+      "properties": {
+        "framing": {
+          "type": "string"
+        },
+        "jsonrpc": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "framing",
+        "jsonrpc"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "jsonValue": true,
+    "runtimeCommand": {
+      "$ref": "#/definitions/RuntimeCommand"
+    },
+    "runtimeEvent": {
+      "$ref": "#/definitions/RuntimeEvent"
+    },
+    "runtimeInfo": {
+      "$ref": "#/definitions/RuntimeInfo"
+    },
+    "runtimeJob": {
+      "$ref": "#/definitions/RuntimeJobSnapshot"
+    },
+    "runtimeJobCancelRequest": {
+      "$ref": "#/definitions/RuntimeJobCancelRequest"
+    },
+    "runtimeJobCancelResponse": {
+      "$ref": "#/definitions/RuntimeJobCancelResponse"
+    },
+    "runtimeJobError": {
+      "$ref": "#/definitions/RuntimeJobError"
+    },
+    "runtimeJobGetRequest": {
+      "$ref": "#/definitions/RuntimeJobGetRequest"
+    },
+    "runtimeJobListRequest": {
+      "$ref": "#/definitions/RuntimeJobListRequest"
+    },
+    "runtimeJobListResponse": {
+      "$ref": "#/definitions/RuntimeJobListResponse"
+    },
+    "runtimeJobResponse": {
+      "$ref": "#/definitions/RuntimeJobResponse"
+    },
+    "runtimeJobStartRequest": {
+      "$ref": "#/definitions/RuntimeJobStartRequest"
+    },
+    "runtimeToolSpec": {
+      "$ref": "#/definitions/RuntimeToolSpec"
+    },
+    "runtimeToolsListResponse": {
+      "$ref": "#/definitions/RuntimeToolsListResponse"
+    }
+  },
+  "required": [
+    "jsonValue",
+    "runtimeCommand",
+    "runtimeEvent",
+    "runtimeInfo",
+    "runtimeJob",
+    "runtimeJobCancelRequest",
+    "runtimeJobCancelResponse",
+    "runtimeJobError",
+    "runtimeJobGetRequest",
+    "runtimeJobListRequest",
+    "runtimeJobListResponse",
+    "runtimeJobResponse",
+    "runtimeJobStartRequest",
+    "runtimeToolSpec",
+    "runtimeToolsListResponse"
+  ],
+  "title": "RuntimeProtocolSchema",
+  "type": "object"
+}

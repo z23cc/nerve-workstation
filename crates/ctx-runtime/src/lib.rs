@@ -10,6 +10,9 @@ pub mod command;
 pub mod error;
 pub mod event;
 pub mod job;
+pub mod protocol;
+#[doc(hidden)]
+pub mod protocol_codegen;
 pub mod runtime;
 
 mod tool_spec;
@@ -23,12 +26,14 @@ pub use job::{
     RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
 };
 pub use runtime::Runtime;
+pub use tool_spec::RuntimeToolSpec;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ctx_core::{HostFile, MemoryCatalogProvider, WorkspaceRegistry};
     use serde_json::{Value, json};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     type TestRuntime = Runtime<WorkspaceRegistry<MemoryCatalogProvider>>;
@@ -103,6 +108,10 @@ mod tests {
             .expect("memory provider");
         registry.insert("default", Arc::new(provider));
         Runtime::new(registry)
+    }
+
+    fn arguments(value: Value) -> BTreeMap<String, Value> {
+        serde_json::from_value(value).expect("arguments object")
     }
 
     #[test]
@@ -190,7 +199,7 @@ mod tests {
         let response = runtime()
             .handle_command(RuntimeCommand::ToolCall {
                 name: "file_search".to_string(),
-                arguments: json!({ "pattern": "alpha", "mode": "content" }),
+                arguments: arguments(json!({ "pattern": "alpha", "mode": "content" })),
             })
             .expect("tool response");
         assert_eq!(
@@ -219,7 +228,7 @@ mod tests {
             "job-1",
             &RuntimeCommand::ToolCall {
                 name: "file_search".to_string(),
-                arguments: json!({}),
+                arguments: arguments(json!({})),
             },
         );
         let value = serde_json::to_value(event).expect("event json");
@@ -262,6 +271,17 @@ mod tests {
         assert!(list.include_terminal);
         assert!(!list.include_results);
         assert_eq!(list.limit, 100);
+    }
+
+    #[test]
+    fn generated_protocol_rust_artifacts_are_current() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let schema = std::fs::read_to_string(root.join(protocol_codegen::SCHEMA_PATH))
+            .expect("runtime protocol schema artifact");
+        let constants = std::fs::read_to_string(root.join(protocol_codegen::CONSTANTS_PATH))
+            .expect("runtime protocol constants artifact");
+        assert_eq!(schema, protocol_codegen::schema_json());
+        assert_eq!(constants, protocol_codegen::constants_json());
     }
 
     #[test]

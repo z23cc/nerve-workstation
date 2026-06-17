@@ -1,11 +1,12 @@
 use crate::RuntimeError;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::RuntimeCommand;
 
 /// Status values used by daemon-owned runtime jobs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeJobStatus {
     Running,
@@ -16,7 +17,7 @@ pub enum RuntimeJobStatus {
 }
 
 /// Structured error stored on failed runtime jobs.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct RuntimeJobError {
     pub kind: String,
     pub message: String,
@@ -38,7 +39,7 @@ impl RuntimeJobError {
 }
 
 /// Snapshot of a runtime job owned by a transport/daemon implementation.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 pub struct RuntimeJobSnapshot {
     pub job_id: String,
     pub status: RuntimeJobStatus,
@@ -54,14 +55,14 @@ pub struct RuntimeJobSnapshot {
 }
 
 /// Request payload for `runtime/jobs/start`.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 pub struct RuntimeJobStartRequest {
     pub job_id: Option<String>,
     pub command: RuntimeCommand,
 }
 
 /// Request payload for `runtime/jobs/get`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct RuntimeJobGetRequest {
     pub job_id: String,
     #[serde(default = "default_true")]
@@ -69,13 +70,13 @@ pub struct RuntimeJobGetRequest {
 }
 
 /// Request payload for `runtime/jobs/cancel`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct RuntimeJobCancelRequest {
     pub job_id: String,
 }
 
 /// Request payload for `runtime/jobs/list`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct RuntimeJobListRequest {
     #[serde(default = "default_true")]
     pub include_terminal: bool,

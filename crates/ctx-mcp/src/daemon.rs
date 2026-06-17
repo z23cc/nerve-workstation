@@ -4,8 +4,13 @@ use crate::{tools, workspace};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use ctx_runtime::{
-    RUNTIME_COMMAND_NAMES, RuntimeEvent, RuntimeJobCancelRequest, RuntimeJobGetRequest,
-    RuntimeJobListRequest, RuntimeJobStartRequest,
+    RuntimeEvent, RuntimeJobCancelRequest, RuntimeJobGetRequest, RuntimeJobListRequest,
+    RuntimeJobStartRequest,
+    protocol::{
+        RUNTIME_EVENT_METHOD, RUNTIME_INFO_METHOD, RUNTIME_JOB_CANCEL_METHOD,
+        RUNTIME_JOB_GET_METHOD, RUNTIME_JOB_LIST_METHOD, RUNTIME_JOB_START_METHOD,
+        RUNTIME_TOOLS_LIST_METHOD, RuntimeInfo,
+    },
 };
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -88,16 +93,18 @@ fn handle_message_with_sink(
 ) -> Result<()> {
     let response_id = message.id.clone();
     match message.method.as_str() {
-        "initialize" | "runtime/info" => emit_response(response_id, runtime_info, &mut emit),
-        "runtime/tools/list" => emit_response(
+        "initialize" | RUNTIME_INFO_METHOD => emit_response(response_id, runtime_info, &mut emit),
+        RUNTIME_TOOLS_LIST_METHOD => emit_response(
             response_id,
             || json!({ "tools": jobs.runtime().tool_specs() }),
             &mut emit,
         ),
-        "runtime/jobs/start" => handle_job_start(jobs, response_id, message.params, &mut emit),
-        "runtime/jobs/get" => handle_job_get(jobs, response_id, message.params, &mut emit),
-        "runtime/jobs/list" => handle_job_list(jobs, response_id, message.params, &mut emit),
-        "runtime/jobs/cancel" => handle_job_cancel(jobs, response_id, message.params, &mut emit),
+        RUNTIME_JOB_START_METHOD => handle_job_start(jobs, response_id, message.params, &mut emit),
+        RUNTIME_JOB_GET_METHOD => handle_job_get(jobs, response_id, message.params, &mut emit),
+        RUNTIME_JOB_LIST_METHOD => handle_job_list(jobs, response_id, message.params, &mut emit),
+        RUNTIME_JOB_CANCEL_METHOD => {
+            handle_job_cancel(jobs, response_id, message.params, &mut emit)
+        }
         _ => emit_error(response_id, -32601, "method not found", &mut emit),
     }
 }
@@ -207,28 +214,14 @@ fn emit_error(
 }
 
 fn event_notification(event: RuntimeEvent) -> Value {
-    json!({ "jsonrpc": "2.0", "method": "runtime/event", "params": event })
+    json!({ "jsonrpc": "2.0", "method": RUNTIME_EVENT_METHOD, "params": event })
 }
 
 fn runtime_info() -> Value {
-    json!({
-        "protocol": "ctx-runtime",
-        "protocolVersion": "3",
-        "serverInfo": { "name": "ctx-mcp-daemon", "version": env!("CARGO_PKG_VERSION") },
-        "capabilities": {
-            "transport": { "jsonrpc": "2.0", "framing": "ndjson" },
-            "events": { "method": "runtime/event" },
-            "jobs": {
-                "methods": [
-                    "runtime/jobs/start",
-                    "runtime/jobs/get",
-                    "runtime/jobs/list",
-                    "runtime/jobs/cancel"
-                ],
-                "commandKinds": RUNTIME_COMMAND_NAMES
-            }
-        }
-    })
+    json!(RuntimeInfo::current(
+        "ctx-mcp-daemon",
+        env!("CARGO_PKG_VERSION")
+    ))
 }
 
 #[cfg(test)]

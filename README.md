@@ -175,7 +175,7 @@ full hybrid (embeddings + ANN + rerank).
 
 ## Build & quality gates
 
-Frontend workspace scripts use Bun (`packageManager: bun@1.3.14`).
+Frontend workspace scripts use Bun (`packageManager: bun@1.3.14`). Runtime protocol TypeScript types are generated from Rust schema.
 
 ```bash
 cargo build
@@ -183,6 +183,10 @@ cargo test                                    # add --features semantic for the 
 cargo clippy --all-targets -- -D warnings     # functions <=100 lines, nesting capped
 cargo fmt --check
 ./Scripts/check-file-size.sh                  # files <=600 non-test lines
+bun run protocol:check
+
+# Regenerate protocol schema/constants + TypeScript types after changing ctx-runtime protocol types
+bun run protocol:generate
 
 # Optional frontend adapter smoke check
 cargo build -p ctx-mcp

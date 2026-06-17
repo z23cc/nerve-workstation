@@ -1,8 +1,9 @@
 use crate::{RuntimeCommand, RuntimeJobError};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Runtime event emitted by human-facing adapters while executing jobs.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     JobStarted {

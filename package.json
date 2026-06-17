@@ -12,9 +12,14 @@
     "test": "bun run --parallel test:ts test:rs",
     "test:ts": "bun run --workspaces --if-present test",
     "test:rs": "cargo test --workspace",
-    "check": "bun run --parallel check:ts check:rs",
+    "protocol:generate": "cargo run -p ctx-runtime --bin export-runtime-protocol && bun packages/tui/scripts/generate-protocol.ts",
+    "protocol:check": "cargo run -p ctx-runtime --bin export-runtime-protocol -- --check && bun packages/tui/scripts/generate-protocol.ts --check",
+    "check": "bun run --parallel check:ts check:rs protocol:check",
     "check:ts": "bun run --workspaces --if-present check",
     "check:rs": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
-    "tui:smoke": "bun --cwd=packages/tui run smoke -- --root ../.."
+    "tui:smoke": "cargo build -p ctx-mcp --bin ctx-mcp && bun --cwd=packages/tui run smoke -- --root ../.."
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.4"
   }
 }
