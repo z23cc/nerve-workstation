@@ -23,14 +23,14 @@ Default builds do not list the tool and keep the existing on-demand/no-persisten
 Mock/offline fixture run:
 
 ```bash
-cargo run -p ctx-core --example semantic_eval --features semantic -- \
-  crates/ctx-core/tests/fixtures "config validation"
+cargo run -p nerve-core --example semantic_eval --features semantic -- \
+  crates/nerve-core/tests/fixtures "config validation"
 ```
 
 Real-model sample repo run (downloads on first semantic use):
 
 ```bash
-cargo run -p ctx-core --example semantic_eval --features semantic -- \
+cargo run -p nerve-core --example semantic_eval --features semantic -- \
   /abs/sample/repo "where is auth handled" --real
 ```
 

@@ -1,9 +1,9 @@
 use crate::xai;
-use ctx_core::WorkspaceRegistry;
-use ctx_runtime::{Runtime, RuntimeError, RuntimeToolAdapter};
+use nerve_core::WorkspaceRegistry;
+use nerve_runtime::{Runtime, RuntimeError, RuntimeToolAdapter};
 use serde_json::Value;
 
-pub(crate) type CtxRuntime = Runtime<WorkspaceRegistry>;
+pub(crate) type NerveRuntime = Runtime<WorkspaceRegistry>;
 
 struct XaiToolAdapter;
 
@@ -22,14 +22,14 @@ impl RuntimeToolAdapter<WorkspaceRegistry> for XaiToolAdapter {
     }
 }
 
-pub(crate) fn runtime(registry: WorkspaceRegistry) -> CtxRuntime {
+pub(crate) fn runtime(registry: WorkspaceRegistry) -> NerveRuntime {
     Runtime::new(registry).with_adapter(XaiToolAdapter)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ctx_core::{FsCatalogProvider, WorkspaceRegistry};
+    use nerve_core::{FsCatalogProvider, WorkspaceRegistry};
     use std::collections::HashSet;
 
     #[test]

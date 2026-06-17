@@ -2,7 +2,7 @@ use crate::jobs::{JobError, JobManager};
 use crate::rpc::{RpcMessage, jsonrpc_error, jsonrpc_result};
 use crate::tools;
 use anyhow::Result;
-use ctx_runtime::{
+use nerve_runtime::{
     RuntimeEvent, RuntimeJobCancelRequest, RuntimeJobGetRequest, RuntimeJobListRequest,
     RuntimeJobStartRequest,
     protocol::{
@@ -20,7 +20,7 @@ pub(super) struct RuntimeDaemonRouter {
 
 impl RuntimeDaemonRouter {
     pub(super) fn new(
-        runtime: Arc<tools::CtxRuntime>,
+        runtime: Arc<tools::NerveRuntime>,
         emit_notification: impl Fn(Value) + Send + Sync + 'static,
     ) -> Self {
         let jobs = Arc::new(JobManager::new(runtime, move |event| {

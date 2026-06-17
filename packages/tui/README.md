@@ -13,7 +13,7 @@ It is UI-neutral backend plumbing; actual TUI screens should use `NerveClient` r
 
 ## Protocol source of truth
 
-`ctx-runtime` owns the Rust protocol constants and types for the `nerve-runtime` protocol. Regenerate generated TypeScript after protocol changes:
+`nerve-runtime` owns the Rust protocol constants and types for the `nerve-runtime` protocol. Regenerate generated TypeScript after protocol changes:
 
 ```bash
 bun run protocol:generate

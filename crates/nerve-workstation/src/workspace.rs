@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 #[cfg(feature = "semantic")]
-use ctx_core::semantic::{SemanticIndexScope, SemanticRuntimeConfig};
-use ctx_core::{FsCatalogProvider, RootPolicy, ScanOptions, WorkspaceRegistry};
+use nerve_core::semantic::{SemanticIndexScope, SemanticRuntimeConfig};
+use nerve_core::{FsCatalogProvider, RootPolicy, ScanOptions, WorkspaceRegistry};
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Args, Clone)]
@@ -38,7 +38,7 @@ pub(crate) struct ServeArgs {
     pub(crate) semantic_cache_dir: Option<PathBuf>,
     /// Enable semantic_search reranking (off by default). On local code corpora
     /// the available cross-encoder rerankers do not beat the fused BM25+dense
-    /// ranking and add 15-20x query latency — see crates/ctx-core/tests/eval.rs.
+    /// ranking and add 15-20x query latency — see crates/nerve-core/tests/eval.rs.
     #[cfg(feature = "semantic")]
     #[arg(long = "semantic-rerank")]
     pub(crate) semantic_rerank: bool,

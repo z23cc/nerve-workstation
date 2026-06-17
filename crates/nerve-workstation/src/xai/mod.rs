@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ctx_core::WorkspaceRegistry;
+use nerve_core::WorkspaceRegistry;
 use serde_json::Value;
 
 const DEFAULT_CHAT_MODEL: &str = "grok-build-0.1";

@@ -1,5 +1,5 @@
 {
-  "fixture_root": "/Users/USER/WorkSpace/context-engine-rs/crates/ctx-core/tests/fixtures",
+  "fixture_root": "/Users/USER/WorkSpace/context-engine-rs/crates/nerve-core/tests/fixtures",
   "operations": [
     "tools_list",
     "file_search_literal",
@@ -13,7 +13,7 @@
   "repoprompt_headless": {
     "config_roots_add": {
       "returncode": 0,
-      "stdout": "{\n  \"action\" : \"added\",\n  \"root\" : {\n    \"added_at\" : \"2026-06-15T03:33:18Z\",\n    \"id\" : \"B183E777-63DC-47F3-AF8C-E744BD195896\",\n    \"name\" : \"fixture\",\n    \"path\" : \"\\/Users\\/duange\\/WorkSpace\\/context-engine-rs\\/crates\\/ctx-core\\/tests\\/fixtures\",\n    \"resolved_path\" : \"\\/Users\\/duange\\/WorkSpace\\/context-engine-rs\\/crates\\/ctx-core\\/tests\\/fixtures\"\n  }\n}\n",
+      "stdout": "{\n  \"action\" : \"added\",\n  \"root\" : {\n    \"added_at\" : \"2026-06-15T03:33:18Z\",\n    \"id\" : \"B183E777-63DC-47F3-AF8C-E744BD195896\",\n    \"name\" : \"fixture\",\n    \"path\" : \"\\/Users\\/duange\\/WorkSpace\\/context-engine-rs\\/crates\\/nerve-core\\/tests\\/fixtures\",\n    \"resolved_path\" : \"\\/Users\\/duange\\/WorkSpace\\/context-engine-rs\\/crates\\/nerve-core\\/tests\\/fixtures\"\n  }\n}\n",
       "stderr": ""
     },
     "cmd": [
@@ -656,7 +656,7 @@
             }
           ],
           "structuredContent": {
-            "path": "/Users/USER/WorkSpace/context-engine-rs/crates/ctx-core/tests/fixtures/notes.txt",
+            "path": "/Users/USER/WorkSpace/context-engine-rs/crates/nerve-core/tests/fixtures/notes.txt",
             "content": "first line\nneedle text line\nfinal line\n",
             "first_line": 1,
             "display_path": "fixture/notes.txt",
@@ -680,7 +680,7 @@
             }
           ],
           "structuredContent": {
-            "path": "/Users/USER/WorkSpace/context-engine-rs/crates/ctx-core/tests/fixtures/notes.txt",
+            "path": "/Users/USER/WorkSpace/context-engine-rs/crates/nerve-core/tests/fixtures/notes.txt",
             "content": "needle text line\n",
             "first_line": 2,
             "display_path": "fixture/notes.txt",
@@ -730,7 +730,7 @@
       "/Users/USER/WorkSpace/context-engine-rs/target/debug/nerve",
       "serve",
       "--root",
-      "/Users/USER/WorkSpace/context-engine-rs/crates/ctx-core/tests/fixtures"
+      "/Users/USER/WorkSpace/context-engine-rs/crates/nerve-core/tests/fixtures"
     ],
     "responses": [
       {

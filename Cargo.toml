@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ctx-core", "crates/ctx-runtime", "crates/nerve-workstation"]
+members = ["crates/nerve-core", "crates/nerve-runtime", "crates/nerve-workstation"]
 exclude = ["fuzz"]
 resolver = "3"
 

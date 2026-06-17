@@ -6,9 +6,9 @@ use crate::workspace::{provider_for_roots, scan_options};
 #[cfg(feature = "semantic")]
 use anyhow::Context;
 #[cfg(feature = "semantic")]
-use ctx_core::semantic::SemanticWarmResponse;
+use nerve_core::semantic::SemanticWarmResponse;
 #[cfg(feature = "semantic")]
-use ctx_core::{CancelToken, CatalogProvider};
+use nerve_core::{CancelToken, CatalogProvider};
 #[cfg(feature = "semantic")]
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 

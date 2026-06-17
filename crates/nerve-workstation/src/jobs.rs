@@ -1,12 +1,12 @@
 //! Daemon-adapter job lifecycle state.
 //!
-//! `ctx-runtime` owns the Rust schema for the protocol types and method contract. This module owns
+//! `nerve-runtime` owns the Rust schema for the protocol types and method contract. This module owns
 //! only the runtime daemon's local lifecycle mechanics: in-memory retention,
 //! thread spawning, event emission wiring, and cooperative cancellation tokens.
 
 use crate::tools;
-use ctx_core::CancelToken;
-use ctx_runtime::{
+use nerve_core::CancelToken;
+use nerve_runtime::{
     RuntimeCommand, RuntimeEvent, RuntimeJobError, RuntimeJobGetRequest, RuntimeJobListRequest,
     RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
 };
@@ -24,7 +24,7 @@ const MAX_LIST_LIMIT: usize = 500;
 type EventEmitter = dyn Fn(RuntimeEvent) + Send + Sync + 'static;
 
 pub(crate) struct JobManager {
-    runtime: Arc<tools::CtxRuntime>,
+    runtime: Arc<tools::NerveRuntime>,
     jobs: Mutex<JobStore>,
     next_id: AtomicU64,
     emit: Arc<EventEmitter>,
@@ -83,7 +83,7 @@ impl fmt::Display for JobError {
 impl JobManager {
     #[must_use]
     pub(crate) fn new(
-        runtime: Arc<tools::CtxRuntime>,
+        runtime: Arc<tools::NerveRuntime>,
         emit: impl Fn(RuntimeEvent) + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -95,7 +95,7 @@ impl JobManager {
     }
 
     #[must_use]
-    pub(crate) fn runtime(&self) -> &tools::CtxRuntime {
+    pub(crate) fn runtime(&self) -> &tools::NerveRuntime {
         &self.runtime
     }
 
@@ -256,7 +256,7 @@ impl JobRecord {
         )
     }
 
-    fn finish(&mut self, outcome: Result<Value, ctx_runtime::RuntimeError>) -> RuntimeEvent {
+    fn finish(&mut self, outcome: Result<Value, nerve_runtime::RuntimeError>) -> RuntimeEvent {
         let now = now_ms();
         self.updated_at_ms = now;
         self.finished_at_ms = Some(now);

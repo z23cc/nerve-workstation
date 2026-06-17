@@ -99,44 +99,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "ctx-core"
-version = "0.0.14"
-dependencies = [
- "aho-corasick",
- "ignore",
- "memchr",
- "nucleo-matcher",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "similar",
- "thiserror",
- "tiktoken-rs",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-tags",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "ctx-core-fuzz"
-version = "0.0.0"
-dependencies = [
- "ctx-core",
- "libfuzzer-sys",
-]
-
-[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,6 +233,45 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "nerve-core"
+version = "0.0.31"
+dependencies = [
+ "aho-corasick",
+ "globset",
+ "ignore",
+ "memchr",
+ "nucleo-matcher",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "similar",
+ "thiserror",
+ "tiktoken-rs",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-tags",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "nerve-core-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "nerve-core",
+]
 
 [[package]]
 name = "nucleo-matcher"
@@ -434,9 +435,9 @@ checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",

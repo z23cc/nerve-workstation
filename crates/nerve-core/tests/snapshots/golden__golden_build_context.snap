@@ -1,0 +1,28 @@
+---
+source: crates/nerve-core/tests/golden.rs
+expression: response
+---
+{
+  "manifest": {
+    "query": "Alpha",
+    "token_budget": 120,
+    "token_used": 95,
+    "included": [
+      {
+        "path": "alpha.rs",
+        "display_path": "fixtures/alpha.rs",
+        "mode": "codemap_only",
+        "tokens": 77,
+        "score": "1.000000"
+      }
+    ],
+    "excluded": [
+      {
+        "path": "gamma.py",
+        "display_path": "fixtures/gamma.py",
+        "score": "0.583387",
+        "reason": "over_budget"
+      }
+    ]
+  }
+}

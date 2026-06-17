@@ -1,6 +1,6 @@
 # Differential ledger: ctx-engine-rs vs RepoPrompt headless
 
-Captured on the shared fixture corpus in `crates/ctx-core/tests/fixtures`.
+Captured on the shared fixture corpus in `crates/nerve-core/tests/fixtures`.
 Raw captures are stored in [`captures.json`](./captures.json).
 
 This is a difference map, not a byte-for-byte parity test. The two engines expose
@@ -142,7 +142,7 @@ Completed alignment/new work:
 
 Benchmarks of `ctx-engine-rs` itself, not a head-to-head vs RepoPrompt headless
 (that latency comparison is not yet captured — deferred-next).
-`cargo bench -p ctx-core --bench engine_hot_paths`, release, 4096-file synthetic
+`cargo bench -p nerve-core --bench engine_hot_paths`, release, 4096-file synthetic
 corpus (~14 MiB), 18-core machine.
 
 | Operation | Time | Throughput |

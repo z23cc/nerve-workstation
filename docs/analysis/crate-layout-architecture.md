@@ -8,9 +8,9 @@ Keep public behavior stable while making the workspace easier to extend. The gui
 
 ## Changes applied
 
-### `crates/ctx-runtime/src`
+### `crates/nerve-runtime/src`
 
-`ctx-runtime` is the transport-neutral runtime seam above `ctx-core`. It owns capability composition without owning any transport protocol:
+`nerve-runtime` is the transport-neutral runtime seam above `nerve-core`. It owns capability composition without owning any transport protocol:
 
 - `Runtime<R>` — owns a `WorkspaceResolver` and dispatches tool calls.
 - `RuntimeToolAdapter<R>` — adapter seam for provider-specific or host-specific capabilities.
@@ -19,7 +19,7 @@ Keep public behavior stable while making the workspace easier to extend. The gui
 - `RuntimeJob*` / `RuntimeInfo` / `RuntimeToolSpec` types — protocol v3 job start/get/list/cancel request, runtime metadata, and tool schema shared by the daemon and TypeScript backend.
 - `protocol_codegen.rs` plus `export-runtime-protocol` — generates Rust-owned protocol schema/constants under `docs/protocol/`; `packages/tui/scripts/generate-protocol.ts` feeds that schema into `json-schema-to-typescript` so Rust protocol schema stays the source of truth for TypeScript clients without a custom TS compiler.
 
-Runtime dispatch order is explicit: registered adapters are consulted first, then the built-in `ctx-core` dispatcher handles unclaimed tools. Tool specs are de-duplicated by name with core specs kept first, so accidental adapter duplicates do not leak ambiguous tool definitions. This keeps MCP, CLI, TUI, and future daemon/Web hosts from each re-implementing tool aggregation.
+Runtime dispatch order is explicit: registered adapters are consulted first, then the built-in `nerve-core` dispatcher handles unclaimed tools. Tool specs are de-duplicated by name with core specs kept first, so accidental adapter duplicates do not leak ambiguous tool definitions. This keeps MCP, CLI, TUI, and future daemon/Web hosts from each re-implementing tool aggregation.
 
 ### `packages/tui/src`
 
@@ -45,7 +45,7 @@ This keeps UI components independent from MCP and from Rust process details.
 - `daemon/tests.rs` — daemon protocol tests kept out-of-line so production file size stays below the hard cap.
 - `jobs.rs` — daemon-owned in-memory runtime job lifecycle, cancellation tokens, retention, and event emission.
 - `rpc.rs` — shared JSON-RPC response and line-writing helpers.
-- `tools.rs` — MCP crate runtime assembly; registers the xAI tool adapter with `ctx-runtime`.
+- `tools.rs` — MCP crate runtime assembly; registers the xAI tool adapter with `nerve-runtime`.
 - `commands/` — user-facing command implementations:
   - `cache.rs`
   - `config.rs`
@@ -62,7 +62,7 @@ This keeps UI components independent from MCP and from Rust process details.
 
 This makes new CLI commands additive under `commands/`, new tool providers additive as runtime adapters, and xAI feature growth additive under `xai/tools/`.
 
-### `crates/ctx-core/src`
+### `crates/nerve-core/src`
 
 Modules that already had child modules now use standard Rust directory modules:
 
@@ -87,11 +87,11 @@ Additional deepening splits applied:
   - `symbols.rs` — response symbol trimming.
   - `tests.rs` — ranking/import/language/cancellation coverage.
 
-The public seams stay stable: `ctx_core::{get_repo_map, get_repo_map_cancellable, RepoMapRequest}` and internal navigation users still reach `crate::repomap::{IndexedFile, indexed_files_cancellable, resolve_import_reference}`.
+The public seams stay stable: `nerve_core::{get_repo_map, get_repo_map_cancellable, RepoMapRequest}` and internal navigation users still reach `crate::repomap::{IndexedFile, indexed_files_cancellable, resolve_import_reference}`.
 
 ## Current standard
 
-- `ctx-runtime` is the stable seam for Core Runtime + multiple Adapter architecture and the source of truth for runtime protocol constants/types; MCP and daemon are consumers of runtime, not the core architecture.
+- `nerve-runtime` is the stable seam for Core Runtime + multiple Adapter architecture and the source of truth for runtime protocol constants/types; MCP and daemon are consumers of runtime, not the core architecture.
 - `nerve daemon --stdio` is the local Nerve Runtime command for TUI/frontends: JSON-RPC 2.0 over NDJSON stdio, `runtime/event` notifications, and `runtime/jobs/start|get|list|cancel`.
 - `nerve mcp serve` remains the agent-facing MCP protocol adapter and is separate from the human-facing runtime daemon protocol.
 - `packages/tui` provides the first TypeScript `WorkstationBackend` client over that runtime daemon protocol.
@@ -111,18 +111,18 @@ The public seams stay stable: `ctx_core::{get_repo_map, get_repo_map_cancellable
    - Candidate seam: build UI screens on top of `WorkstationBackend`, not directly on process/MCP calls.
    - Risk: low-medium; UI state should not leak into the Rust runtime protocol.
 
-3. `ctx-core::semantic/index`
+3. `nerve-core::semantic/index`
    - Candidate seam: background build orchestration, built-index construction, build lifecycle.
    - Risk: medium; touches generation/cancellation/cache semantics.
 
-4. `ctx-core::dispatch/editing`
+4. `nerve-core::dispatch/editing`
    - Candidate seam: result formatting, provider I/O, atomic/non-atomic mutation ops.
    - Risk: medium; selection rebasing behavior is subtle.
 
-5. `ctx-core::catalog`
+5. `nerve-core::catalog`
    - Candidate seam: codemap cache warming and FS provider trait implementation.
    - Risk: medium; invalidation and generation checks must remain exact.
 
-6. `ctx-core::codemap` / `ctx-core::search`
+6. `nerve-core::codemap` / `nerve-core::search`
    - Candidate seam: parser-specific AST helpers or ranking helpers.
    - Risk: medium; these are algorithmic deep modules and should not be split unless a concrete feature needs the seam.

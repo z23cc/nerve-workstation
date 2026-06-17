@@ -1,6 +1,6 @@
 use crate::workspace::ServeArgs;
 use anyhow::{Context, Result};
-use ctx_core::RootPolicy;
+use nerve_core::RootPolicy;
 
 pub(crate) fn config_roots(args: ServeArgs) -> Result<()> {
     let policy = RootPolicy::new(args.roots).context("invalid root policy")?;

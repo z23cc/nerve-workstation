@@ -1,5 +1,5 @@
 [package]
-name = "ctx-core-fuzz"
+name = "nerve-core-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -10,8 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.ctx-core]
-path = "../crates/ctx-core"
+[dependencies.nerve-core]
+path = "../crates/nerve-core"
 
 [[bin]]
 name = "dispatch"

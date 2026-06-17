@@ -5,7 +5,7 @@ use crate::{
     tools,
     workspace::{args_with, registry},
 };
-use ctx_runtime::RuntimeEvent;
+use nerve_runtime::RuntimeEvent;
 use serde_json::{Value, json};
 use std::fs;
 use std::sync::{Arc, Mutex, mpsc};
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 struct RuntimeFixture {
     _root: tempfile::TempDir,
-    runtime: Arc<tools::CtxRuntime>,
+    runtime: Arc<tools::NerveRuntime>,
 }
 
 fn runtime_with_file() -> RuntimeFixture {
@@ -37,7 +37,9 @@ fn rpc(id: impl Into<Option<Value>>, method: &str, params: Value) -> RpcMessage 
     }
 }
 
-fn output_router(runtime: Arc<tools::CtxRuntime>) -> (RuntimeDaemonRouter, Arc<Mutex<Vec<Value>>>) {
+fn output_router(
+    runtime: Arc<tools::NerveRuntime>,
+) -> (RuntimeDaemonRouter, Arc<Mutex<Vec<Value>>>) {
     let output = Arc::new(Mutex::new(Vec::new()));
     let event_output = Arc::clone(&output);
     let router = RuntimeDaemonRouter::new(runtime, move |value| {

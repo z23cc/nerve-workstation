@@ -1,7 +1,7 @@
 use super::{http::*, media::*, util::*};
 use crate::auth;
 use anyhow::{Result, anyhow, bail};
-use ctx_core::WorkspaceRegistry;
+use nerve_core::WorkspaceRegistry;
 use serde_json::{Value, json};
 use std::time::Duration;
 

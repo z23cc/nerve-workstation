@@ -79,7 +79,7 @@ nerve daemon --stdio --root /abs/path/to/project
 ```
 
 
-`ctx-runtime` is the Rust schema source of truth for the `nerve-runtime` protocol. MCP stdio is an agent-facing adapter,
+`nerve-runtime` is the Rust schema source of truth for the `nerve-runtime` protocol. MCP stdio is an agent-facing adapter,
 the runtime daemon stdio path is a transport adapter, and the TypeScript TUI backend
 is a client of the runtime protocol.
 
@@ -196,7 +196,7 @@ cargo fmt --check
 ./Scripts/check-file-size.sh                  # files <=600 non-test lines
 bun run protocol:check
 
-# Regenerate protocol schema/constants + TypeScript types after changing ctx-runtime protocol types
+# Regenerate protocol schema/constants + TypeScript types after changing nerve-runtime protocol types
 bun run protocol:generate
 
 # Optional frontend adapter smoke check
@@ -209,13 +209,13 @@ Conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
 
 ## Internals & design
 
-- **Layout**: `crates/ctx-core` (engine + tools), `crates/ctx-runtime`
+- **Layout**: `crates/nerve-core` (engine + tools), `crates/nerve-runtime`
   (transport-neutral runtime protocol + tool-adapter composition), `crates/nerve-workstation` (stdio
   MCP adapter + CLI: `mcp serve`/`daemon`/`doctor`/`config`/`install`), `packages/tui`
   (TypeScript frontend backend adapter/client for `nerve daemon`).
 - **Snapshot-centered**: filesystem access is behind a `CatalogProvider` port;
   the core operates on immutable `CatalogSnapshot` values. Codemap parses cache by
   `(mtime, size)`.
-- **Determinism / parity**: golden snapshots under `crates/ctx-core/tests`; the
+- **Determinism / parity**: golden snapshots under `crates/nerve-core/tests`; the
   RepoPrompt difference ledger lives in [`docs/parity/`](docs/parity/).
 - **Plans**: see [`docs/plans/`](docs/plans/).

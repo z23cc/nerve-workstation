@@ -44,7 +44,7 @@ jobs:
 
       - name: Test
         shell: bash
-        run: cargo test -p ctx-core -p nerve-workstation
+        run: cargo test -p nerve-core -p nerve-workstation
 
       - name: Build release binary
         shell: bash

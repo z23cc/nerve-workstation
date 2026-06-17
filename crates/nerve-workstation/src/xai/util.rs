@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use ctx_core::{RootPolicy, WorkspaceRegistry, WorkspaceResolver};
+use nerve_core::{RootPolicy, WorkspaceRegistry, WorkspaceResolver};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -299,7 +299,7 @@ pub(super) fn validate_yyyy_mm_dd(value: &str, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ctx_core::{FsCatalogProvider, ScanOptions};
+    use nerve_core::{FsCatalogProvider, ScanOptions};
     use serde_json::json;
     use std::{fs, sync::Arc};
 

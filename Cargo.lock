@@ -892,57 +892,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx-core"
-version = "0.0.31"
-dependencies = [
- "aho-corasick",
- "criterion",
- "fastembed",
- "globset",
- "hnsw_rs",
- "ignore",
- "insta",
- "memchr",
- "nucleo-matcher",
- "proptest",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "similar",
- "tempfile",
- "thiserror 2.0.18",
- "tiktoken-rs",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-tags",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "ctx-runtime"
-version = "0.0.31"
-dependencies = [
- "anyhow",
- "ctx-core",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2465,17 +2414,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "nerve-core"
+version = "0.0.31"
+dependencies = [
+ "aho-corasick",
+ "criterion",
+ "fastembed",
+ "globset",
+ "hnsw_rs",
+ "ignore",
+ "insta",
+ "memchr",
+ "nucleo-matcher",
+ "proptest",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tiktoken-rs",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-tags",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "nerve-runtime"
+version = "0.0.31"
+dependencies = [
+ "anyhow",
+ "nerve-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nerve-workstation"
 version = "0.0.31"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
- "ctx-core",
- "ctx-runtime",
  "directories",
  "fs4",
  "keyring",
+ "nerve-core",
+ "nerve-runtime",
  "oauth2",
  "open",
  "rand 0.8.6",

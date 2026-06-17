@@ -1,6 +1,6 @@
 #![no_main]
 
-use ctx_core::fuzzing::codemap_symbols_for_path;
+use nerve_core::fuzzing::codemap_symbols_for_path;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

@@ -16,7 +16,7 @@ embedding backend so a BYO/hosted endpoint stays possible.
 - **Persistent on-disk index — promoted to v1** (decision 2026-06-16). The
   in-memory MVP (Work Items 1–8, done) proved retrieval quality, but a real-model
   eval measured a **~4.6 min cold first query** just to embed 841 chunks of
-  `ctx-core/src` (CPU, fp32 `jina-v2-base-code`) — rebuild-per-session is not
+  `nerve-core/src` (CPU, fp32 `jina-v2-base-code`) — rebuild-per-session is not
   usable for an interactively-called tool. So the index now **persists** to a
   per-workspace cache dir: built once, incrementally updated by
   `FileSignature{modified,size}`. README's "no persistent index" line becomes
@@ -32,16 +32,16 @@ embedding backend so a BYO/hosted endpoint stays possible.
 Current state (from explore probes):
 
 - **Pre-Phase-2 state was strictly in-memory, on-demand.** `FsCatalogProvider` holds an in-process
-  `ProviderCache` (`crates/ctx-core/src/catalog.rs` ~`340`); snapshot is TTL-keyed,
+  `ProviderCache` (`crates/nerve-core/src/catalog.rs` ~`340`); snapshot is TTL-keyed,
   codemap cache is keyed by `FileSignature{modified,size}` (~`354`), invalidated at
   ~`422`. Phase 2 changes only semantic mode: lexical/structural tools remain
   on-demand, while `semantic_search` adds a per-workspace persistent index.
 - **Fusion point already exists.** Content ranking is applied in one place —
-  `apply_content_relevance_scores` (`crates/ctx-core/src/search.rs` ~`694`), with a
+  `apply_content_relevance_scores` (`crates/nerve-core/src/search.rs` ~`694`), with a
   BM25 / TF-density switch (~`705`). A dense+rerank stage fuses here (RRF) rather
   than rewriting search.
 - **Tool surface pattern.** New tool = `tool_specs` entry + dispatch match arm +
-  `ToolText` impl (`crates/ctx-core/src/dispatch.rs`; `file_search` at ~`447`,
+  `ToolText` impl (`crates/nerve-core/src/dispatch.rs`; `file_search` at ~`447`,
   `FileSearchArgs` ~`1113`). `search_snapshot_cancellable` is the search entry
   (`search.rs:36`). We already extract tree-sitter symbols (`code_symbols_for_path`
   on the `CatalogProvider` trait, `port.rs:63`) — the natural chunk unit.
@@ -72,7 +72,7 @@ Open-source stack (from research, June 2026):
 ## Approach
 
 Add semantic retrieval as an **additive, feature-gated (`semantic`), non-wasm
-subsystem** in `ctx-core`, exposed by a new `semantic_search` MCP tool. Existing
+subsystem** in `nerve-core`, exposed by a new `semantic_search` MCP tool. Existing
 `file_search` is untouched; the default build stays small and dependency-free.
 
 Pipeline (consensus hybrid stack): **codemap-symbol chunks → local ONNX embeddings
@@ -111,13 +111,13 @@ Key attachment points (seams):
 MVP = prove hybrid retrieval quality with an **in-memory** index (no persistence).
 Types and the index core come before provider wiring (a field can't precede its type).
 
-1. **Feature gate + deps skeleton.** `ctx-core` `semantic` feature (non-wasm):
-   `fastembed`, `hnsw_rs`, `sha2`. `nerve-workstation` `semantic = ["ctx-core/semantic"]`.
+1. **Feature gate + deps skeleton.** `nerve-core` `semantic` feature (non-wasm):
+   `fastembed`, `hnsw_rs`, `sha2`. `nerve-workstation` `semantic = ["nerve-core/semantic"]`.
    Prove the default (non-semantic) build/footprint is unchanged.
 2. **Shared `ranking` module.** Extract tokenizer + scoring primitives from
    `search.rs` (`file_search` byte-identical, goldens prove it); expose
    binary-sniff / glob-filter as `pub(crate)`.
-3. **Schemas.** `SemanticSearchRequest/Response/Result` + `CtxError::SemanticUnavailable`
+3. **Schemas.** `SemanticSearchRequest/Response/Result` + `NerveError::SemanticUnavailable`
    in `models.rs`. No dispatch yet.
 4. **Chunker** (`semantic/chunk.rs`): codemap symbols + `block_span` spans, fixed
    line-window fallback, metadata (path/symbol/signature), content-hash chunk IDs,
@@ -158,7 +158,7 @@ cost **once**, then load + incrementally update on subsequent sessions.
 
 ## Phase 3 — Cold-build mitigations (chosen)
 
-Measured: cold build is embedding-bound (~85s for ~910 chunks of `ctx-core/src`,
+Measured: cold build is embedding-bound (~85s for ~910 chunks of `nerve-core/src`,
 release, CPU already saturated — intra-thread tuning was a verified no-op).
 Persistence makes that a one-time cost; these two reduce it further and hide it.
 

@@ -4,7 +4,7 @@
 //! into every edit mode against a small in-memory file set. The engine must
 //! always return `Ok`/`Err` (never panic, overflow, or hang) regardless of input.
 
-use ctx_core::edit::{self, EditRequest, PatchEntry, ReplaceEdit};
+use nerve_core::edit::{self, EditRequest, PatchEntry, ReplaceEdit};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 

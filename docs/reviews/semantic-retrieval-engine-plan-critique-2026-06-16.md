@@ -1,7 +1,7 @@
 # Critique: Semantic + Hybrid Retrieval Engine Plan
 
 **Scope:** Reviews `docs/plans/semantic-retrieval-engine-2026-06-16.md`. Seam line
-numbers spot-checked against `crates/ctx-core/src/{search,port,catalog}.rs` and are
+numbers spot-checked against `crates/nerve-core/src/{search,port,catalog}.rs` and are
 accurate. Critique only — no scope additions.
 
 ## 1. Top 3 under-specified seams

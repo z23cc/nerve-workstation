@@ -1,6 +1,6 @@
 #![no_main]
 
-use ctx_core::fuzzing::search_match_content;
+use nerve_core::fuzzing::search_match_content;
 use libfuzzer_sys::fuzz_target;
 
 fn split_input(data: &[u8]) -> (&[u8], &[u8], bool, bool) {

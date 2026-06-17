@@ -35,7 +35,7 @@ pub(crate) fn serve(args: workspace::ServeArgs) -> Result<()> {
 }
 
 pub(crate) fn handle_message(
-    runtime: &tools::CtxRuntime,
+    runtime: &tools::NerveRuntime,
     initialized: &mut bool,
     message: RpcMessage,
 ) -> Option<Value> {
@@ -67,7 +67,7 @@ pub(crate) fn handle_message(
 mod tests {
     use super::*;
     use crate::workspace::{WorkspaceArg, args_with, registry};
-    use ctx_core::{FsCatalogProvider, WorkspaceRegistry};
+    use nerve_core::{FsCatalogProvider, WorkspaceRegistry};
     use std::fs;
 
     #[test]

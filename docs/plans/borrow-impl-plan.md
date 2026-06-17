@@ -6,14 +6,14 @@ highest-value, self-contained items. Others (ast-grep pattern mode, search per-f
 cap + round-robin, content-hash summary cache, real BPE token counting, index
 freshness metadata, diff-from-edit-chunks) are deferred.
 
-All work lives in `crates/ctx-core`. Respect existing conventions:
+All work lives in `crates/nerve-core`. Respect existing conventions:
 - functions <= 100 lines, nesting capped (clippy `-D warnings`)
 - files <= 600 non-test lines (`./Scripts/check-file-size.sh`)
 - deterministic output, golden-tested; full data in `structuredContent`, compact text in `content[].text`
 - `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo test` must pass
 
 Existing facts (already verified):
-- `crates/ctx-core/src/codemap/` parses BOTH `symbols` (definitions) and `references`
+- `crates/nerve-core/src/codemap/` parses BOTH `symbols` (definitions) and `references`
   (name-level occurrences) per file — see `codemap/types.rs` (`CodeReference`, `references` field),
   `codemap/symbols.rs`. repo-map already consumes `references`.
 - `codemap/block.rs` exposes `pub(crate) fn block_span(path, source, start_line) -> Option<(usize,usize)>`
@@ -42,7 +42,7 @@ codemap parse layer.
   elision footer with concrete `path:12-40,90-120` re-read ranges; collapse `{ .. }` brace pairs.
 
 **Scope / approach.**
-- New module `crates/ctx-core/src/codemap/summarize.rs` (keep < 600 lines; split if needed).
+- New module `crates/nerve-core/src/codemap/summarize.rs` (keep < 600 lines; split if needed).
   Reuse the existing tree-sitter parse already done in `codemap/` rather than re-parsing.
   Produce ordered kept/elided segments in SOURCE ORDER with 1-based inclusive line spans.
 - Elide function/method/block bodies and long multiline comments past a min-line threshold;
@@ -99,7 +99,7 @@ the seed files REFERENCE. No LLM inference. Mirrors repoprompt-ce
   codemap-only; budget-exhaustion skip.
 - `cargo build`, `clippy -D warnings`, `fmt --check`, `cargo test` pass.
 
-**Key files:** `crates/ctx-core/src/build_context.rs`, possibly `codemap/selection.rs`. **Size:** medium.
+**Key files:** `crates/nerve-core/src/build_context.rs`, possibly `codemap/selection.rs`. **Size:** medium.
 **Depends on:** none (independent of Item 1; different modules).
 
 ---
@@ -110,7 +110,7 @@ Verified facts:
 - Unified diff for edits is `dispatch/editing.rs::unified_diff(path, old, new)` using `similar::TextDiff::from_lines(...).unified_diff()`. `similar` (v2) is ALREADY a dependency and already groups changes into hunks. So Item 3 is a refinement, not a rewrite.
 - `ast-grep` is NOT a current dependency; the engine uses tree-sitter + tree-sitter-tags directly. `ast_search`/`ast_edit` live in `dispatch/ast.rs` + `dispatch/handlers.rs` + schema in `dispatch/specs.rs`.
 - `tiktoken-rs` is ALREADY a dependency (real BPE counting is available).
-- Search collection is in `crates/ctx-core/src/search/` (`api.rs` collects path+content matches; `content.rs`, `matcher.rs`).
+- Search collection is in `crates/nerve-core/src/search/` (`api.rs` collects path+content matches; `content.rs`, `matcher.rs`).
 - Summary lives in `codemap/summarize.rs` (`summarize_source`, `render_summary`), called from `dispatch/handlers.rs::summary_read_response`.
 
 ## [x] Item 3 (search diversity): per-file match cap + round-robin interleave — DONE (content.rs; per-file cap + interleave; tests pass)
@@ -169,7 +169,7 @@ OR: a written recommendation in the agent output if the dependency cost argues a
 # Round 3 — remaining minor items (audit result)
 
 Audit found most of these are ALREADY implemented; do not redo them:
-- [x] **Real BPE token counting — ALREADY DONE.** `crates/ctx-core/src/token.rs` uses `tiktoken_rs`
+- [x] **Real BPE token counting — ALREADY DONE.** `crates/nerve-core/src/token.rs` uses `tiktoken_rs`
   (`o200k_base` → `cl100k_base` → char-estimate fallback). Consumed by `build_context.rs`,
   `workspace_context.rs`, `selection.rs`, `codemap/types.rs`. No work needed.
 - [x] **Shared scan cache across discovery tools — ALREADY DONE.** `catalog.rs` `FsCatalogProvider`
