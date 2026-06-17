@@ -8,7 +8,9 @@ pub(super) fn tool_specs() -> Vec<Value> {
     vec![
         spec_xai_models(),
         spec_xai_responses(),
+        spec_x_search(),
         spec_xai_x_search(),
+        spec_web_search(),
         spec_xai_web_search(),
         spec_xai_image_generate(),
         spec_xai_tts(),
@@ -46,10 +48,24 @@ pub(super) fn spec_xai_responses() -> Value {
     })
 }
 
+pub(super) fn spec_x_search() -> Value {
+    x_search_spec(
+        "x_search",
+        "Search X/Twitter using xAI OAuth. This is the preferred generic X search tool for agents.",
+    )
+}
+
 pub(super) fn spec_xai_x_search() -> Value {
+    x_search_spec(
+        "xai_x_search",
+        "Search X/Twitter through xAI's built-in x_search Responses API tool using xAI OAuth.",
+    )
+}
+
+fn x_search_spec(name: &str, description: &str) -> Value {
     json!({
-        "name": "xai_x_search",
-        "description": "Search X/Twitter through xAI's built-in x_search Responses API tool using xAI OAuth.",
+        "name": name,
+        "description": description,
         "inputSchema": {
             "type": "object",
             "required": ["query"],
@@ -68,10 +84,24 @@ pub(super) fn spec_xai_x_search() -> Value {
     })
 }
 
+pub(super) fn spec_web_search() -> Value {
+    web_search_spec(
+        "web_search",
+        "Search the web using xAI OAuth. This is the preferred generic web search tool for agents.",
+    )
+}
+
 pub(super) fn spec_xai_web_search() -> Value {
+    web_search_spec(
+        "xai_web_search",
+        "Search the web through xAI's web_search Responses API tool using xAI OAuth.",
+    )
+}
+
+fn web_search_spec(name: &str, description: &str) -> Value {
     json!({
-        "name": "xai_web_search",
-        "description": "Search the web through xAI's web_search Responses API tool using xAI OAuth.",
+        "name": name,
+        "description": description,
         "inputSchema": {
             "type": "object",
             "required": ["query"],

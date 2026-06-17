@@ -42,7 +42,10 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect();
         assert!(names.contains(&"xai_responses"));
+        assert!(names.contains(&"x_search"));
         assert!(names.contains(&"xai_x_search"));
+        assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"xai_web_search"));
         assert!(names.contains(&"xai_image_generate"));
     }
 

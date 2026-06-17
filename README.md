@@ -85,10 +85,12 @@ Tokens are stored in `~/.ctx-mcp/auth.json` by default. Set
 bearer is only sent to `https://api.x.ai/v1` or another `https://*.x.ai` URL.
 
 The MCP server always lists Grok-backed tools, but they require `ctx-mcp auth
-login xai` before use: `xai_models`, `xai_responses`, `xai_x_search`,
-`xai_web_search`, `xai_image_generate`, `xai_tts`, `xai_transcribe`, and
-`xai_video_generate`. Media generation tools require an explicit workspace-gated
-`output_path` so large binary data is written to disk instead of returned inline.
+login xai` before use: `xai_models`, `xai_responses`, `x_search` (preferred X
+search), `xai_x_search` (explicit alias), `web_search` (preferred generic web
+search), `xai_web_search` (explicit alias), `xai_image_generate`, `xai_tts`,
+`xai_transcribe`, and `xai_video_generate`.
+Media generation tools require an explicit workspace-gated `output_path` so large
+binary data is written to disk instead of returned inline.
 A 403 from xAI usually means the signed-in account does not have the required
 Grok/API entitlement.
 
@@ -101,7 +103,7 @@ Grok/API entitlement.
 | Semantic | `semantic_search` (hybrid dense + BM25 + rerank; structured `index_state` = `ready`/`warming`/`bm25_only` + snapshot `generation` for freshness) |
 | Edit | `edit` (`replace`/`patch`/`apply_patch`/`hashline`) / `write` / `delete` / `move` — root-gated, with unified diff (configurable context, optional ignore-whitespace) + syntax diagnostics; `ast_search` / `ast_edit` (structural — raw tree-sitter `query` mode **plus a `$META` pattern mode**) |
 | Context / ops | `manage_selection`, `workspace_context`, `build_context`, `git` (read-only), `manage_workspaces` |
-| xAI / Grok | `xai_models`, `xai_responses`, `xai_x_search`, `xai_web_search`, `xai_image_generate`, `xai_tts`, `xai_transcribe`, `xai_video_generate` |
+| xAI / Grok | `xai_models`, `xai_responses`, `x_search` (preferred), `xai_x_search`, `web_search` (preferred), `xai_web_search`, `xai_image_generate`, `xai_tts`, `xai_transcribe`, `xai_video_generate` |
 
 ## Semantic search (built in, on by default)
 

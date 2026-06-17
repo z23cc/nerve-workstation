@@ -26,8 +26,8 @@ pub(super) fn handle_tool_call(
     let response = match name {
         "xai_models" => models::xai_models(&arguments),
         "xai_responses" => responses::xai_responses(&arguments),
-        "xai_x_search" => search::xai_x_search(&arguments),
-        "xai_web_search" => search::xai_web_search(&arguments),
+        "x_search" | "xai_x_search" => search::xai_x_search(&arguments),
+        "web_search" | "xai_web_search" => search::xai_web_search(&arguments),
         "xai_image_generate" => image::xai_image_generate(registry, &arguments),
         "xai_tts" => audio::xai_tts(registry, &arguments),
         "xai_transcribe" => audio::xai_transcribe(registry, &arguments),
