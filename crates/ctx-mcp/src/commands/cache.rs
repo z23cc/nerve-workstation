@@ -1,8 +1,8 @@
-use super::ServeArgs;
+use crate::workspace::ServeArgs;
 use anyhow::{Result, bail};
 
 #[cfg(feature = "semantic")]
-use super::{provider_for_roots, scan_options};
+use crate::workspace::{provider_for_roots, scan_options};
 #[cfg(feature = "semantic")]
 use anyhow::Context;
 #[cfg(feature = "semantic")]
@@ -19,7 +19,7 @@ struct WorkspaceRoots {
     roots: Vec<PathBuf>,
 }
 
-pub(super) fn warm(args: ServeArgs) -> Result<()> {
+pub(crate) fn warm(args: ServeArgs) -> Result<()> {
     #[cfg(feature = "semantic")]
     {
         warm_semantic(args)
@@ -31,7 +31,7 @@ pub(super) fn warm(args: ServeArgs) -> Result<()> {
     }
 }
 
-pub(super) fn purge(args: ServeArgs) -> Result<()> {
+pub(crate) fn purge(args: ServeArgs) -> Result<()> {
     #[cfg(feature = "semantic")]
     {
         purge_semantic_cache(args)
@@ -145,4 +145,30 @@ fn display_roots(roots: &[PathBuf]) -> String {
         .map(|root| root.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(all(test, feature = "semantic"))]
+mod tests {
+    use super::*;
+    use crate::workspace::args_with;
+    use std::fs;
+
+    #[test]
+    fn warm_and_cache_purge_use_project_cache() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let cache = tempfile::tempdir().expect("cache tempdir");
+        fs::create_dir_all(root.path().join("src")).expect("src dir");
+        fs::write(root.path().join("src/lib.rs"), "pub fn parse_config() {}\n")
+            .expect("source write");
+        let mut args = args_with(vec![root.path().to_path_buf()], Vec::new());
+        args.no_semantic = false;
+        args.semantic_embedding_model = Some("mock".to_string());
+        args.semantic_reranker_model = Some("mock".to_string());
+        args.semantic_cache_dir = Some(cache.path().to_path_buf());
+
+        warm_semantic(args.clone()).expect("warm");
+        assert!(fs::read_dir(cache.path()).expect("cache dir").count() > 0);
+        purge_semantic_cache(args).expect("purge");
+        assert_eq!(fs::read_dir(cache.path()).expect("cache dir").count(), 0);
+    }
 }

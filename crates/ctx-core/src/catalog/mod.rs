@@ -20,24 +20,24 @@ use crate::{
     selection::Selection,
     snapshot::CatalogSnapshot,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use ignore::WalkBuilder;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock, Weak},
+    time::Duration,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
-    fmt, fs, mem,
+    fmt, fs,
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
-        mpsc,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+mod fs_scan;
 mod memory;
 pub use memory::{HostFile, MemoryCatalogProvider};
 
@@ -380,199 +380,13 @@ impl FsCatalogProvider {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn scan_root(root: &RootRef, cancel: &CancelToken) -> ScanRootOutput {
-    let mut builder = WalkBuilder::new(&root.path);
-    let filter_cancel = cancel.clone();
-    builder
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .filter_entry(move |entry| include_walk_entry(entry, &filter_cancel));
-
-    let context = ScanRootContext {
-        root_path: root.path.clone(),
-        root_id: root.id.clone(),
-        cancel: cancel.clone(),
-    };
-    let (sender, receiver) = mpsc::channel();
-    builder
-        .build_parallel()
-        .run(|| scan_worker(context.clone(), sender.clone()));
-    drop(sender);
-
-    let mut output = ScanRootOutput::default();
-    for worker_output in receiver {
-        output.entries.extend(worker_output.entries);
-        output.diagnostics.extend(worker_output.diagnostics);
-    }
-    output
-}
-
-fn include_walk_entry(entry: &ignore::DirEntry, cancel: &CancelToken) -> bool {
-    if cancel.is_cancelled() {
-        return false;
-    }
-    let name = entry.file_name().to_string_lossy();
-    !matches!(name.as_ref(), ".git" | "node_modules" | ".build" | "target")
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-struct ScanRootContext {
-    root_path: PathBuf,
-    root_id: String,
-    cancel: CancelToken,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-struct ScanRootOutput {
-    entries: Vec<CatalogEntry>,
-    diagnostics: Vec<Diagnostic>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct ScanWorkerState {
-    context: ScanRootContext,
-    entries: Vec<CatalogEntry>,
-    diagnostics: Vec<Diagnostic>,
-    sender: Option<mpsc::Sender<ScanRootOutput>>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for ScanWorkerState {
-    fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(ScanRootOutput {
-                entries: mem::take(&mut self.entries),
-                diagnostics: mem::take(&mut self.diagnostics),
-            });
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn scan_worker(
-    context: ScanRootContext,
-    sender: mpsc::Sender<ScanRootOutput>,
-) -> Box<dyn FnMut(Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState + Send> {
-    let mut state = ScanWorkerState {
-        context,
-        entries: Vec::new(),
-        diagnostics: Vec::new(),
-        sender: Some(sender),
-    };
-    Box::new(move |dent| {
-        let ScanWorkerState {
-            context,
-            entries,
-            diagnostics,
-            sender: _,
-        } = &mut state;
-        scan_entry(dent, context, entries, diagnostics)
-    })
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn scan_entry(
-    dent: Result<ignore::DirEntry, ignore::Error>,
-    context: &ScanRootContext,
-    entries: &mut Vec<CatalogEntry>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> ignore::WalkState {
-    if context.cancel.is_cancelled() {
-        return ignore::WalkState::Quit;
-    }
-    let dent = match dent {
-        Ok(dent) => dent,
-        Err(err) => {
-            push_scan_diagnostic(diagnostics, None, err.to_string());
-            return ignore::WalkState::Continue;
-        }
-    };
-    let path = dent.path();
-    if !path.is_file() {
-        return ignore::WalkState::Continue;
-    }
-    let metadata = match dent.metadata() {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            push_scan_diagnostic(diagnostics, Some(path.to_path_buf()), err.to_string());
-            return ignore::WalkState::Continue;
-        }
-    };
-    push_catalog_entry(entries, path, metadata.len(), context);
-    ignore::WalkState::Continue
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn push_scan_diagnostic(diagnostics: &mut Vec<Diagnostic>, path: Option<PathBuf>, message: String) {
-    diagnostics.push(Diagnostic { path, message });
-}
-
-fn push_catalog_entry(
-    entries: &mut Vec<CatalogEntry>,
-    path: &Path,
-    size: u64,
-    context: &ScanRootContext,
-) {
-    let rel_path = path
-        .strip_prefix(&context.root_path)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    entries.push(CatalogEntry {
-        root_id: context.root_id.clone(),
-        rel_path,
-        abs_path: path.to_path_buf(),
-        size,
-    });
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn finalize_snapshot(
-    mut entries: Vec<CatalogEntry>,
-    mut diagnostics: Vec<Diagnostic>,
-    roots: &[RootRef],
-    max_entries: usize,
-    cancel: &CancelToken,
-) -> Result<CatalogSnapshot, CtxError> {
-    cancel.check_cancelled()?;
-    entries.sort_by(|left, right| {
-        left.rel_path
-            .cmp(&right.rel_path)
-            .then_with(|| left.root_id.cmp(&right.root_id))
-            .then_with(|| left.abs_path.cmp(&right.abs_path))
-    });
-    if entries.len() > max_entries {
-        let dropped = entries.len() - max_entries;
-        entries.truncate(max_entries);
-        diagnostics.push(Diagnostic {
-            path: None,
-            message: format!(
-                "catalog scan truncated to {max_entries} entries; dropped {dropped} entries due to max_entries limit"
-            ),
-        });
-    }
-    diagnostics.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.message.cmp(&right.message))
-    });
-    Ok(CatalogSnapshot {
-        generation: 1,
-        roots: roots.to_vec(),
-        entries,
-        diagnostics,
-    })
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn cache_entry_fresh(now: Instant, created_at: Instant, ttl: Duration) -> bool {
     now.checked_duration_since(created_at)
         .is_some_and(|age| age <= ttl)
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+use fs_scan::{finalize_snapshot, scan_root};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod fs_atomic;
@@ -752,178 +566,4 @@ mod memory_tests {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-    use std::{io::Write, sync::Mutex, thread, time::Duration as StdDuration};
-
-    fn paths(snapshot: &CatalogSnapshot) -> Vec<&str> {
-        snapshot
-            .entries
-            .iter()
-            .map(|entry| entry.rel_path.as_str())
-            .collect()
-    }
-
-    #[test]
-    fn scans_files_and_excludes_target() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::create_dir(dir.path().join("src")).expect("src");
-        fs::write(dir.path().join("src/lib.rs"), "pub fn ok() {}\n").expect("write");
-        fs::create_dir(dir.path().join("target")).expect("target");
-        fs::write(dir.path().join("target/skip.txt"), "skip").expect("write skip");
-        let mut file = fs::File::create(dir.path().join("README.md")).expect("readme");
-        writeln!(file, "hello").expect("write readme");
-
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
-        let snapshot = provider.snapshot().expect("snapshot");
-        assert_eq!(paths(&snapshot), vec!["README.md", "src/lib.rs"]);
-    }
-
-    #[test]
-    fn max_entries_truncates_with_diagnostic() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("b.txt"), "b").expect("b");
-        fs::write(dir.path().join("a.txt"), "a").expect("a");
-        fs::write(dir.path().join("c.txt"), "c").expect("c");
-
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions {
-                max_entries: 2,
-                ..ScanOptions::default()
-            },
-        );
-        let snapshot = provider.snapshot().expect("snapshot");
-
-        assert_eq!(paths(&snapshot), vec!["a.txt", "b.txt"]);
-        assert_eq!(snapshot.diagnostics.len(), 1);
-        assert_eq!(snapshot.diagnostics[0].path, None);
-        assert!(
-            snapshot.diagnostics[0]
-                .message
-                .contains("catalog scan truncated to 2 entries; dropped 1 entries")
-        );
-    }
-
-    #[test]
-    fn cache_reuses_snapshot_within_ttl() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("a.txt"), "a").expect("a");
-        let now = Arc::new(Mutex::new(Instant::now()));
-        let clock_now = Arc::clone(&now);
-        let provider = FsCatalogProvider::with_clock(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-            move || *clock_now.lock().expect("clock"),
-        );
-        let first = provider.snapshot_arc().expect("first");
-        fs::write(dir.path().join("b.txt"), "b").expect("b");
-        let second = provider.snapshot_arc().expect("second");
-        assert!(Arc::ptr_eq(&first, &second));
-        *now.lock().expect("clock") += Duration::from_secs(6);
-        let third = provider.snapshot_arc().expect("third");
-        assert!(!Arc::ptr_eq(&first, &third));
-        assert_eq!(paths(&third), vec!["a.txt", "b.txt"]);
-    }
-
-    #[test]
-    fn invalidation_clears_snapshot_and_codemap_cache() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("lib.rs");
-        fs::write(&path, "pub fn one() {}\n").expect("write one");
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
-        provider
-            .code_symbols_for_path(&path, "lib.rs")
-            .expect("codemap")
-            .expect("parse");
-        assert_eq!(provider.codemap_cache_len(), 1);
-        provider.invalidate();
-        assert_eq!(provider.codemap_cache_len(), 0);
-    }
-
-    #[test]
-    fn snapshot_starts_background_codemap_warming() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("lib.rs"), "pub fn warmed() {}\n").expect("write lib");
-        fs::write(dir.path().join("notes.txt"), "plain text\n").expect("write notes");
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
-
-        let snapshot = provider.snapshot().expect("snapshot");
-        assert_eq!(paths(&snapshot), vec!["lib.rs", "notes.txt"]);
-
-        for _ in 0..100 {
-            if provider.codemap_cache_len() == 1 {
-                return;
-            }
-            thread::sleep(StdDuration::from_millis(10));
-        }
-        assert_eq!(provider.codemap_cache_len(), 1);
-    }
-
-    #[test]
-    fn stale_codemap_warmer_does_not_insert_after_invalidation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("lib.rs"), "pub fn stale() {}\n").expect("write lib");
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
-        let snapshot = provider
-            .scan_snapshot_cancellable(&CancelToken::never())
-            .expect("snapshot");
-        let stale_generation = provider.cache.generation.load(AtomicOrdering::SeqCst);
-
-        provider.invalidate();
-        FsCatalogProvider::warm_codemap_for_snapshot(
-            &Arc::downgrade(&provider.cache),
-            &provider.policy,
-            &snapshot,
-            stale_generation,
-            &CancelToken::never(),
-        );
-
-        assert_eq!(provider.codemap_cache_len(), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn codemap_warmer_revalidates_root_policy_before_reading() {
-        use std::os::unix::fs as unix_fs;
-
-        let root = tempfile::tempdir().expect("root tempdir");
-        let outside = tempfile::tempdir().expect("outside tempdir");
-        let inside_path = root.path().join("lib.rs");
-        let outside_path = outside.path().join("lib.rs");
-        fs::write(&inside_path, "pub fn inside() {}\n").expect("write inside");
-        fs::write(&outside_path, "pub fn outside() {}\n").expect("write outside");
-        let provider = FsCatalogProvider::new(
-            RootPolicy::new(vec![root.path().to_path_buf()]).expect("policy"),
-            ScanOptions::default(),
-        );
-        let snapshot = provider
-            .scan_snapshot_cancellable(&CancelToken::never())
-            .expect("snapshot");
-        let generation = provider.cache.generation.load(AtomicOrdering::SeqCst);
-
-        fs::remove_file(&inside_path).expect("remove inside");
-        unix_fs::symlink(&outside_path, &inside_path).expect("symlink outside");
-        FsCatalogProvider::warm_codemap_for_snapshot(
-            &Arc::downgrade(&provider.cache),
-            &provider.policy,
-            &snapshot,
-            generation,
-            &CancelToken::never(),
-        );
-
-        assert_eq!(provider.codemap_cache_len(), 0);
-    }
-}
+mod tests;

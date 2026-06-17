@@ -1,6 +1,10 @@
 use super::http::{http_get_bytes, http_get_json};
 use super::util::*;
-use super::*;
+use super::{DEFAULT_IMAGE_TO_VIDEO_MODEL, DEFAULT_VIDEO_MODEL};
+use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
+use std::{fs, path::Path, thread::sleep, time::Duration};
 
 pub(super) fn poll_video(
     base_url: &str,
@@ -125,4 +129,32 @@ pub(super) fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_image_base64_from_structured_response() {
+        let redacted = redact_image_response(&json!({ "data": [{ "b64_json": "abcdef" }] }));
+        assert_eq!(
+            redacted["data"][0]["b64_json"],
+            json!("[redacted: 6 base64 chars]")
+        );
+    }
+
+    #[test]
+    fn video_payload_switches_default_for_image() {
+        let payload = video_payload(
+            &json!({ "image_url": "https://example.com/image.png" }),
+            "animate it",
+        )
+        .expect("payload");
+        assert_eq!(payload["model"], json!(DEFAULT_IMAGE_TO_VIDEO_MODEL));
+        assert_eq!(
+            payload["image"]["url"],
+            json!("https://example.com/image.png")
+        );
+    }
 }

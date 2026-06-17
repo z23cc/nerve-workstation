@@ -1,4 +1,4 @@
-use super::WorkspaceArg;
+use crate::workspace::WorkspaceArg;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::{
@@ -7,7 +7,7 @@ use std::{
 };
 
 #[derive(Debug, Args)]
-pub(super) struct InstallArgs {
+pub(crate) struct InstallArgs {
     /// Workspace root to expose. Repeatable. Defaults to the current directory.
     #[arg(long = "root")]
     roots: Vec<PathBuf>,
@@ -35,7 +35,7 @@ pub(super) struct InstallArgs {
 }
 
 /// Decide which tools to configure: both unless exactly one flag is set.
-pub(super) fn select_targets(claude: bool, codex: bool) -> (bool, bool) {
+pub(crate) fn select_targets(claude: bool, codex: bool) -> (bool, bool) {
     if claude == codex {
         (true, true)
     } else {
@@ -43,7 +43,7 @@ pub(super) fn select_targets(claude: bool, codex: bool) -> (bool, bool) {
     }
 }
 
-pub(super) fn build_serve_args(roots: &[String], workspaces: &[(String, String)]) -> Vec<String> {
+pub(crate) fn build_serve_args(roots: &[String], workspaces: &[(String, String)]) -> Vec<String> {
     let mut args = vec!["serve".to_string()];
     for root in roots {
         args.push("--root".to_string());
@@ -87,7 +87,7 @@ fn canonical(path: &Path) -> Result<String> {
     Ok(abs.to_string_lossy().into_owned())
 }
 
-pub(super) fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     let safe = !value.is_empty()
         && value.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '=' | ':' | ',' | '+')
@@ -116,7 +116,7 @@ fn run_tool(program: &str, args: &[String]) -> Result<bool> {
     Ok(status.success())
 }
 
-pub(super) fn install(args: InstallArgs) -> Result<()> {
+pub(crate) fn install(args: InstallArgs) -> Result<()> {
     let command = resolve_command(args.command.clone())?;
 
     let mut roots: Vec<String> = Vec::new();
@@ -242,5 +242,45 @@ fn configure_codex(
         Ok(true)
     } else {
         bail!("codex mcp add failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_targets_defaults_to_both() {
+        assert_eq!(select_targets(false, false), (true, true));
+        assert_eq!(select_targets(true, true), (true, true));
+        assert_eq!(select_targets(true, false), (true, false));
+        assert_eq!(select_targets(false, true), (false, true));
+    }
+
+    #[test]
+    fn build_serve_args_includes_roots_and_workspaces() {
+        let args = build_serve_args(
+            &["/a".to_string(), "/b".to_string()],
+            &[("named".to_string(), "/c".to_string())],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "serve",
+                "--root",
+                "/a",
+                "--root",
+                "/b",
+                "--workspace",
+                "named=/c"
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_quote_quotes_unsafe_values() {
+        assert_eq!(shell_quote("/abs/path"), "/abs/path");
+        assert_eq!(shell_quote("with space"), "'with space'");
+        assert_eq!(shell_quote(""), "''");
     }
 }

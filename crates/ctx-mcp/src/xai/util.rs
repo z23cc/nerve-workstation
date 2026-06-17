@@ -1,4 +1,7 @@
-use super::*;
+use anyhow::{Context, Result, anyhow, bail};
+use ctx_core::{RootPolicy, WorkspaceRegistry, WorkspaceResolver};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 pub(super) fn object_payload(arguments: &Value) -> Result<Value> {
     let mut payload = arguments
@@ -290,5 +293,84 @@ pub(super) fn validate_yyyy_mm_dd(value: &str, label: &str) -> Result<()> {
         Ok(())
     } else {
         bail!("{label} must be YYYY-MM-DD")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ctx_core::{FsCatalogProvider, ScanOptions};
+    use serde_json::json;
+    use std::{fs, sync::Arc};
+
+    fn registry_for(root: &Path) -> WorkspaceRegistry {
+        let registry = WorkspaceRegistry::new();
+        let policy = RootPolicy::new(vec![root.to_path_buf()]).expect("policy");
+        registry.insert(
+            "default",
+            Arc::new(FsCatalogProvider::new(policy, ScanOptions::default())),
+        );
+        registry
+    }
+
+    #[test]
+    fn local_file_paths_are_workspace_gated() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let registry = registry_for(root.path());
+        let canonical_root = root.path().canonicalize().expect("canonical root");
+        fs::write(root.path().join("audio.wav"), b"test").expect("audio write");
+
+        let output = resolve_workspace_write_path(
+            &registry,
+            &json!({ "output_path": "media/out.mp3" }),
+            "output_path",
+        )
+        .expect("output path");
+        assert!(output.starts_with(&canonical_root));
+
+        let input = resolve_workspace_read_path(
+            &registry,
+            &json!({ "file_path": "audio.wav" }),
+            "file_path",
+        )
+        .expect("input path");
+        assert!(input.starts_with(&canonical_root));
+
+        assert!(
+            resolve_workspace_write_path(
+                &registry,
+                &json!({ "output_path": outside.path().join("out.mp3") }),
+                "output_path",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_x_search_dates() {
+        assert!(validate_date_range(Some("2026-01-01".to_string()), None).is_ok());
+        assert!(validate_date_range(Some("2026-1-1".to_string()), None).is_err());
+        assert!(
+            validate_date_range(
+                Some("2026-02-01".to_string()),
+                Some("2026-01-01".to_string())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_x_search_handle_filters() {
+        let mut tool = json!({ "type": "x_search" });
+        assert!(
+            add_x_handle_filters(
+                &json!({ "allowed_x_handles": ["a"], "excluded_x_handles": ["b"] }),
+                &mut tool,
+            )
+            .is_err()
+        );
+        let many: Vec<_> = (0..11).map(|idx| format!("h{idx}")).collect();
+        assert!(add_x_handle_filters(&json!({ "allowed_x_handles": many }), &mut tool).is_err());
     }
 }

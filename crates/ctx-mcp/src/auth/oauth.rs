@@ -2,6 +2,7 @@ use super::callback::{
     prompt_manual_callback, start_loopback_server, try_open_browser, validate_callback,
     wait_for_callback,
 };
+use super::commands::LoginArgs;
 use super::http::{http_get_json, http_post_form_json};
 use super::util::{
     client_id, env_base_url, form_encode, optional_string, pkce_challenge, preferred_redirect_uri,
