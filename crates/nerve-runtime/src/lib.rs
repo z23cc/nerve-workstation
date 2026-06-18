@@ -20,7 +20,7 @@ mod tool_spec;
 pub use adapter::RuntimeToolAdapter;
 pub use command::{RUNTIME_COMMAND_NAMES, RuntimeCommand};
 pub use error::RuntimeError;
-pub use event::RuntimeEvent;
+pub use event::{AgentEventKind, RuntimeEvent};
 pub use job::{
     RuntimeJobCancelRequest, RuntimeJobError, RuntimeJobGetRequest, RuntimeJobListRequest,
     RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,

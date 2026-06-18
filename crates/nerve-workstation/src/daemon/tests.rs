@@ -1,5 +1,6 @@
 use super::router::{RuntimeDaemonRouter, runtime_event_notification};
 use crate::jobs::JobManager;
+use crate::providers::ProviderRegistry;
 use crate::rpc::RpcMessage;
 use crate::{
     tools,
@@ -42,9 +43,15 @@ fn output_router(
 ) -> (RuntimeDaemonRouter, Arc<Mutex<Vec<Value>>>) {
     let output = Arc::new(Mutex::new(Vec::new()));
     let event_output = Arc::clone(&output);
-    let router = RuntimeDaemonRouter::new(runtime, move |value| {
-        event_output.lock().expect("output lock").push(value);
-    });
+    let router = RuntimeDaemonRouter::new(
+        runtime,
+        ProviderRegistry::default(),
+        crate::policy::Policy::default(),
+        None,
+        move |value| {
+            event_output.lock().expect("output lock").push(value);
+        },
+    );
     (router, output)
 }
 
@@ -282,6 +289,9 @@ fn job_cancel_requests_token_and_emits_cancelled() {
     let release_rx = Arc::new(Mutex::new(release_rx));
     let jobs = Arc::new(JobManager::new(
         Arc::clone(&fixture.runtime),
+        ProviderRegistry::default(),
+        crate::policy::Policy::default(),
+        None,
         move |event| {
             let block = matches!(event, RuntimeEvent::JobProgress { ref job_id, .. } if job_id == "cancel-me");
             event_output

@@ -1,5 +1,5 @@
 use crate::workspace::ServeArgs;
-use crate::{auth, commands, daemon, server};
+use crate::{agent, auth, commands, daemon, server};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
@@ -28,6 +28,8 @@ enum CommandKind {
     Warm(ServeArgs),
     /// Manage xAI OAuth credentials.
     Auth(auth::AuthArgs),
+    /// Multi-provider agent loop: subscription login and task run.
+    Agent(agent::AgentArgs),
     /// Manage local caches.
     Cache(CacheArgs),
     /// Register Nerve as an MCP server in Claude Code and/or Codex.
@@ -83,6 +85,7 @@ pub(crate) fn run() -> Result<()> {
         },
         CommandKind::Warm(args) => commands::cache::warm(args),
         CommandKind::Auth(args) => auth::run(args),
+        CommandKind::Agent(args) => agent::run(args),
         CommandKind::Cache(args) => match args.command {
             CacheCommand::Purge(serve_args) => commands::cache::purge(serve_args),
         },
@@ -113,5 +116,74 @@ mod tests {
         assert!(matches!(status.command, CommandKind::Auth(_)));
         let logout = Cli::try_parse_from(["nerve", "auth", "logout"]).expect("logout parse");
         assert!(matches!(logout.command, CommandKind::Auth(_)));
+    }
+
+    #[test]
+    fn cli_parses_daemon_http_transport() {
+        let explicit =
+            Cli::try_parse_from(["nerve", "daemon", "--http", "127.0.0.1:4173", "--root", "."])
+                .expect("daemon http parse");
+        assert!(matches!(explicit.command, CommandKind::Daemon(_)));
+        // `--http` with no value falls back to the default loopback address.
+        let defaulted = Cli::try_parse_from(["nerve", "daemon", "--http", "--root", "."])
+            .expect("daemon http default parse");
+        assert!(matches!(defaulted.command, CommandKind::Daemon(_)));
+    }
+
+    #[test]
+    fn cli_parses_agent_run_allow_all_flag() {
+        // The permission-bypass flag and its aliases are accepted.
+        for flag in ["--allow-all", "--yes", "-y"] {
+            let parsed = Cli::try_parse_from([
+                "nerve",
+                "agent",
+                "run",
+                "--provider",
+                "claude",
+                "--model",
+                "m",
+                flag,
+                "do it",
+            ])
+            .unwrap_or_else(|err| panic!("agent run {flag} parse: {err}"));
+            assert!(matches!(parsed.command, CommandKind::Agent(_)));
+        }
+        // ...and it is optional (gating defaults to on).
+        let parsed = Cli::try_parse_from([
+            "nerve",
+            "agent",
+            "run",
+            "--provider",
+            "claude",
+            "--model",
+            "m",
+            "do it",
+        ])
+        .expect("agent run without allow-all");
+        assert!(matches!(parsed.command, CommandKind::Agent(_)));
+    }
+
+    #[test]
+    fn cli_parses_agent_sessions_subcommands() {
+        let list =
+            Cli::try_parse_from(["nerve", "agent", "sessions", "list"]).expect("sessions list");
+        assert!(matches!(list.command, CommandKind::Agent(_)));
+        let list_root = Cli::try_parse_from(["nerve", "agent", "sessions", "list", "--root", "."])
+            .expect("sessions list --root");
+        assert!(matches!(list_root.command, CommandKind::Agent(_)));
+        let show =
+            Cli::try_parse_from(["nerve", "agent", "sessions", "show", "20260618T120000Z-000"])
+                .expect("sessions show");
+        assert!(matches!(show.command, CommandKind::Agent(_)));
+        let show_json = Cli::try_parse_from([
+            "nerve",
+            "agent",
+            "sessions",
+            "show",
+            "--json",
+            "20260618T120000Z-000",
+        ])
+        .expect("sessions show --json");
+        assert!(matches!(show_json.command, CommandKind::Agent(_)));
     }
 }

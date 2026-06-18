@@ -1,18 +1,16 @@
-use super::router::RuntimeDaemonRouter;
 use crate::rpc::{RpcMessage, jsonrpc_error, write_response};
-use crate::{tools, workspace};
+use crate::workspace;
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 
 pub(super) fn run_stdio(serve_args: workspace::ServeArgs) -> Result<()> {
-    let runtime = Arc::new(tools::runtime(workspace::registry(&serve_args)?));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let notification_stdout = Arc::clone(&stdout);
-    let router = RuntimeDaemonRouter::new(runtime, move |value| {
+    let router = super::setup::build_router(&serve_args, move |value| {
         let _ = write_locked(&notification_stdout, value);
-    });
+    })?;
     let stdin = io::stdin();
 
     for line in stdin.lock().lines() {

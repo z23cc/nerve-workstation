@@ -1,205 +1,107 @@
-use anyhow::{Context, Result, anyhow, bail};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::{RngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::{self, Write},
-    path::{Path, PathBuf},
-    thread::sleep,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+//! xAI credential access for the Grok tools, plus the `nerve auth` CLI.
+//!
+//! OAuth flows and credential storage are owned by [`nerve_agent::auth`] — the
+//! single source of truth for every provider. This module is a thin adapter:
+//! it resolves the stored xAI credential for the Grok tool runtime (whose tools
+//! build URLs against a `/v1` base) and hosts the xAI-only `nerve auth` CLI, an
+//! alias for `nerve agent login --provider xai` over the same store.
 
-const PROVIDER_ID: &str = "xai-oauth";
-const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
-const DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
-const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
-const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
-const REDIRECT_HOST: &str = "127.0.0.1";
-const REDIRECT_PORT: u16 = 56_121;
-const REDIRECT_PATH: &str = "/callback";
-const REFRESH_SKEW_SECONDS: u64 = 3_600;
+use anyhow::{Result, anyhow};
+use nerve_agent::auth::{self, AuthMode, ProviderId};
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct AuthStore {
-    #[serde(default)]
-    providers: BTreeMap<String, XaiProviderState>,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct XaiProviderState {
-    #[serde(default)]
-    tokens: Option<XaiTokens>,
-    #[serde(default)]
-    discovery: Option<XaiDiscovery>,
-    #[serde(default)]
-    redirect_uri: Option<String>,
-    #[serde(default)]
-    base_url: Option<String>,
-    #[serde(default)]
-    auth_mode: Option<String>,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    last_refresh_unix: Option<u64>,
-    #[serde(default)]
-    last_auth_error: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct XaiTokens {
-    access_token: String,
-    refresh_token: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    id_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expires_in: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    token_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct XaiDiscovery {
-    authorization_endpoint: String,
-    token_endpoint: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct RuntimeCredentials {
-    pub(crate) base_url: String,
-    pub(crate) access_token: String,
-    pub(crate) last_refresh_unix: Option<u64>,
-}
-
-mod callback;
 mod commands;
-mod http;
-mod oauth;
-mod store;
-mod util;
 
 pub(crate) use commands::AuthArgs;
 
-use oauth::refresh_tokens;
-use store::{acquire_auth_lock, auth_file_path, load_store, save_store, xai_state_and_tokens};
-use util::{access_token_is_expiring, now_unix, validate_inference_base_url};
+/// Credentials resolved for the xAI (Grok) tool runtime.
+pub(crate) struct RuntimeCredentials {
+    pub(crate) base_url: String,
+    pub(crate) access_token: String,
+}
+
+/// Refresh the token this many seconds before it expires.
+const REFRESH_SKEW_SECONDS: u64 = 3_600;
 
 pub(crate) fn run(args: AuthArgs) -> Result<()> {
     commands::run(args)
 }
 
+/// Resolve the stored xAI credential for tool calls, refreshing when the token
+/// is expiring (or always when `force_refresh`). Fails closed if not logged in.
 pub(crate) fn resolve_runtime_credentials(force_refresh: bool) -> Result<RuntimeCredentials> {
-    let path = auth_file_path()?;
-    let store = load_store(&path)?;
-    let (mut state, mut tokens) = xai_state_and_tokens(&store)?;
-    let needs_refresh =
-        force_refresh || access_token_is_expiring(&tokens.access_token, REFRESH_SKEW_SECONDS);
-    if needs_refresh {
-        let _lock = acquire_auth_lock(&path)?;
-        let mut store = load_store(&path)?;
-        (state, tokens) = xai_state_and_tokens(&store)?;
-        if force_refresh || access_token_is_expiring(&tokens.access_token, REFRESH_SKEW_SECONDS) {
-            tokens = refresh_tokens(&state, &tokens)?;
-            state.tokens = Some(tokens.clone());
-            state.last_refresh_unix = Some(now_unix());
-            state.last_auth_error = None;
-            store
-                .providers
-                .insert(PROVIDER_ID.to_string(), state.clone());
-            save_store(&path, &store)?;
-        }
-    }
-    let base_url = validate_inference_base_url(state.base_url.as_deref())?;
+    let credential = auth::load_credential(ProviderId::Xai)
+        .map_err(|err| anyhow!("failed to load xAI credentials: {err}"))?
+        .ok_or_else(|| anyhow!("not logged in to xAI; run `nerve agent login --provider xai`"))?;
+    let credential = if force_refresh || is_expiring(&credential) {
+        refresh(credential)?
+    } else {
+        credential
+    };
     Ok(RuntimeCredentials {
-        base_url,
-        access_token: tokens.access_token,
-        last_refresh_unix: state.last_refresh_unix,
+        base_url: inference_base_url(&credential.base_url),
+        access_token: credential.access_token,
     })
+}
+
+fn refresh(credential: auth::Credential) -> Result<auth::Credential> {
+    // API keys never refresh.
+    if matches!(credential.mode, AuthMode::ApiKey) {
+        return Ok(credential);
+    }
+    let refreshed = auth::strategy_for(ProviderId::Xai)
+        .refresh(&credential)
+        .map_err(|err| anyhow!("failed to refresh xAI token: {err}"))?;
+    auth::save_credential(&refreshed)
+        .map_err(|err| anyhow!("failed to persist refreshed xAI token: {err}"))?;
+    Ok(refreshed)
+}
+
+fn is_expiring(credential: &auth::Credential) -> bool {
+    match credential.expires_at_unix {
+        Some(exp) => now_unix().saturating_add(REFRESH_SKEW_SECONDS) >= exp,
+        None => false,
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The Grok tools build URLs as `{base}/responses`, `{base}/models`, etc., so
+/// the base must carry the `/v1` segment. The stored credential keeps the
+/// canonical host (`https://api.x.ai`); append `/v1` when it is absent.
+fn inference_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::callback::parse_callback_target;
-    use super::util::{jwt_expiry, pkce_challenge, validate_oauth_endpoint};
-    use super::*;
+    use super::inference_base_url;
 
     #[test]
-    fn pkce_challenge_matches_rfc_example() {
-        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    fn appends_v1_when_missing() {
         assert_eq!(
-            pkce_challenge(verifier),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+            inference_base_url("https://api.x.ai"),
+            "https://api.x.ai/v1"
         );
-    }
-
-    #[test]
-    fn query_parser_decodes_callback_values() {
-        let callback = parse_callback_target(
-            "/callback?code=a%2Fb%2Bc&state=hello+world&error_description=nope",
-            false,
-        )
-        .expect("callback");
-        assert_eq!(callback.code.as_deref(), Some("a/b+c"));
-        assert_eq!(callback.state.as_deref(), Some("hello world"));
-        assert_eq!(callback.error_description.as_deref(), Some("nope"));
-    }
-
-    #[test]
-    fn validates_xai_hosts_only() {
-        validate_oauth_endpoint("https://auth.x.ai/token", "token_endpoint").expect("xai host");
-        validate_oauth_endpoint("https://accounts.x.ai/oauth", "authorization_endpoint")
-            .expect("xai subdomain");
-        assert!(validate_oauth_endpoint("https://example.com/token", "token_endpoint").is_err());
-        assert!(
-            validate_oauth_endpoint("https://attacker.example?@api.x.ai/v1", "token_endpoint")
-                .is_err()
+        assert_eq!(
+            inference_base_url("https://api.x.ai/"),
+            "https://api.x.ai/v1"
         );
-        assert!(validate_inference_base_url(Some("https://api.x.ai/v1")).is_ok());
-        assert!(validate_inference_base_url(Some("https://staging.x.ai/v1")).is_ok());
-        assert!(validate_inference_base_url(Some("https://x.ai/v1")).is_err());
-        assert!(validate_inference_base_url(Some("http://api.x.ai/v1")).is_err());
-        assert!(validate_inference_base_url(Some("https://api.x.ai/v1?token=leak")).is_err());
-    }
-
-    #[test]
-    fn jwt_expiry_reads_exp_claim() {
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
-        let token = format!("{header}.{payload}.sig");
-        assert_eq!(jwt_expiry(&token), Some(4_102_444_800));
-    }
-
-    #[test]
-    fn keyring_accounts_are_scoped_by_auth_file_path() {
-        let first = store::keyring_account_for_path(Path::new("/tmp/a/auth.json"));
-        let second = store::keyring_account_for_path(Path::new("/tmp/b/auth.json"));
-        assert_ne!(first, second);
-        assert!(first.starts_with("xai-oauth:"));
-    }
-
-    #[test]
-    fn save_and_load_store_round_trips() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("auth.json");
-        let mut store = AuthStore::default();
-        store.providers.insert(
-            PROVIDER_ID.to_string(),
-            XaiProviderState {
-                tokens: Some(XaiTokens {
-                    access_token: "access".to_string(),
-                    refresh_token: "refresh".to_string(),
-                    id_token: None,
-                    expires_in: Some(3600),
-                    token_type: Some("Bearer".to_string()),
-                }),
-                base_url: Some(DEFAULT_BASE_URL.to_string()),
-                ..XaiProviderState::default()
-            },
+        assert_eq!(
+            inference_base_url("https://api.x.ai/v1"),
+            "https://api.x.ai/v1"
         );
-        save_store(&path, &store).expect("save");
-        let loaded = load_store(&path).expect("load");
-        assert!(loaded.providers.contains_key(PROVIDER_ID));
+        assert_eq!(
+            inference_base_url("https://api.x.ai/v1/"),
+            "https://api.x.ai/v1"
+        );
     }
 }

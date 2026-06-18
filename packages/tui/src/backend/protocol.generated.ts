@@ -29,6 +29,17 @@ export type RuntimeCommand =
       };
       kind: "tool.call";
       name: string;
+    }
+  | {
+      kind: "agent.run";
+      max_turns?: number | null;
+      model: string;
+      provider: string;
+      reasoning_effort?: string | null;
+      system_prompt?: string | null;
+      task: string;
+      temperature?: number | null;
+      tool_filter?: string[] | null;
     };
 /**
  * Runtime event emitted by human-facing adapters while executing jobs.
@@ -64,6 +75,42 @@ export type RuntimeEvent =
   | {
       job_id: string;
       type: "job_cancelled";
+    }
+  | {
+      event: AgentEventKind;
+      job_id: string;
+      type: "agent";
+    };
+/**
+ * Payload of a [`RuntimeEvent::Agent`] — one step of the agent loop. Defined as transport-neutral data; the host maps its own agent events onto these.
+ */
+export type AgentEventKind =
+  | {
+      kind: "turn_started";
+      turn: number;
+    }
+  | {
+      kind: "message";
+      text: string;
+    }
+  | {
+      kind: "reasoning";
+      text: string;
+    }
+  | {
+      arguments: unknown;
+      kind: "tool_started";
+      tool: string;
+    }
+  | {
+      kind: "tool_finished";
+      ok: boolean;
+      output: string;
+      tool: string;
+    }
+  | {
+      kind: "interrupted";
+      reason: string;
     };
 /**
  * Status values used by daemon-owned runtime jobs.

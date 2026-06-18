@@ -1,5 +1,8 @@
 use crate::jobs::{JobError, JobManager};
+use crate::policy::Policy;
+use crate::providers::ProviderRegistry;
 use crate::rpc::{RpcMessage, jsonrpc_error, jsonrpc_result};
+use crate::session::SessionStore;
 use crate::tools;
 use anyhow::Result;
 use nerve_runtime::{
@@ -21,11 +24,20 @@ pub(super) struct RuntimeDaemonRouter {
 impl RuntimeDaemonRouter {
     pub(super) fn new(
         runtime: Arc<tools::NerveRuntime>,
+        registry: ProviderRegistry,
+        policy: Policy,
+        session_store: Option<SessionStore>,
         emit_notification: impl Fn(Value) + Send + Sync + 'static,
     ) -> Self {
-        let jobs = Arc::new(JobManager::new(runtime, move |event| {
-            emit_notification(runtime_event_notification(event));
-        }));
+        let jobs = Arc::new(JobManager::new(
+            runtime,
+            registry,
+            policy,
+            session_store,
+            move |event| {
+                emit_notification(runtime_event_notification(event));
+            },
+        ));
         Self { jobs }
     }
 

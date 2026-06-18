@@ -98,6 +98,9 @@ where
                 &json!({ "name": name, "arguments": arguments }),
                 cancel,
             ),
+            RuntimeCommand::AgentRun { .. } => Err(RuntimeError::adapter(
+                "agent.run is executed by the host job manager, not the core runtime",
+            )),
         }
     }
 }

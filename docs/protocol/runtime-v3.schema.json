@@ -1,5 +1,130 @@
 {
   "definitions": {
+    "AgentEventKind": {
+      "description": "Payload of a [`RuntimeEvent::Agent`] — one step of the agent loop. Defined as transport-neutral data; the host maps its own agent events onto these.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "turn_started"
+              ],
+              "type": "string"
+            },
+            "turn": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "message"
+              ],
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "reasoning"
+              ],
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "arguments": true,
+            "kind": {
+              "enum": [
+                "tool_started"
+              ],
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "kind",
+            "tool"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "tool_finished"
+              ],
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "output": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "ok",
+            "output",
+            "tool"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "interrupted"
+              ],
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RuntimeCapabilities": {
       "properties": {
         "events": {
@@ -73,6 +198,69 @@
           "required": [
             "kind",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Run the built-in agent loop as a job. This is protocol vocabulary only: the host job manager (the composition root) executes it; the core runtime dispatcher does not (it has no LLM/provider knowledge). Provider/model are plain data here and translated to domain types by the host.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "agent.run"
+              ],
+              "type": "string"
+            },
+            "max_turns": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "reasoning_effort": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "system_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task": {
+              "type": "string"
+            },
+            "temperature": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tool_filter": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "model",
+            "provider",
+            "task"
           ],
           "type": "object"
         }
@@ -222,6 +410,29 @@
             }
           },
           "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A structured step from the built-in agent loop, scoped to its job.",
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/AgentEventKind"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "agent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
             "job_id",
             "type"
           ],

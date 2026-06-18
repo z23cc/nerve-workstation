@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nerve Workstation</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #2a3140;
+    --text: #e6edf3;
+    --muted: #8b95a3;
+    --dim: #6b7280;
+    --accent: #4f9cf9;
+    --accent-press: #3b82e0;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --reason: #a78bfa;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 650;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+  header h1 .sub { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 12px; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 0 transparent; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.err { background: var(--err); }
+  .server-meta { margin-left: auto; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .server-meta b { color: var(--text); font-weight: 600; }
+
+  main { flex: 1 1 auto; display: flex; min-height: 0; }
+
+  /* ---- Sidebar: tool catalog ---- */
+  aside {
+    flex: 0 0 320px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .aside-head { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); }
+  .aside-head .title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
+  .aside-head .count { color: var(--accent); font-weight: 600; }
+  .aside-head input {
+    margin-top: 8px; width: 100%; padding: 7px 9px; font-size: 13px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+  }
+  .tools { overflow-y: auto; padding: 6px; min-height: 0; flex: 1 1 auto; }
+  .tool {
+    padding: 8px 10px; border-radius: 6px; cursor: default;
+    border: 1px solid transparent;
+  }
+  .tool:hover { background: var(--panel-2); border-color: var(--border); }
+  .tool .name { font-family: var(--mono); font-size: 12.5px; color: var(--text); word-break: break-all; }
+  .tool .desc { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.4; }
+  .badge {
+    display: inline-block; font-size: 10px; font-family: var(--mono);
+    padding: 1px 6px; border-radius: 999px; margin-right: 6px; vertical-align: middle;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .badge.mcp { color: var(--accent); border-color: #284a78; }
+  .badge.xai { color: var(--reason); border-color: #443c6e; }
+
+  /* ---- Content ---- */
+  section.content { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  .composer { flex: 0 0 auto; padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .row { display: flex; gap: 12px; margin-bottom: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field.grow { flex: 1 1 auto; }
+  .field label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+  input, textarea, select {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: var(--sans); font-size: 13.5px; padding: 8px 10px;
+  }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 64px; font-family: var(--mono); font-size: 13px; line-height: 1.45; }
+  .invalid { border-color: var(--err) !important; }
+
+  details.advanced { margin: 2px 0 10px; }
+  details.advanced > summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  details.advanced[open] > summary { color: var(--text); }
+  .adv-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+  .adv-grid .field.span2 { grid-column: span 2; }
+
+  .actions { display: flex; gap: 10px; align-items: center; }
+  button {
+    font-family: var(--sans); font-size: 13.5px; font-weight: 600; cursor: pointer;
+    border-radius: 6px; padding: 9px 18px; border: 1px solid transparent;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #06101f; }
+  button.primary:not(:disabled):hover { background: var(--accent-press); }
+  button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  button.ghost:not(:disabled):hover { background: var(--panel-2); }
+  .hint { color: var(--dim); font-size: 12px; margin-left: auto; font-family: var(--mono); }
+
+  /* ---- Stream ---- */
+  .stream { flex: 1 1 auto; overflow-y: auto; padding: 14px 18px; min-height: 0; }
+  .stream:empty::before {
+    content: "Run an agent task to stream turns, reasoning, and tool calls here.";
+    color: var(--dim); font-size: 13px;
+  }
+  .evt { margin-bottom: 10px; max-width: 1000px; }
+  .evt .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 4px; }
+  .evt .body { white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-size: 13.5px; }
+  .evt.msg .body { color: var(--text); }
+  .evt.reason { opacity: 0.92; }
+  .evt.reason .role { color: var(--reason); }
+  .evt.reason .body { color: var(--muted); font-style: italic; white-space: pre-wrap; }
+  .evt.turn {
+    font-family: var(--mono); font-size: 12px; color: var(--accent); font-weight: 600;
+    margin: 16px 0 8px; padding-top: 8px; border-top: 1px solid var(--border);
+  }
+  .evt.sys { font-family: var(--mono); font-size: 12px; color: var(--muted); display: flex; gap: 8px; }
+  .evt.sys .tag { color: var(--dim); }
+  .evt.sys.ok .txt { color: var(--ok); }
+  .evt.sys.warn .txt { color: var(--warn); }
+  .evt.sys.err .txt { color: var(--err); }
+  .evt.tool { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 9px 11px; }
+  .evt.tool .role { font-family: var(--mono); color: var(--text); text-transform: none; letter-spacing: 0; }
+  .evt.tool pre {
+    margin: 7px 0 0; font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .evt.tool .out { color: var(--muted); }
+  .evt.tool.err { border-color: #5b2b2b; }
+  .pill { font-size: 10px; font-family: var(--mono); padding: 1px 7px; border-radius: 999px; font-weight: 700; }
+  .pill.ok { background: rgba(63,185,80,0.16); color: var(--ok); }
+  .pill.err { background: rgba(248,81,73,0.16); color: var(--err); }
+
+  /* ---- Outcome ---- */
+  .outcome { flex: 0 0 auto; border-top: 1px solid var(--border); background: var(--panel-2); padding: 14px 18px; max-height: 40%; overflow-y: auto; }
+  .outcome.hidden { display: none; }
+  .outcome h3 { margin: 0 0 10px; font-size: 13px; }
+  .outcome .grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; max-width: 640px; }
+  .outcome .grid .k { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .outcome .grid .v { color: var(--text); font-size: 12.5px; font-family: var(--mono); word-break: break-word; }
+  .outcome h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); }
+  .outcome pre.final {
+    margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap;
+    word-break: break-word; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Nerve Workstation<span class="sub">runtime GUI</span></h1>
+    <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">connecting…</span></div>
+    <div id="serverMeta" class="server-meta"></div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="aside-head">
+        <div class="title">Tools <span id="toolCount" class="count">…</span></div>
+        <input id="toolFilter" type="text" placeholder="Filter tools…" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="tools" class="tools"></div>
+    </aside>
+
+    <section class="content">
+      <div class="composer">
+        <div class="row">
+          <div class="field grow">
+            <label for="provider">Provider</label>
+            <input id="provider" type="text" placeholder="anthropic" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field grow">
+            <label for="model">Model</label>
+            <input id="model" type="text" placeholder="claude-sonnet-4" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field grow">
+            <label for="task">Task</label>
+            <textarea id="task" placeholder="Describe the task for the agent…"></textarea>
+          </div>
+        </div>
+        <details class="advanced">
+          <summary>Advanced options</summary>
+          <div class="adv-grid">
+            <div class="field span2">
+              <label for="system">System prompt</label>
+              <input id="system" type="text" placeholder="(optional override)" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="maxTurns">Max turns</label>
+              <input id="maxTurns" type="number" min="1" step="1" placeholder="40" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="effort">Reasoning effort</label>
+              <input id="effort" type="text" placeholder="low | medium | high" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="temp">Temperature</label>
+              <input id="temp" type="number" min="0" max="2" step="0.1" placeholder="(default)" autocomplete="off">
+            </div>
+            <div class="field span2">
+              <label for="toolFilterIn">Tool filter (comma-separated)</label>
+              <input id="toolFilterIn" type="text" placeholder="read_file, file_search" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+        </details>
+        <div class="actions">
+          <button id="run" class="primary">Run</button>
+          <button id="cancel" class="ghost" disabled>Cancel</button>
+          <span id="jobHint" class="hint"></span>
+        </div>
+      </div>
+
+      <div id="stream" class="stream"></div>
+      <div id="outcome" class="outcome hidden"></div>
+    </section>
+  </main>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- tiny DOM helpers -------------------------------------------------
+  const $ = (sel) => document.querySelector(sel);
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  // ---- JSON-RPC over POST /rpc -----------------------------------------
+  let rpcId = 0;
+  async function rpc(method, params) {
+    const payload = { jsonrpc: "2.0", id: ++rpcId, method: method };
+    if (params !== undefined) payload.params = params;
+    const res = await fetch("/rpc", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const json = await res.json();
+    if (json && json.error) {
+      const m = json.error.message || ("rpc error " + json.error.code);
+      throw new Error(m);
+    }
+    return json ? json.result : undefined;
+  }
+
+  // ---- connection status ------------------------------------------------
+  function setStatus(state, text) {
+    $("#statusDot").className = "dot " + state;
+    $("#statusText").textContent = text;
+  }
+
+  // ---- state ------------------------------------------------------------
+  let currentJobId = null;
+  let running = false;
+  let curMsg = null;     // active assistant-text block being streamed into
+  let curReason = null;  // active reasoning block being streamed into
+
+  // ---- stream rendering -------------------------------------------------
+  function streamEl() { return $("#stream"); }
+  function autoscroll() {
+    const s = streamEl();
+    // Only stick to bottom if the user is already near it.
+    if (s.scrollHeight - s.scrollTop - s.clientHeight < 120) s.scrollTop = s.scrollHeight;
+  }
+  function clearStream() { streamEl().textContent = ""; curMsg = null; curReason = null; }
+
+  function sys(text, cls) {
+    const b = el("div", "evt sys " + (cls || ""));
+    b.append(el("span", "tag", "•"), el("span", "txt", text));
+    streamEl().append(b);
+    autoscroll();
+  }
+  function addTurn(n) {
+    streamEl().append(el("div", "evt turn", "turn " + n));
+    autoscroll();
+  }
+  function appendMessage(text) {
+    if (!curMsg) {
+      curMsg = el("div", "evt msg");
+      curMsg.append(el("div", "role", "assistant"), el("div", "body"));
+      streamEl().append(curMsg);
+    }
+    curMsg.querySelector(".body").textContent += text;
+    autoscroll();
+  }
+  function appendReasoning(text) {
+    if (!curReason) {
+      curReason = el("div", "evt reason");
+      curReason.append(el("div", "role", "reasoning"), el("div", "body"));
+      streamEl().append(curReason);
+    }
+    curReason.querySelector(".body").textContent += text;
+    autoscroll();
+  }
+  function pretty(v) {
+    if (v == null) return "";
+    if (typeof v === "string") return v;
+    try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); }
+  }
+  function addToolStart(tool, args) {
+    const b = el("div", "evt tool");
+    b.append(el("div", "role", "→ " + (tool || "tool")));
+    const pre = el("pre", "args");
+    pre.textContent = pretty(args);
+    b.append(pre);
+    streamEl().append(b);
+    autoscroll();
+  }
+  function addToolFinish(tool, ok, output) {
+    const b = el("div", "evt tool " + (ok ? "" : "err"));
+    const head = el("div", "role");
+    head.append(el("span", "pill " + (ok ? "ok" : "err"), ok ? "ok" : "error"));
+    head.append(document.createTextNode(" " + (tool || "tool")));
+    b.append(head);
+    const pre = el("pre", "out");
+    pre.textContent = output || "";
+    b.append(pre);
+    streamEl().append(b);
+    autoscroll();
+  }
+
+  // ---- event dispatch (SSE) --------------------------------------------
+  function handleAgent(a) {
+    switch (a.kind) {
+      case "turn_started": curMsg = null; curReason = null; addTurn(a.turn); break;
+      case "message": curReason = null; appendMessage(a.text || ""); break;
+      case "reasoning": curMsg = null; appendReasoning(a.text || ""); break;
+      case "tool_started": curMsg = null; curReason = null; addToolStart(a.tool, a.arguments); break;
+      case "tool_finished": curMsg = null; curReason = null; addToolFinish(a.tool, !!a.ok, a.output); break;
+      case "interrupted": curMsg = null; curReason = null; sys("interrupted: " + (a.reason || ""), "warn"); break;
+      default: break;
+    }
+  }
+
+  function handleEvent(ev) {
+    if (!ev || typeof ev !== "object") return;
+    // Lifecycle and agent events both carry job_id; filter to the active run.
+    if (currentJobId && ev.job_id && ev.job_id !== currentJobId) return;
+    switch (ev.type) {
+      case "job_started":
+        sys("job started · " + ev.command + (ev.tool_name ? " · " + ev.tool_name : ""));
+        break;
+      case "job_progress":
+        sys(ev.stage + ": " + ev.message, "");
+        break;
+      case "job_cancel_requested":
+        sys("cancellation requested", "warn");
+        break;
+      case "job_completed":
+        onTerminal("completed", null);
+        break;
+      case "job_failed":
+        onTerminal("failed", ev.error);
+        break;
+      case "job_cancelled":
+        onTerminal("cancelled", null);
+        break;
+      case "agent":
+        handleAgent(ev.event || {});
+        break;
+      default:
+        break;
+    }
+  }
+
+  function connectEvents() {
+    let es;
+    try {
+      es = new EventSource("/events");
+    } catch (e) {
+      setStatus("err", "events unavailable");
+      return;
+    }
+    es.onopen = () => setStatus("ok", "connected");
+    es.onerror = () => setStatus("warn", "reconnecting…");
+    es.onmessage = (e) => {
+      let note;
+      try { note = JSON.parse(e.data); } catch (err) { return; }
+      if (!note || note.method !== "runtime/event") return;
+      handleEvent(note.params || {});
+    };
+  }
+
+  // ---- terminal: fetch final job snapshot, render outcome ---------------
+  async function onTerminal(kind, error) {
+    if (error) sys("job failed · " + (error.kind || "error") + ": " + (error.message || ""), "err");
+    else sys("job " + kind, kind === "completed" ? "ok" : "warn");
+    setRunning(false);
+    if (!currentJobId) return;
+    try {
+      const r = await rpc("runtime/jobs/get", { job_id: currentJobId, include_result: true });
+      if (r && r.job) renderOutcome(r.job);
+    } catch (e) {
+      sys("could not fetch job result: " + e.message, "err");
+    }
+  }
+
+  function renderOutcome(job) {
+    const o = $("#outcome");
+    o.textContent = "";
+    o.classList.remove("hidden");
+    o.append(el("h3", null, "Outcome"));
+    const grid = el("div", "grid");
+    const add = (k, v) => { grid.append(el("div", "k", k), el("div", "v", v == null ? "—" : String(v))); };
+    add("status", job.status);
+    const r = job.result || {};
+    if (job.error) add("error", (job.error.kind || "error") + ": " + (job.error.message || ""));
+    if (r.reason != null) add("reason", r.reason);
+    if (r.turns != null) add("turns", r.turns);
+    if (r.usage) {
+      add("input tokens", r.usage.input_tokens);
+      add("output tokens", r.usage.output_tokens);
+    }
+    o.append(grid);
+    if (r.final_text) {
+      o.append(el("h4", null, "Final text"));
+      const pre = el("pre", "final");
+      pre.textContent = r.final_text;
+      o.append(pre);
+    }
+  }
+  function hideOutcome() { const o = $("#outcome"); o.classList.add("hidden"); o.textContent = ""; }
+
+  // ---- run / cancel -----------------------------------------------------
+  function setRunning(on) {
+    running = on;
+    $("#run").disabled = on;
+    $("#cancel").disabled = !on;
+    $("#run").textContent = on ? "Running…" : "Run";
+  }
+
+  function genJobId() {
+    const rand = Math.random().toString(36).slice(2, 8);
+    return "gui-" + Date.now().toString(36) + "-" + rand;
+  }
+
+  function markInvalid(node, bad) { node.classList.toggle("invalid", bad); }
+
+  async function run() {
+    if (running) return;
+    const provider = $("#provider").value.trim();
+    const model = $("#model").value.trim();
+    const task = $("#task").value.trim();
+    markInvalid($("#provider"), !provider);
+    markInvalid($("#model"), !model);
+    markInvalid($("#task"), !task);
+    if (!provider || !model || !task) {
+      sys("provider, model, and task are all required", "warn");
+      return;
+    }
+
+    const command = { kind: "agent.run", provider: provider, model: model, task: task };
+    const sysP = $("#system").value.trim();
+    if (sysP) command.system_prompt = sysP;
+    const mt = $("#maxTurns").value.trim();
+    if (mt) { const n = parseInt(mt, 10); if (!isNaN(n)) command.max_turns = n; }
+    const temp = $("#temp").value.trim();
+    if (temp) { const f = parseFloat(temp); if (!isNaN(f)) command.temperature = f; }
+    const effort = $("#effort").value.trim();
+    if (effort) command.reasoning_effort = effort;
+    const tf = $("#toolFilterIn").value.trim();
+    if (tf) {
+      const list = tf.split(",").map((s) => s.trim()).filter(Boolean);
+      if (list.length) command.tool_filter = list;
+    }
+
+    currentJobId = genJobId();
+    clearStream();
+    hideOutcome();
+    setRunning(true);
+    $("#jobHint").textContent = currentJobId;
+    sys("starting agent.run · " + provider + " / " + model);
+
+    try {
+      await rpc("runtime/jobs/start", { job_id: currentJobId, command: command });
+    } catch (e) {
+      sys("failed to start job: " + e.message, "err");
+      setRunning(false);
+    }
+  }
+
+  async function cancel() {
+    if (!currentJobId) return;
+    try {
+      await rpc("runtime/jobs/cancel", { job_id: currentJobId });
+      sys("cancel requested", "warn");
+    } catch (e) {
+      sys("cancel failed: " + e.message, "err");
+    }
+  }
+
+  // ---- info + tool catalog ----------------------------------------------
+  function renderInfo(info) {
+    if (!info) return;
+    const name = (info.serverInfo && info.serverInfo.name) || "nerve";
+    const version = (info.serverInfo && info.serverInfo.version) || "?";
+    const proto = info.protocolVersion || "?";
+    const meta = $("#serverMeta");
+    meta.textContent = "";
+    meta.append(el("b", null, name + " v" + version));
+    meta.append(document.createTextNode("  ·  protocol v" + proto));
+    // Prefill nothing, but surface command kinds as a placeholder hint.
+    const kinds = info.capabilities && info.capabilities.jobs && info.capabilities.jobs.commandKinds;
+    if (Array.isArray(kinds) && kinds.indexOf("agent.run") === -1) {
+      sys("warning: daemon does not advertise agent.run", "warn");
+    }
+  }
+
+  let allTools = [];
+  function nsBadge(name) {
+    if (name.indexOf("mcp__") === 0) return { cls: "mcp", text: "mcp" };
+    if (name.indexOf("xai_") === 0 || name.indexOf("xai__") === 0) return { cls: "xai", text: "xai" };
+    return null;
+  }
+  function renderTools(tools) {
+    allTools = Array.isArray(tools) ? tools : [];
+    $("#toolCount").textContent = "(" + allTools.length + ")";
+    paintTools("");
+  }
+  function paintTools(filter) {
+    const host = $("#tools");
+    host.textContent = "";
+    const f = filter.toLowerCase();
+    let shown = 0;
+    for (const t of allTools) {
+      const name = t.name || "";
+      const desc = t.description || "";
+      if (f && (name + " " + desc).toLowerCase().indexOf(f) === -1) continue;
+      shown++;
+      const item = el("div", "tool");
+      const nameEl = el("div", "name");
+      const badge = nsBadge(name);
+      if (badge) nameEl.append(el("span", "badge " + badge.cls, badge.text));
+      nameEl.append(document.createTextNode(name));
+      item.append(nameEl);
+      if (desc) {
+        const d = desc.length > 220 ? desc.slice(0, 217) + "…" : desc;
+        item.append(el("div", "desc", d));
+      }
+      item.title = desc;
+      host.append(item);
+    }
+    if (shown === 0) {
+      host.append(el("div", "tool", allTools.length ? "No tools match the filter." : "No tools reported."));
+    }
+  }
+
+  // ---- init -------------------------------------------------------------
+  async function init() {
+    connectEvents();
+    try {
+      const info = await rpc("runtime/info");
+      renderInfo(info);
+    } catch (e) {
+      setStatus("err", "rpc error");
+      sys("runtime/info failed: " + e.message, "err");
+    }
+    try {
+      const res = await rpc("runtime/tools/list");
+      renderTools(res && res.tools);
+    } catch (e) {
+      $("#toolCount").textContent = "(error)";
+      sys("runtime/tools/list failed: " + e.message, "err");
+    }
+  }
+
+  // ---- wire up ----------------------------------------------------------
+  $("#run").addEventListener("click", run);
+  $("#cancel").addEventListener("click", cancel);
+  $("#toolFilter").addEventListener("input", (e) => paintTools(e.target.value || ""));
+  // Cmd/Ctrl+Enter from the task box submits.
+  $("#task").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+  });
+
+  init();
+})();
+</script>
+</body>
+</html>

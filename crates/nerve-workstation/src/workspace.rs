@@ -16,6 +16,13 @@ pub(crate) struct ServeArgs {
     /// Maximum catalog entries per workspace.
     #[arg(long, default_value_t = 100_000)]
     pub(crate) max_entries: usize,
+    /// Path to a JSON file listing external MCP servers to expose as tools.
+    #[arg(long = "mcp-config")]
+    pub(crate) mcp_config: Option<PathBuf>,
+    /// Path to a JSON file defining additional model providers by config
+    /// (`{ providers: [{ name, wire, base_url, api_key_env }] }`).
+    #[arg(long = "provider-config")]
+    pub(crate) provider_config: Option<PathBuf>,
     /// Disable the built-in semantic_search index (on by default).
     #[cfg(feature = "semantic")]
     #[arg(long = "no-semantic")]
@@ -179,6 +186,8 @@ pub(crate) fn args_with(roots: Vec<PathBuf>, workspaces: Vec<WorkspaceArg>) -> S
         roots,
         workspaces,
         max_entries: 100_000,
+        mcp_config: None,
+        provider_config: None,
         #[cfg(feature = "semantic")]
         no_semantic: true,
         #[cfg(feature = "semantic")]

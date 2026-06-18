@@ -1,8 +1,12 @@
-use super::{DEFAULT_BASE_URL, PROVIDER_ID, XaiProviderState, resolve_runtime_credentials};
-use super::{oauth::run_loopback_login, store, util};
-use anyhow::Result;
+//! `nerve auth` — an xAI-only alias over [`nerve_agent::auth`].
+//!
+//! Kept for compatibility; `nerve agent login --provider xai` is the general
+//! entry point and shares the same credential store. Login/status/logout here
+//! operate solely on the xAI provider.
+
+use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
-use std::path::Path;
+use nerve_agent::auth::{self, AuthMode, LoginOptions, ProviderId};
 
 #[derive(Debug, Args)]
 pub(crate) struct AuthArgs {
@@ -14,192 +18,114 @@ pub(crate) struct AuthArgs {
 enum AuthCommand {
     /// Sign in to xAI Grok OAuth (SuperGrok / Premium+) with browser PKCE.
     Login(LoginArgs),
-    /// Show stored xAI OAuth status without printing secrets.
-    Status(StatusArgs),
-    /// Remove stored xAI OAuth credentials.
+    /// Show stored xAI credential status without printing secrets.
+    Status,
+    /// Remove stored xAI credentials.
     Logout(LogoutArgs),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(super) enum AuthProvider {
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AuthProvider {
     /// xAI Grok OAuth via browser PKCE.
     Xai,
 }
 
 #[derive(Debug, Args)]
-pub(super) struct LoginArgs {
-    /// Provider to login. Only `xai` is supported.
+struct LoginArgs {
+    /// Provider to login. Only `xai` is supported here.
     #[arg(value_enum)]
-    pub(super) provider: Option<AuthProvider>,
+    provider: Option<AuthProvider>,
     /// Start a new browser OAuth flow even if stored credentials exist.
     #[arg(long)]
-    pub(super) force: bool,
-    /// Print the authorization URL but do not try to open a browser.
+    force: bool,
+    /// Print the authorization URL but do not open a browser.
     #[arg(long = "no-browser")]
-    pub(super) no_browser: bool,
-    /// Skip the local listener and paste the callback URL/code manually.
+    no_browser: bool,
+    /// Skip the loopback listener and paste the callback URL manually.
     #[arg(long = "manual-paste")]
-    pub(super) manual_paste: bool,
+    manual_paste: bool,
     /// OAuth login timeout in seconds.
     #[arg(long = "timeout", default_value_t = 120)]
-    pub(super) timeout_seconds: u64,
-}
-
-#[derive(Debug, Args)]
-struct StatusArgs {
-    /// Refresh the token if it is expiring before printing status.
-    #[arg(long)]
-    refresh: bool,
+    timeout_seconds: u64,
 }
 
 #[derive(Debug, Args)]
 struct LogoutArgs {
-    /// Provider to logout. Only `xai` is supported.
+    /// Provider to logout. Only `xai` is supported here.
     #[arg(value_enum)]
     provider: Option<AuthProvider>,
 }
 
-pub(super) fn run(args: AuthArgs) -> Result<()> {
+pub(crate) fn run(args: AuthArgs) -> Result<()> {
     match args.command {
         AuthCommand::Login(login_args) => login(login_args),
-        AuthCommand::Status(status_args) => status(status_args),
+        AuthCommand::Status => status(),
         AuthCommand::Logout(logout_args) => logout(logout_args),
     }
 }
 
 fn login(args: LoginArgs) -> Result<()> {
-    ensure_provider(args.provider);
-    if !args.force && try_reuse_existing()? {
-        return Ok(());
-    }
-
-    println!("Signing in to xAI Grok OAuth (SuperGrok / Premium+)...");
-    println!("Auth state: {}", store::auth_file_path()?.display());
-    println!();
-
-    let credentials = run_loopback_login(&args)?;
-    let base_url = credentials.base_url.clone();
-    let state = XaiProviderState {
-        tokens: Some(credentials.tokens),
-        discovery: Some(credentials.discovery),
-        redirect_uri: Some(credentials.redirect_uri),
-        base_url: Some(base_url.clone()),
-        auth_mode: Some("oauth_pkce".to_string()),
-        source: Some("oauth-loopback".to_string()),
-        last_refresh_unix: Some(util::now_unix()),
-        last_auth_error: None,
-    };
-    store::save_xai_state(state)?;
-    println!();
-    println!("Login successful.");
-    println!("provider: {PROVIDER_ID}");
-    println!("base_url: {base_url}");
-    Ok(())
-}
-
-fn status(args: StatusArgs) -> Result<()> {
-    if args.refresh {
-        let credentials = resolve_runtime_credentials(true)?;
-        print_status_authenticated(
-            &store::auth_file_path()?,
-            &credentials.base_url,
-            &credentials.access_token,
-            credentials.last_refresh_unix,
+    ensure_xai(args.provider);
+    if !args.force
+        && let Some(credential) = auth::load_credential(ProviderId::Xai)
+            .map_err(|err| anyhow!("failed to read stored credentials: {err}"))?
+    {
+        println!(
+            "Existing xAI credentials found ({}). Use `nerve auth login xai --force` to sign in again.",
+            mode_label(credential.mode)
         );
         return Ok(());
     }
 
-    let path = store::auth_file_path()?;
-    let state = store::load_xai_state()?;
-    let Some(state) = state else {
-        println!("provider: {PROVIDER_ID}");
-        println!("auth: {}", path.display());
-        println!("status: not_logged_in");
-        return Ok(());
+    println!("Signing in to xAI Grok OAuth (SuperGrok / Premium+)...");
+    let opts = LoginOptions {
+        no_browser: args.no_browser,
+        manual_paste: args.manual_paste,
+        timeout: std::time::Duration::from_secs(args.timeout_seconds),
     };
-    let Some(tokens) = state.tokens else {
-        println!("provider: {PROVIDER_ID}");
-        println!("auth: {}", path.display());
-        println!("status: invalid");
-        return Ok(());
-    };
-    let base_url = state
-        .base_url
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    print_status_authenticated(
-        &path,
-        &base_url,
-        &tokens.access_token,
-        state.last_refresh_unix,
-    );
+    let credential = auth::strategy_for(ProviderId::Xai)
+        .login(&opts)
+        .map_err(|err| anyhow!("xAI login failed: {err}"))?;
+    auth::save_credential(&credential)
+        .map_err(|err| anyhow!("failed to store credential: {err}"))?;
+    println!("Login successful. base_url: {}", credential.base_url);
+    Ok(())
+}
+
+fn status() -> Result<()> {
+    match auth::load_credential(ProviderId::Xai)
+        .map_err(|err| anyhow!("failed to read credentials: {err}"))?
+    {
+        None => println!("provider: xai\nstatus: not_logged_in"),
+        Some(credential) => {
+            println!("provider: xai");
+            println!("status: authenticated ({})", mode_label(credential.mode));
+            println!("base_url: {}", credential.base_url);
+            match credential.expires_at_unix {
+                Some(exp) => println!("access_token: present (expires_unix: {exp})"),
+                None => println!("access_token: present"),
+            }
+        }
+    }
     Ok(())
 }
 
 fn logout(args: LogoutArgs) -> Result<()> {
-    ensure_provider(args.provider);
-    let path = store::auth_file_path()?;
-    let _lock = store::acquire_auth_lock(&path)?;
-    let mut store = store::load_store(&path)?;
-    if store.providers.remove(PROVIDER_ID).is_some() {
-        store::delete_xai_keyring_tokens(&path);
-        super::store::save_store(&path, &store)?;
-        println!("Removed xAI OAuth credentials from {}", path.display());
-    } else {
-        println!("No xAI OAuth credentials found at {}", path.display());
-    }
+    ensure_xai(args.provider);
+    auth::delete_credential(ProviderId::Xai)
+        .map_err(|err| anyhow!("failed to remove credentials: {err}"))?;
+    println!("Removed stored xAI credentials.");
     Ok(())
 }
 
-fn ensure_provider(provider: Option<AuthProvider>) {
+fn ensure_xai(provider: Option<AuthProvider>) {
+    // Only xAI is supported by this alias; `nerve agent` handles other providers.
     let _ = provider.unwrap_or(AuthProvider::Xai);
 }
 
-fn try_reuse_existing() -> Result<bool> {
-    let Some(state) = store::load_xai_state()? else {
-        return Ok(false);
-    };
-    let Some(tokens) = state.tokens else {
-        return Ok(false);
-    };
-    if util::access_token_is_expiring(&tokens.access_token, 60) {
-        match resolve_runtime_credentials(true) {
-            Ok(credentials) => {
-                println!("Existing xAI OAuth credentials refreshed.");
-                println!("provider: {PROVIDER_ID}");
-                println!("base_url: {}", credentials.base_url);
-                return Ok(true);
-            }
-            Err(err) => {
-                eprintln!("Stored xAI OAuth credentials could not be refreshed: {err}");
-                eprintln!("Starting a new login flow. Use --force to skip reuse checks.");
-                return Ok(false);
-            }
-        }
-    }
-    println!("Existing xAI OAuth credentials found.");
-    println!("Use `nerve auth login xai --force` to sign in again.");
-    Ok(true)
-}
-
-fn print_status_authenticated(
-    path: &Path,
-    base_url: &str,
-    access_token: &str,
-    last_refresh: Option<u64>,
-) {
-    println!("provider: {PROVIDER_ID}");
-    println!("auth: {}", path.display());
-    println!("status: authenticated");
-    println!("base_url: {base_url}");
-    match util::jwt_expiry(access_token) {
-        Some(exp) => println!(
-            "access_token: present (expires_unix: {exp}, {})",
-            util::expiry_label(exp)
-        ),
-        None => println!("access_token: present"),
-    }
-    println!("refresh_token: present");
-    if let Some(value) = last_refresh {
-        println!("last_refresh_unix: {value}");
+fn mode_label(mode: AuthMode) -> &'static str {
+    match mode {
+        AuthMode::Oauth => "oauth",
+        AuthMode::ApiKey => "api key",
     }
 }

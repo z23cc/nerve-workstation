@@ -1,6 +1,7 @@
 use crate::{RuntimeCommand, RuntimeJobError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Runtime event emitted by human-facing adapters while executing jobs.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
@@ -31,9 +32,50 @@ pub enum RuntimeEvent {
     JobCancelled {
         job_id: String,
     },
+    /// A structured step from the built-in agent loop, scoped to its job.
+    Agent {
+        job_id: String,
+        event: AgentEventKind,
+    },
+}
+
+/// Payload of a [`RuntimeEvent::Agent`] — one step of the agent loop. Defined as
+/// transport-neutral data; the host maps its own agent events onto these.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentEventKind {
+    TurnStarted {
+        turn: u64,
+    },
+    Message {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolStarted {
+        tool: String,
+        arguments: Value,
+    },
+    ToolFinished {
+        tool: String,
+        ok: bool,
+        output: String,
+    },
+    Interrupted {
+        reason: String,
+    },
 }
 
 impl RuntimeEvent {
+    #[must_use]
+    pub fn agent(job_id: impl Into<String>, event: AgentEventKind) -> Self {
+        Self::Agent {
+            job_id: job_id.into(),
+            event,
+        }
+    }
+
     #[must_use]
     pub fn job_started(job_id: impl Into<String>, command: &RuntimeCommand) -> Self {
         Self::JobStarted {

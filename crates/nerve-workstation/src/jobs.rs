@@ -4,13 +4,16 @@
 //! only the runtime daemon's local lifecycle mechanics: in-memory retention,
 //! thread spawning, event emission wiring, and cooperative cancellation tokens.
 
-use crate::tools;
+use crate::policy::{Policy, ToolGate};
+use crate::session::SessionStore;
+use crate::{agent, providers::ProviderRegistry, tools};
+use nerve_agent::AgentEvent;
 use nerve_core::CancelToken;
 use nerve_runtime::{
-    RuntimeCommand, RuntimeEvent, RuntimeJobError, RuntimeJobGetRequest, RuntimeJobListRequest,
-    RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
+    AgentEventKind, RuntimeCommand, RuntimeEvent, RuntimeJobError, RuntimeJobGetRequest,
+    RuntimeJobListRequest, RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +28,13 @@ type EventEmitter = dyn Fn(RuntimeEvent) + Send + Sync + 'static;
 
 pub(crate) struct JobManager {
     runtime: Arc<tools::NerveRuntime>,
+    registry: ProviderRegistry,
+    /// Authorization policy for agent tool calls, resolved once at daemon
+    /// startup. The daemon always pairs it with a deny-on-`Ask` approver.
+    policy: Policy,
+    /// Where `agent.run` transcripts are persisted (P5). `None` disables
+    /// persistence (e.g. when no sessions dir could be resolved).
+    session_store: Option<SessionStore>,
     jobs: Mutex<JobStore>,
     next_id: AtomicU64,
     emit: Arc<EventEmitter>,
@@ -84,10 +94,16 @@ impl JobManager {
     #[must_use]
     pub(crate) fn new(
         runtime: Arc<tools::NerveRuntime>,
+        registry: ProviderRegistry,
+        policy: Policy,
+        session_store: Option<SessionStore>,
         emit: impl Fn(RuntimeEvent) + Send + Sync + 'static,
     ) -> Self {
         Self {
             runtime,
+            registry,
+            policy,
+            session_store,
             jobs: Mutex::new(JobStore::default()),
             next_id: AtomicU64::new(1),
             emit: Arc::new(emit),
@@ -194,7 +210,11 @@ impl JobManager {
             None,
             None,
         ));
-        let outcome = self.runtime.handle_command_cancellable(command, &token);
+        let outcome = if matches!(command, RuntimeCommand::AgentRun { .. }) {
+            self.run_agent_command(&job_id, command, &token)
+        } else {
+            self.runtime.handle_command_cancellable(command, &token)
+        };
         let event = {
             let mut store = self.jobs.lock().expect("job store lock");
             let Some(record) = store.records.get_mut(&job_id) else {
@@ -206,6 +226,74 @@ impl JobManager {
             event
         };
         self.emit(event);
+    }
+
+    /// Execute an `agent.run` command: build the orchestrator (composition root
+    /// concern, hence here rather than in `nerve-runtime`) and stream its agent
+    /// events as `runtime/event` notifications. The job result is the run outcome.
+    fn run_agent_command(
+        &self,
+        job_id: &str,
+        command: RuntimeCommand,
+        token: &CancelToken,
+    ) -> Result<Value, nerve_runtime::RuntimeError> {
+        let RuntimeCommand::AgentRun {
+            provider,
+            model,
+            task,
+            system_prompt,
+            max_turns,
+            temperature,
+            reasoning_effort,
+            tool_filter,
+        } = command
+        else {
+            return Err(nerve_runtime::RuntimeError::adapter(
+                "expected agent.run command",
+            ));
+        };
+        let config = agent::AgentRunConfig {
+            provider,
+            model,
+            task,
+            system_prompt,
+            max_turns,
+            temperature,
+            reasoning_effort,
+            tool_filter,
+            api_key: None,
+        };
+        let emit = Arc::clone(&self.emit);
+        let job_id = job_id.to_string();
+        let mut sink = move |event: AgentEvent| {
+            if let Some(runtime_event) = map_agent_event(&job_id, event) {
+                emit(runtime_event);
+            }
+        };
+        // Daemon is non-interactive: deny on `Ask` (safe default). A real
+        // approval round-trip over the protocol is future Session-layer work.
+        let gate = ToolGate::deny(self.policy.clone());
+        match agent::run_agent(
+            Arc::clone(&self.runtime),
+            config,
+            &self.registry,
+            gate,
+            token,
+            &mut sink,
+            self.session_store.as_ref(),
+        ) {
+            Ok(outcome) => Ok(json!({
+                "reason": outcome.reason,
+                "turns": outcome.turns,
+                "final_text": outcome.final_text,
+                "usage": {
+                    "input_tokens": outcome.usage.input_tokens,
+                    "output_tokens": outcome.usage.output_tokens,
+                },
+            })),
+            Err(_) if token.is_cancelled() => Err(nerve_runtime::RuntimeError::cancelled()),
+            Err(err) => Err(nerve_runtime::RuntimeError::adapter(err.to_string())),
+        }
     }
 
     fn emit(&self, event: RuntimeEvent) {
@@ -309,6 +397,28 @@ fn validate_job_id(job_id: &str) -> Result<(), JobError> {
 
 fn is_valid_job_id_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+}
+
+fn map_agent_event(job_id: &str, event: AgentEvent) -> Option<RuntimeEvent> {
+    let kind = match event {
+        AgentEvent::TurnStarted(turn) => AgentEventKind::TurnStarted {
+            turn: u64::from(turn),
+        },
+        AgentEvent::AssistantText(text) => AgentEventKind::Message { text },
+        AgentEvent::Reasoning(text) => AgentEventKind::Reasoning { text },
+        AgentEvent::ToolStarted { name, args } => AgentEventKind::ToolStarted {
+            tool: name,
+            arguments: args,
+        },
+        AgentEvent::ToolFinished { name, ok, output } => AgentEventKind::ToolFinished {
+            tool: name,
+            ok,
+            output,
+        },
+        AgentEvent::Interrupted(reason) => AgentEventKind::Interrupted { reason },
+        AgentEvent::Done { .. } => return None,
+    };
+    Some(RuntimeEvent::agent(job_id.to_string(), kind))
 }
 
 fn now_ms() -> u64 {

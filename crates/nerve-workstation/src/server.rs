@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead};
 
 pub(crate) fn serve(args: workspace::ServeArgs) -> Result<()> {
-    let runtime = tools::runtime(workspace::registry(&args)?);
+    let runtime = crate::mcp::attach(tools::runtime(workspace::registry(&args)?), &args)?;
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut initialized = false;
