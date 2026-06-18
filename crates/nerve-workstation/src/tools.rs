@@ -1,4 +1,4 @@
-use crate::xai;
+use crate::{openai, xai};
 use nerve_core::WorkspaceRegistry;
 use nerve_runtime::{Runtime, RuntimeError, RuntimeToolAdapter};
 use serde_json::Value;
@@ -6,6 +6,7 @@ use serde_json::Value;
 pub(crate) type NerveRuntime = Runtime<WorkspaceRegistry>;
 
 struct XaiToolAdapter;
+struct OpenAiToolAdapter;
 
 impl RuntimeToolAdapter<WorkspaceRegistry> for XaiToolAdapter {
     fn tool_specs(&self) -> Vec<Value> {
@@ -22,8 +23,25 @@ impl RuntimeToolAdapter<WorkspaceRegistry> for XaiToolAdapter {
     }
 }
 
+impl RuntimeToolAdapter<WorkspaceRegistry> for OpenAiToolAdapter {
+    fn tool_specs(&self) -> Vec<Value> {
+        openai::tool_specs()
+    }
+
+    fn handle_tool_call(
+        &self,
+        registry: &WorkspaceRegistry,
+        params: &Value,
+    ) -> Result<Option<Value>, RuntimeError> {
+        openai::handle_tool_call(registry, params)
+            .map_err(|err| RuntimeError::adapter(err.to_string()))
+    }
+}
+
 pub(crate) fn runtime(registry: WorkspaceRegistry) -> NerveRuntime {
-    Runtime::new(registry).with_adapter(XaiToolAdapter)
+    Runtime::new(registry)
+        .with_adapter(XaiToolAdapter)
+        .with_adapter(OpenAiToolAdapter)
 }
 
 #[cfg(test)]
@@ -52,5 +70,7 @@ mod tests {
         assert!(names.contains(&"x_search"));
         assert!(names.contains(&"xai_responses"));
         assert!(names.contains(&"xai_x_search"));
+        assert!(names.contains(&"openai_image_generate"));
+        assert!(names.contains(&"openai_models"));
     }
 }

@@ -10,6 +10,7 @@ mod daemon;
 mod hooks;
 mod jobs;
 mod mcp;
+mod openai;
 mod policy;
 mod providers;
 mod rpc;

@@ -286,6 +286,9 @@ fn run_task(args: AgentRunArgs) -> Result<()> {
             if let Some(hint) = crate::xai::model_error_hint(&provider, &err.to_string()) {
                 return Err(anyhow!("{err}\n\n{hint}"));
             }
+            if let Some(hint) = crate::openai::model_error_hint(&provider, &err.to_string()) {
+                return Err(anyhow!("{err}\n\n{hint}"));
+            }
             return Err(err);
         }
     }
