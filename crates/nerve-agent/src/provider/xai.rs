@@ -131,7 +131,9 @@ fn build_body(req: &ChatRequest) -> Value {
     if let Some(max_tokens) = req.max_tokens {
         body.insert("max_tokens".to_string(), json!(max_tokens));
     }
-    if let Some(effort) = req.reasoning_effort.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(effort) = req.reasoning_effort.as_deref().filter(|s| !s.is_empty())
+        && supports_reasoning_effort(&req.model)
+    {
         body.insert(
             "reasoning_effort".to_string(),
             Value::String(effort.to_string()),
@@ -147,6 +149,21 @@ fn build_body(req: &ChatRequest) -> Value {
 /// so a temperature like `0.2` serializes as `0.2` rather than `0.200000003`.
 fn clean_f32(value: f32) -> f64 {
     value.to_string().parse().unwrap_or(value as f64)
+}
+
+/// xAI returns HTTP 400 ("does not support parameter reasoningEffort") when
+/// `reasoning_effort` is sent to a non-reasoning model, so only forward it for
+/// models that advertise reasoning. Conservative: when unsure, omit it (the
+/// effort is silently dropped) rather than risk a 400.
+fn supports_reasoning_effort(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    if model.contains("non-reasoning") {
+        return false;
+    }
+    model.contains("reasoning")
+        || model.contains("multi-agent")
+        || model.starts_with("grok-3-mini")
+        || model.starts_with("grok-4.3")
 }
 
 /// Translate the advertised tool specs into OpenAI `function` tool entries.
@@ -411,7 +428,7 @@ mod tests {
 
     fn sample_request() -> ChatRequest {
         ChatRequest {
-            model: "grok-4".to_string(),
+            model: "grok-4.3".to_string(),
             system: Some("be terse".to_string()),
             messages: vec![Message::user("hi")],
             tools: vec![ToolSpec {
@@ -458,7 +475,7 @@ mod tests {
     #[test]
     fn build_body_translates_request() {
         let body = build_body(&sample_request());
-        assert_eq!(body["model"], json!("grok-4"));
+        assert_eq!(body["model"], json!("grok-4.3"));
         assert_eq!(body["stream"], json!(true));
         assert_eq!(body["stream_options"], json!({ "include_usage": true }));
         assert_eq!(body["temperature"], json!(0.2));
@@ -475,6 +492,24 @@ mod tests {
         assert_eq!(tool["type"], json!("function"));
         assert_eq!(tool["function"]["name"], json!("echo"));
         assert_eq!(tool["function"]["parameters"], json!({ "type": "object" }));
+    }
+
+    #[test]
+    fn reasoning_effort_gated_by_model() {
+        assert!(supports_reasoning_effort("grok-4.20-0309-reasoning"));
+        assert!(supports_reasoning_effort("grok-4.3"));
+        assert!(supports_reasoning_effort("grok-4.20-multi-agent-0309"));
+        assert!(!supports_reasoning_effort("grok-4.20-0309-non-reasoning"));
+        assert!(!supports_reasoning_effort("grok-build-0.1"));
+        assert!(!supports_reasoning_effort("grok-composer-2.5-fast"));
+    }
+
+    #[test]
+    fn build_body_omits_reasoning_effort_for_non_reasoning_model() {
+        let mut req = sample_request();
+        req.model = "grok-4.20-0309-non-reasoning".to_string();
+        let body = build_body(&req);
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
