@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 use crate::config;
-use crate::DaemonState;
+use crate::{DaemonEndpointState, DaemonState};
 
 /// Budget for the daemon's HTTP listener to begin accepting connections.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -84,6 +84,11 @@ fn open_gui(app: &AppHandle, url: &str) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or("main window is missing")?;
+    app.state::<DaemonEndpointState>()
+        .0
+        .lock()
+        .map_err(|_| "daemon endpoint lock poisoned")?
+        .replace(url.to_string());
     let url = url
         .parse()
         .map_err(|err| format!("invalid daemon url `{url}`: {err}"))?;

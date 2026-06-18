@@ -8,6 +8,7 @@
 //! Tailscale. All intelligence stays in the engine and its existing HTTP
 //! transport; this crate only supervises or selects the GUI endpoint.
 
+mod auth;
 mod config;
 mod daemon;
 
@@ -20,6 +21,10 @@ use tauri::RunEvent;
 #[derive(Default)]
 struct DaemonState(Mutex<Option<Child>>);
 
+/// Managed state: the daemon HTTP endpoint currently loaded in the webview.
+#[derive(Default)]
+struct DaemonEndpointState(Mutex<Option<String>>);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Reap the daemon on Ctrl-C / kill (signals tao does not surface to RunEvent).
@@ -31,7 +36,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DaemonState::default())
+        .manage(DaemonEndpointState::default())
         .setup(|app| {
+            auth::install_menu(app)?;
             // Supervise on a background thread so `setup` returns immediately (the
             // splash paints while the daemon boots) and any blocking native folder
             // picker runs off the main thread, as its API requires.
