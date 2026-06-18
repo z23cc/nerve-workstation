@@ -18,7 +18,7 @@ pub mod runtime;
 mod tool_spec;
 
 pub use adapter::RuntimeToolAdapter;
-pub use command::{RUNTIME_COMMAND_NAMES, RuntimeCommand};
+pub use command::{RUNTIME_COMMAND_NAMES, RuntimeCommand, SessionApprovalDecision};
 pub use error::RuntimeError;
 pub use event::{AgentEventKind, RuntimeEvent};
 pub use job::{
@@ -220,6 +220,81 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect();
         assert!(names.contains(&"file_search"));
+    }
+
+    #[test]
+    fn session_commands_are_advertised() {
+        for command in [
+            "session.start",
+            "session.message",
+            "session.interrupt",
+            "session.respond",
+            "session.get",
+            "session.list",
+            "session.close",
+        ] {
+            assert!(RUNTIME_COMMAND_NAMES.contains(&command));
+        }
+    }
+
+    #[test]
+    fn session_commands_are_host_executed() {
+        let error = runtime()
+            .handle_command(RuntimeCommand::SessionList)
+            .expect_err("session commands should be intercepted by the host");
+        assert_eq!(error.kind(), "adapter");
+        assert!(
+            error
+                .to_string()
+                .contains("executed by the host session manager")
+        );
+    }
+
+    #[test]
+    fn session_command_serializes_protocol_shape() {
+        let command = RuntimeCommand::SessionRespond {
+            session_id: "session-1".to_string(),
+            request_id: "request-1".to_string(),
+            decision: SessionApprovalDecision::Allow,
+        };
+        let value = serde_json::to_value(command).expect("command json");
+        assert_eq!(value["kind"], "session.respond");
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["request_id"], "request-1");
+        assert_eq!(value["decision"], "allow");
+    }
+
+    #[test]
+    fn session_events_serialize_protocol_shapes() {
+        let lifecycle = RuntimeEvent::session_started("session-1");
+        let lifecycle_value = serde_json::to_value(lifecycle).expect("lifecycle event json");
+        assert_eq!(lifecycle_value["type"], "session_started");
+        assert_eq!(lifecycle_value["session_id"], "session-1");
+
+        let agent = RuntimeEvent::session_agent(
+            "session-1",
+            AgentEventKind::Message {
+                text: "hello".to_string(),
+            },
+        );
+        let agent_value = serde_json::to_value(agent).expect("session agent event json");
+        assert_eq!(agent_value["type"], "session_agent");
+        assert_eq!(agent_value["session_id"], "session-1");
+        assert_eq!(agent_value["event"]["kind"], "message");
+        assert_eq!(agent_value["event"]["text"], "hello");
+
+        let approval = RuntimeEvent::approval_requested(
+            "session-1",
+            "request-1",
+            "file_edit",
+            json!({ "path": "README.md" }),
+        );
+        let approval_value = serde_json::to_value(approval).expect("approval event json");
+        assert_eq!(approval_value["type"], "approval_requested");
+        assert_eq!(approval_value["session_id"], "session-1");
+        assert_eq!(approval_value["request_id"], "request-1");
+        assert_eq!(approval_value["tool"], "file_edit");
+        assert_eq!(approval_value["arguments"]["path"], "README.md");
     }
 
     #[test]

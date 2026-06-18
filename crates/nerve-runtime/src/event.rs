@@ -37,6 +37,34 @@ pub enum RuntimeEvent {
         job_id: String,
         event: AgentEventKind,
     },
+    /// A host-managed session has been created or resumed.
+    SessionStarted {
+        session_id: String,
+    },
+    /// A host-managed session has started processing a user turn.
+    TurnStarted {
+        session_id: String,
+    },
+    /// A host-managed session is ready for the next client action.
+    SessionIdle {
+        session_id: String,
+    },
+    /// A host-managed session has been closed.
+    SessionClosed {
+        session_id: String,
+    },
+    /// A structured agent-loop step scoped to an interactive session.
+    SessionAgent {
+        session_id: String,
+        event: AgentEventKind,
+    },
+    /// A session turn needs a client/human decision before continuing.
+    ApprovalRequested {
+        session_id: String,
+        request_id: String,
+        tool: String,
+        arguments: Value,
+    },
 }
 
 /// Payload of a [`RuntimeEvent::Agent`] — one step of the agent loop. Defined as
@@ -73,6 +101,57 @@ impl RuntimeEvent {
         Self::Agent {
             job_id: job_id.into(),
             event,
+        }
+    }
+
+    #[must_use]
+    pub fn session_agent(session_id: impl Into<String>, event: AgentEventKind) -> Self {
+        Self::SessionAgent {
+            session_id: session_id.into(),
+            event,
+        }
+    }
+
+    #[must_use]
+    pub fn session_started(session_id: impl Into<String>) -> Self {
+        Self::SessionStarted {
+            session_id: session_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn turn_started(session_id: impl Into<String>) -> Self {
+        Self::TurnStarted {
+            session_id: session_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn session_idle(session_id: impl Into<String>) -> Self {
+        Self::SessionIdle {
+            session_id: session_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn session_closed(session_id: impl Into<String>) -> Self {
+        Self::SessionClosed {
+            session_id: session_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn approval_requested(
+        session_id: impl Into<String>,
+        request_id: impl Into<String>,
+        tool: impl Into<String>,
+        arguments: Value,
+    ) -> Self {
+        Self::ApprovalRequested {
+            session_id: session_id.into(),
+            request_id: request_id.into(),
+            tool: tool.into(),
+            arguments,
         }
     }
 

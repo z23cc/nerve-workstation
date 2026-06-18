@@ -101,6 +101,15 @@ where
             RuntimeCommand::AgentRun { .. } => Err(RuntimeError::adapter(
                 "agent.run is executed by the host job manager, not the core runtime",
             )),
+            RuntimeCommand::SessionStart { .. }
+            | RuntimeCommand::SessionMessage { .. }
+            | RuntimeCommand::SessionInterrupt { .. }
+            | RuntimeCommand::SessionRespond { .. }
+            | RuntimeCommand::SessionGet { .. }
+            | RuntimeCommand::SessionList
+            | RuntimeCommand::SessionClose { .. } => Err(RuntimeError::adapter(
+                "session commands are executed by the host session manager, not the core runtime",
+            )),
         }
     }
 }

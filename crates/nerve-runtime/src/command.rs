@@ -4,7 +4,19 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Runtime command kinds accepted by the human-facing daemon job protocol.
-pub const RUNTIME_COMMAND_NAMES: &[&str] = &["ping", "tool.list", "tool.call", "agent.run"];
+pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
+    "ping",
+    "tool.list",
+    "tool.call",
+    "agent.run",
+    "session.start",
+    "session.message",
+    "session.interrupt",
+    "session.respond",
+    "session.get",
+    "session.list",
+    "session.close",
+];
 
 /// Transport-neutral command understood by human-facing runtime adapters.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
@@ -43,6 +55,58 @@ pub enum RuntimeCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_filter: Option<Vec<String>>,
     },
+    /// Start or resume a host-managed interactive agent session.
+    #[serde(rename = "session.start")]
+    SessionStart {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+        provider: String,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_turns: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temperature: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_filter: Option<Vec<String>>,
+    },
+    /// Send a user message to an existing host-managed session.
+    #[serde(rename = "session.message")]
+    SessionMessage { session_id: String, text: String },
+    /// Interrupt the current turn of an existing host-managed session.
+    #[serde(rename = "session.interrupt")]
+    SessionInterrupt { session_id: String },
+    /// Reply to a session approval request.
+    #[serde(rename = "session.respond")]
+    SessionRespond {
+        session_id: String,
+        request_id: String,
+        decision: SessionApprovalDecision,
+    },
+    /// Fetch one host-managed session.
+    #[serde(rename = "session.get")]
+    SessionGet { session_id: String },
+    /// List host-managed sessions.
+    #[serde(rename = "session.list")]
+    SessionList,
+    /// Close a host-managed session.
+    #[serde(rename = "session.close")]
+    SessionClose { session_id: String },
+}
+
+/// Decision supplied by a human/client for a session approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionApprovalDecision {
+    Allow,
+    Deny,
 }
 
 impl RuntimeCommand {
@@ -53,6 +117,13 @@ impl RuntimeCommand {
             Self::ToolList => "tool.list",
             Self::ToolCall { .. } => "tool.call",
             Self::AgentRun { .. } => "agent.run",
+            Self::SessionStart { .. } => "session.start",
+            Self::SessionMessage { .. } => "session.message",
+            Self::SessionInterrupt { .. } => "session.interrupt",
+            Self::SessionRespond { .. } => "session.respond",
+            Self::SessionGet { .. } => "session.get",
+            Self::SessionList => "session.list",
+            Self::SessionClose { .. } => "session.close",
         }
     }
 
@@ -60,7 +131,16 @@ impl RuntimeCommand {
     pub fn tool_name(&self) -> Option<&str> {
         match self {
             Self::ToolCall { name, .. } => Some(name.as_str()),
-            Self::Ping | Self::ToolList | Self::AgentRun { .. } => None,
+            Self::Ping
+            | Self::ToolList
+            | Self::AgentRun { .. }
+            | Self::SessionStart { .. }
+            | Self::SessionMessage { .. }
+            | Self::SessionInterrupt { .. }
+            | Self::SessionRespond { .. }
+            | Self::SessionGet { .. }
+            | Self::SessionList
+            | Self::SessionClose { .. } => None,
         }
     }
 }

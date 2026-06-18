@@ -263,6 +263,205 @@
             "task"
           ],
           "type": "object"
+        },
+        {
+          "description": "Start or resume a host-managed interactive agent session.",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "session.start"
+              ],
+              "type": "string"
+            },
+            "max_turns": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "reasoning_effort": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "system_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "temperature": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tool_filter": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "workspace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "model",
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Send a user message to an existing host-managed session.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "session.message"
+              ],
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Interrupt the current turn of an existing host-managed session.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "session.interrupt"
+              ],
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reply to a session approval request.",
+          "properties": {
+            "decision": {
+              "$ref": "#/definitions/SessionApprovalDecision"
+            },
+            "kind": {
+              "enum": [
+                "session.respond"
+              ],
+              "type": "string"
+            },
+            "request_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "kind",
+            "request_id",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Fetch one host-managed session.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "session.get"
+              ],
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "List host-managed sessions.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "session.list"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Close a host-managed session.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "session.close"
+              ],
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -434,6 +633,134 @@
           "required": [
             "event",
             "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session has been created or resumed.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session has started processing a user turn.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "turn_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session is ready for the next client action.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_idle"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session has been closed.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_closed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A structured agent-loop step scoped to an interactive session.",
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/AgentEventKind"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_agent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A session turn needs a client/human decision before continuing.",
+          "properties": {
+            "arguments": true,
+            "request_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "approval_requested"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "request_id",
+            "session_id",
+            "tool",
             "type"
           ],
           "type": "object"
@@ -760,6 +1087,14 @@
         "jsonrpc"
       ],
       "type": "object"
+    },
+    "SessionApprovalDecision": {
+      "description": "Decision supplied by a human/client for a session approval request.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
     }
   },
   "properties": {

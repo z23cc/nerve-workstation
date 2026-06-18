@@ -40,7 +40,50 @@ export type RuntimeCommand =
       task: string;
       temperature?: number | null;
       tool_filter?: string[] | null;
+    }
+  | {
+      agent?: string | null;
+      kind: "session.start";
+      max_turns?: number | null;
+      model: string;
+      provider: string;
+      reasoning_effort?: string | null;
+      resume?: string | null;
+      system_prompt?: string | null;
+      temperature?: number | null;
+      tool_filter?: string[] | null;
+      workspace?: string | null;
+    }
+  | {
+      kind: "session.message";
+      session_id: string;
+      text: string;
+    }
+  | {
+      kind: "session.interrupt";
+      session_id: string;
+    }
+  | {
+      decision: SessionApprovalDecision;
+      kind: "session.respond";
+      request_id: string;
+      session_id: string;
+    }
+  | {
+      kind: "session.get";
+      session_id: string;
+    }
+  | {
+      kind: "session.list";
+    }
+  | {
+      kind: "session.close";
+      session_id: string;
     };
+/**
+ * Decision supplied by a human/client for a session approval request.
+ */
+export type SessionApprovalDecision = "allow" | "deny";
 /**
  * Runtime event emitted by human-facing adapters while executing jobs.
  */
@@ -80,6 +123,34 @@ export type RuntimeEvent =
       event: AgentEventKind;
       job_id: string;
       type: "agent";
+    }
+  | {
+      session_id: string;
+      type: "session_started";
+    }
+  | {
+      session_id: string;
+      type: "turn_started";
+    }
+  | {
+      session_id: string;
+      type: "session_idle";
+    }
+  | {
+      session_id: string;
+      type: "session_closed";
+    }
+  | {
+      event: AgentEventKind;
+      session_id: string;
+      type: "session_agent";
+    }
+  | {
+      arguments: unknown;
+      request_id: string;
+      session_id: string;
+      tool: string;
+      type: "approval_requested";
     };
 /**
  * Payload of a [`RuntimeEvent::Agent`] — one step of the agent loop. Defined as transport-neutral data; the host maps its own agent events onto these.
