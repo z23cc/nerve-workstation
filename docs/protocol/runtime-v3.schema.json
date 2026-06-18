@@ -462,6 +462,94 @@
             "session_id"
           ],
           "type": "object"
+        },
+        {
+          "description": "Start a host-managed OAuth login and return an authorization URL.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "auth.start"
+              ],
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Complete a host-managed OAuth login with a code or pasted callback URL.",
+          "properties": {
+            "callback_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "auth.complete"
+              ],
+              "type": "string"
+            },
+            "login_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "login_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Return stored OAuth/API-key credential status without secrets.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "auth.status"
+              ],
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Remove stored credentials for a provider.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "auth.logout"
+              ],
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider"
+          ],
+          "type": "object"
         }
       ]
     },

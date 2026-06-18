@@ -238,6 +238,13 @@ mod tests {
     }
 
     #[test]
+    fn auth_commands_are_advertised() {
+        for command in ["auth.start", "auth.complete", "auth.status", "auth.logout"] {
+            assert!(RUNTIME_COMMAND_NAMES.contains(&command));
+        }
+    }
+
+    #[test]
     fn session_commands_are_host_executed() {
         let error = runtime()
             .handle_command(RuntimeCommand::SessionList)
@@ -247,6 +254,21 @@ mod tests {
             error
                 .to_string()
                 .contains("executed by the host session manager")
+        );
+    }
+
+    #[test]
+    fn auth_commands_are_host_executed() {
+        let error = runtime()
+            .handle_command(RuntimeCommand::AuthStatus {
+                provider: "openai".to_string(),
+            })
+            .expect_err("auth commands should be intercepted by the host");
+        assert_eq!(error.kind(), "adapter");
+        assert!(
+            error
+                .to_string()
+                .contains("executed by the host auth manager")
         );
     }
 
@@ -262,6 +284,20 @@ mod tests {
         assert_eq!(value["session_id"], "session-1");
         assert_eq!(value["request_id"], "request-1");
         assert_eq!(value["decision"], "allow");
+    }
+
+    #[test]
+    fn auth_command_serializes_protocol_shape() {
+        let command = RuntimeCommand::AuthComplete {
+            login_id: "login-1".to_string(),
+            code: Some("code-1".to_string()),
+            callback_url: None,
+        };
+        let value = serde_json::to_value(command).expect("command json");
+        assert_eq!(value["kind"], "auth.complete");
+        assert_eq!(value["login_id"], "login-1");
+        assert_eq!(value["code"], "code-1");
+        assert!(value.get("callback_url").is_none());
     }
 
     #[test]

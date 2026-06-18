@@ -188,7 +188,8 @@ fn builtin_credential(provider: ProviderId, api_key: Option<&str>) -> Result<Cre
     if let Some(credential) = auth::load_credential(provider)
         .map_err(|err| anyhow!("failed to load credential: {err}"))?
     {
-        return Ok(credential);
+        return auth::ensure_fresh(credential, false)
+            .map_err(|err| anyhow!("failed to refresh credential: {err}"));
     }
     if let Some(key) = builtin_env_key(provider) {
         return Ok(auth::from_api_key(provider, &key, None));

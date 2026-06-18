@@ -13,10 +13,15 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::oauth::{
-    self, Pkce, announce_and_open, optional_str, post_token_form, post_token_json, required_str,
+    self, Pkce, optional_str, post_token_form, post_token_form_cancel, post_token_json,
+    post_token_json_cancel, required_str,
 };
-use super::{AuthMode, AuthStrategy, Credential, LoginOptions, ProviderId};
+use super::{AuthMode, AuthStrategy, Credential, LoginOptions, LoginStart, ProviderId};
 use crate::error::{AgentError, AgentResult};
+
+#[path = "strategy_flow.rs"]
+mod strategy_flow;
+use strategy_flow::*;
 
 /// Client-side expiry skew (seconds): refresh a little before real expiry.
 const EXPIRY_SKEW_SECS: u64 = 5 * 60;
@@ -57,68 +62,6 @@ struct Loopback {
     path: &'static str,
     /// Allow falling back to an ephemeral port when `port` is busy.
     allow_fallback: bool,
-}
-
-/// The fruit of a completed authorization-code exchange step: the raw code,
-/// the redirect URI it was issued against, and the PKCE verifier to redeem it.
-struct CodeGrant {
-    code: String,
-    redirect_uri: String,
-    verifier: String,
-}
-
-/// Run the shared loopback/manual-paste dance and return the validated code,
-/// the redirect URI actually advertised, and the PKCE verifier.
-fn obtain_code(
-    loopback: &Loopback,
-    opts: &LoginOptions,
-    build_authorize_url: impl FnOnce(&str, &str, &Pkce) -> AgentResult<String>,
-) -> AgentResult<CodeGrant> {
-    let pkce = Pkce::generate();
-    let state = oauth::random_urlsafe(24);
-
-    let server = if opts.manual_paste {
-        None
-    } else {
-        Some(oauth::start_loopback_server(
-            loopback.host,
-            loopback.port,
-            loopback.path,
-            loopback.allow_fallback,
-        )?)
-    };
-    let redirect_uri = match &server {
-        Some(server) => server.redirect_uri.clone(),
-        None => format!(
-            "http://{}:{}{}",
-            loopback.host, loopback.port, loopback.path
-        ),
-    };
-
-    let authorize_url = build_authorize_url(&redirect_uri, &state, &pkce)?;
-    announce_and_open(&authorize_url, opts.no_browser || opts.manual_paste);
-
-    let callback = match &server {
-        Some(server) => {
-            println!();
-            println!("Waiting for callback on {redirect_uri}");
-            oauth::wait_for_callback(
-                server,
-                loopback.path,
-                opts.timeout,
-                &state,
-                &nerve_core::CancelToken::new(),
-            )?
-        }
-        None => oauth::prompt_manual_callback()?,
-    };
-    oauth::validate_callback(&callback, &state)?;
-    let code = oauth::require_code(&callback)?;
-    Ok(CodeGrant {
-        code,
-        redirect_uri,
-        verifier: pkce.verifier,
-    })
 }
 
 // ----------------------------------------------------------------------------
@@ -194,24 +137,42 @@ impl AuthStrategy for AnthropicAuth {
         ProviderId::Anthropic
     }
 
-    fn login(&self, opts: &LoginOptions) -> AgentResult<Credential> {
-        let grant = obtain_code(&Self::loopback(), opts, Self::authorize_url)?;
+    fn default_redirect_uri(&self) -> String {
+        default_redirect_uri(&Self::loopback())
+    }
+
+    fn start(&self, redirect_uri: &str) -> AgentResult<LoginStart> {
+        make_login_start(ProviderId::Anthropic, redirect_uri, Self::authorize_url)
+    }
+
+    fn complete(
+        &self,
+        start: &LoginStart,
+        callback: &oauth::OAuthCallback,
+        cancel: &nerve_core::CancelToken,
+    ) -> AgentResult<Credential> {
+        ensure_login_provider(start, ProviderId::Anthropic)?;
+        let raw_code = validated_code(start, callback)?;
         // Anthropic's redirect can append `#state` to the code; split it off and
         // use the fragment as the exchange `state` when present.
-        let (code, state) = match grant.code.split_once('#') {
+        let (code, state) = match raw_code.split_once('#') {
             Some((code, state)) if !state.is_empty() => (code.to_string(), state.to_string()),
-            _ => (grant.code.clone(), String::new()),
+            _ => (raw_code, String::new()),
         };
         let body = json!({
             "grant_type": "authorization_code",
             "client_id": ANTHROPIC_CLIENT_ID,
             "code": code,
             "state": state,
-            "redirect_uri": grant.redirect_uri,
-            "code_verifier": grant.verifier,
+            "redirect_uri": start.redirect_uri,
+            "code_verifier": start.verifier,
         });
-        let value = post_token_json(ANTHROPIC_TOKEN_URL, &[], &body)?;
+        let value = post_token_json_cancel(ANTHROPIC_TOKEN_URL, &[], &body, cancel)?;
         Self::credential_from_token(&value)
+    }
+
+    fn login(&self, opts: &LoginOptions) -> AgentResult<Credential> {
+        run_interactive_login(self, &Self::loopback(), opts)
     }
 
     fn refresh(&self, cred: &Credential) -> AgentResult<Credential> {
@@ -327,7 +288,7 @@ impl OpenAiAuth {
             mode: AuthMode::Oauth,
             access_token,
             refresh_token,
-            expires_at_unix: Some(oauth::expires_at(expires_in, 0)),
+            expires_at_unix: Some(oauth::expires_at(expires_in, EXPIRY_SKEW_SECS)),
             account_id,
             base_url: ProviderId::OpenAi.default_base_url().to_string(),
         })
@@ -339,17 +300,35 @@ impl AuthStrategy for OpenAiAuth {
         ProviderId::OpenAi
     }
 
-    fn login(&self, opts: &LoginOptions) -> AgentResult<Credential> {
-        let grant = obtain_code(&Self::loopback(), opts, Self::authorize_url)?;
+    fn default_redirect_uri(&self) -> String {
+        default_redirect_uri(&Self::loopback())
+    }
+
+    fn start(&self, redirect_uri: &str) -> AgentResult<LoginStart> {
+        make_login_start(ProviderId::OpenAi, redirect_uri, Self::authorize_url)
+    }
+
+    fn complete(
+        &self,
+        start: &LoginStart,
+        callback: &oauth::OAuthCallback,
+        cancel: &nerve_core::CancelToken,
+    ) -> AgentResult<Credential> {
+        ensure_login_provider(start, ProviderId::OpenAi)?;
+        let code = validated_code(start, callback)?;
         let form = [
             ("grant_type", "authorization_code"),
             ("client_id", OPENAI_CLIENT_ID),
-            ("code", grant.code.as_str()),
-            ("code_verifier", grant.verifier.as_str()),
-            ("redirect_uri", grant.redirect_uri.as_str()),
+            ("code", code.as_str()),
+            ("code_verifier", start.verifier.as_str()),
+            ("redirect_uri", start.redirect_uri.as_str()),
         ];
-        let value = post_token_form(OPENAI_TOKEN_URL, &form)?;
+        let value = post_token_form_cancel(OPENAI_TOKEN_URL, &form, cancel)?;
         Self::credential_from_token(&value, true)
+    }
+
+    fn login(&self, opts: &LoginOptions) -> AgentResult<Credential> {
+        run_interactive_login(self, &Self::loopback(), opts)
     }
 
     fn refresh(&self, cred: &Credential) -> AgentResult<Credential> {
@@ -484,21 +463,43 @@ impl AuthStrategy for XaiAuth {
         ProviderId::Xai
     }
 
-    fn login(&self, opts: &LoginOptions) -> AgentResult<Credential> {
+    fn default_redirect_uri(&self) -> String {
+        default_redirect_uri(&Self::loopback())
+    }
+
+    fn start(&self, redirect_uri: &str) -> AgentResult<LoginStart> {
         let discovery = Self::discover()?;
         let authorize = discovery.authorization_endpoint.clone();
-        let grant = obtain_code(&Self::loopback(), opts, |redirect, state, pkce| {
-            Self::authorize_url(&authorize, redirect, state, pkce)
-        })?;
-        validate_xai_endpoint(&discovery.token_endpoint, "token_endpoint")?;
+        let mut start =
+            make_login_start(ProviderId::Xai, redirect_uri, |redirect, state, pkce| {
+                Self::authorize_url(&authorize, redirect, state, pkce)
+            })?;
+        start.provider_data = json!({ "token_endpoint": discovery.token_endpoint });
+        Ok(start)
+    }
+
+    fn complete(
+        &self,
+        start: &LoginStart,
+        callback: &oauth::OAuthCallback,
+        cancel: &nerve_core::CancelToken,
+    ) -> AgentResult<Credential> {
+        ensure_login_provider(start, ProviderId::Xai)?;
+        let token_endpoint = start
+            .provider_data
+            .get("token_endpoint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AgentError::Auth("xAI login state missing token_endpoint".into()))?;
+        validate_xai_endpoint(token_endpoint, "token_endpoint")?;
+        let code = validated_code(start, callback)?;
         let form = [
             ("grant_type", "authorization_code"),
             ("client_id", XAI_CLIENT_ID),
-            ("code", grant.code.as_str()),
-            ("redirect_uri", grant.redirect_uri.as_str()),
-            ("code_verifier", grant.verifier.as_str()),
+            ("code", code.as_str()),
+            ("redirect_uri", start.redirect_uri.as_str()),
+            ("code_verifier", start.verifier.as_str()),
         ];
-        let value = post_token_form(&discovery.token_endpoint, &form)?;
+        let value = post_token_form_cancel(token_endpoint, &form, cancel)?;
         let cred = Self::credential_from_token(&value)?;
         if cred.refresh_token.is_none() {
             return Err(AgentError::Auth(
@@ -506,6 +507,10 @@ impl AuthStrategy for XaiAuth {
             ));
         }
         Ok(cred)
+    }
+
+    fn login(&self, opts: &LoginOptions) -> AgentResult<Credential> {
+        run_interactive_login(self, &Self::loopback(), opts)
     }
 
     fn refresh(&self, cred: &Credential) -> AgentResult<Credential> {
@@ -557,109 +562,5 @@ fn validate_xai_endpoint(endpoint: &str, field: &str) -> AgentResult<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn from_api_key_uses_default_base_url_when_absent() {
-        let cred = from_api_key(ProviderId::Xai, "  sk-xai  ", None);
-        assert_eq!(cred.mode, AuthMode::ApiKey);
-        assert_eq!(cred.access_token, "sk-xai");
-        assert_eq!(cred.base_url, "https://api.x.ai");
-        assert!(cred.refresh_token.is_none());
-        assert!(cred.expires_at_unix.is_none());
-    }
-
-    #[test]
-    fn from_api_key_trims_trailing_slash_on_custom_base_url() {
-        let cred = from_api_key(ProviderId::OpenAi, "k", Some("https://proxy.example/v1/"));
-        assert_eq!(cred.base_url, "https://proxy.example/v1");
-    }
-
-    #[test]
-    fn strategy_for_returns_matching_provider() {
-        assert_eq!(
-            strategy_for(ProviderId::Anthropic).provider(),
-            ProviderId::Anthropic
-        );
-        assert_eq!(
-            strategy_for(ProviderId::OpenAi).provider(),
-            ProviderId::OpenAi
-        );
-        assert_eq!(strategy_for(ProviderId::Xai).provider(), ProviderId::Xai);
-    }
-
-    #[test]
-    fn anthropic_authorize_url_has_pkce_and_scopes() {
-        let pkce = Pkce::generate();
-        let url = AnthropicAuth::authorize_url("http://localhost:54545/callback", "st4te", &pkce)
-            .expect("url");
-        assert!(url.starts_with("https://claude.ai/oauth/authorize?"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("state=st4te"));
-        assert!(url.contains("code=true"));
-        assert!(url.contains(&urlencoding_fragment(&pkce.challenge)));
-    }
-
-    #[test]
-    fn openai_authorize_url_has_codex_flags() {
-        let pkce = Pkce::generate();
-        let url = OpenAiAuth::authorize_url("http://localhost:1455/auth/callback", "s", &pkce)
-            .expect("url");
-        assert!(url.contains("codex_cli_simplified_flow=true"));
-        assert!(url.contains("id_token_add_organizations=true"));
-        assert!(url.contains("originator=nerve"));
-    }
-
-    #[test]
-    fn openai_token_profile_reads_account_and_email() {
-        use base64::Engine as _;
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
-        let claims = serde_json::json!({
-            (OPENAI_JWT_AUTH_CLAIM): { "chatgpt_account_id": "acc_42" },
-            (OPENAI_JWT_PROFILE_CLAIM): { "email": "User@Example.COM" },
-        });
-        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let token = format!("{header}.{payload}.sig");
-        let (account, email) = OpenAiAuth::token_profile(&token);
-        assert_eq!(account.as_deref(), Some("acc_42"));
-        assert_eq!(email.as_deref(), Some("user@example.com"));
-    }
-
-    #[test]
-    fn anthropic_credential_extracts_account_uuid() {
-        let value = serde_json::json!({
-            "access_token": "at",
-            "refresh_token": "rt",
-            "expires_in": 3600,
-            "account": { "uuid": "u-1", "email_address": "a@b.c" },
-        });
-        let cred = AnthropicAuth::credential_from_token(&value).expect("cred");
-        assert_eq!(cred.account_id.as_deref(), Some("u-1"));
-        assert_eq!(cred.refresh_token.as_deref(), Some("rt"));
-        assert!(cred.expires_at_unix.is_some());
-    }
-
-    #[test]
-    fn validate_xai_endpoint_pins_origin() {
-        assert!(validate_xai_endpoint("https://auth.x.ai/token", "token_endpoint").is_ok());
-        assert!(
-            validate_xai_endpoint("https://accounts.x.ai/oauth", "authorization_endpoint").is_ok()
-        );
-        assert!(validate_xai_endpoint("https://example.com/token", "token_endpoint").is_err());
-        assert!(validate_xai_endpoint("http://auth.x.ai/token", "token_endpoint").is_err());
-        assert!(validate_xai_endpoint("https://auth.x.ai/token?x=1", "token_endpoint").is_err());
-        assert!(
-            validate_xai_endpoint("https://user:pw@auth.x.ai/token", "token_endpoint").is_err()
-        );
-    }
-
-    /// Percent-encode just the characters `url::Url` escapes in a query value,
-    /// so the assertion above can locate the challenge regardless of encoding.
-    fn urlencoding_fragment(raw: &str) -> String {
-        let mut url = url::Url::parse("https://x/").unwrap();
-        url.query_pairs_mut().append_pair("c", raw);
-        url.query().unwrap().trim_start_matches("c=").to_string()
-    }
-}
+#[path = "strategy_tests.rs"]
+mod strategy_tests;

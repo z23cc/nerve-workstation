@@ -250,6 +250,11 @@ fn auth_file_path() -> AgentResult<PathBuf> {
     if let Ok(path) = std::env::var("NERVE_AGENT_AUTH_FILE") {
         return Ok(PathBuf::from(path));
     }
+    #[cfg(test)]
+    {
+        Ok(std::env::temp_dir().join(format!("nerve-agent-test-auth-{}.json", std::process::id())))
+    }
+    #[cfg(not(test))]
     Ok(config_home()?.join("agent-auth.json"))
 }
 
@@ -272,8 +277,8 @@ pub fn config_home() -> AgentResult<PathBuf> {
     ))
 }
 
-/// An advisory lock over the auth file, released on drop.
-struct AuthLock {
+/// An advisory lock over auth-related critical sections, released on drop.
+pub(crate) struct AuthLock {
     file: fs::File,
 }
 
@@ -283,19 +288,30 @@ impl Drop for AuthLock {
     }
 }
 
+pub(crate) fn acquire_refresh_lock(provider: ProviderId) -> AgentResult<AuthLock> {
+    let auth_path = auth_file_path()?;
+    let lock_path =
+        auth_path.with_file_name(format!("agent-auth.{}.refresh.lock", provider.as_str()));
+    acquire_lock_file(&lock_path)
+}
+
 fn acquire_auth_lock(auth_path: &Path) -> AgentResult<AuthLock> {
-    if let Some(parent) = auth_path.parent() {
+    let lock_path = auth_path.with_file_name("agent-auth.json.lock");
+    acquire_lock_file(&lock_path)
+}
+
+fn acquire_lock_file(lock_path: &Path) -> AgentResult<AuthLock> {
+    if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             AgentError::Auth(format!("failed to create {}: {err}", parent.display()))
         })?;
     }
-    let lock_path = auth_path.with_file_name("agent-auth.json.lock");
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|err| {
             AgentError::Auth(format!("failed to open {}: {err}", lock_path.display()))
         })?;

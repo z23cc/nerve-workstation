@@ -16,6 +16,10 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "session.get",
     "session.list",
     "session.close",
+    "auth.start",
+    "auth.complete",
+    "auth.status",
+    "auth.logout",
 ];
 
 /// Transport-neutral command understood by human-facing runtime adapters.
@@ -99,6 +103,24 @@ pub enum RuntimeCommand {
     /// Close a host-managed session.
     #[serde(rename = "session.close")]
     SessionClose { session_id: String },
+    /// Start a host-managed OAuth login and return an authorization URL.
+    #[serde(rename = "auth.start")]
+    AuthStart { provider: String },
+    /// Complete a host-managed OAuth login with a code or pasted callback URL.
+    #[serde(rename = "auth.complete")]
+    AuthComplete {
+        login_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_url: Option<String>,
+    },
+    /// Return stored OAuth/API-key credential status without secrets.
+    #[serde(rename = "auth.status")]
+    AuthStatus { provider: String },
+    /// Remove stored credentials for a provider.
+    #[serde(rename = "auth.logout")]
+    AuthLogout { provider: String },
 }
 
 /// Decision supplied by a human/client for a session approval request.
@@ -124,6 +146,10 @@ impl RuntimeCommand {
             Self::SessionGet { .. } => "session.get",
             Self::SessionList => "session.list",
             Self::SessionClose { .. } => "session.close",
+            Self::AuthStart { .. } => "auth.start",
+            Self::AuthComplete { .. } => "auth.complete",
+            Self::AuthStatus { .. } => "auth.status",
+            Self::AuthLogout { .. } => "auth.logout",
         }
     }
 
@@ -140,7 +166,11 @@ impl RuntimeCommand {
             | Self::SessionRespond { .. }
             | Self::SessionGet { .. }
             | Self::SessionList
-            | Self::SessionClose { .. } => None,
+            | Self::SessionClose { .. }
+            | Self::AuthStart { .. }
+            | Self::AuthComplete { .. }
+            | Self::AuthStatus { .. }
+            | Self::AuthLogout { .. } => None,
         }
     }
 }

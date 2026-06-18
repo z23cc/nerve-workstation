@@ -79,6 +79,24 @@ export type RuntimeCommand =
   | {
       kind: "session.close";
       session_id: string;
+    }
+  | {
+      kind: "auth.start";
+      provider: string;
+    }
+  | {
+      callback_url?: string | null;
+      code?: string | null;
+      kind: "auth.complete";
+      login_id: string;
+    }
+  | {
+      kind: "auth.status";
+      provider: string;
+    }
+  | {
+      kind: "auth.logout";
+      provider: string;
     };
 /**
  * Decision supplied by a human/client for a session approval request.

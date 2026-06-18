@@ -22,7 +22,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::form_urlencoded;
 
 use crate::error::{AgentError, AgentResult};
-use crate::provider::http::{http_agent, post_json};
+use crate::provider::http::{http_agent, user_agent};
+use crate::provider::retry::{Attempt, RetryPolicy, is_retryable_status, with_retry};
 
 /// Default overall timeout for a single token-endpoint exchange.
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -98,8 +99,38 @@ pub fn post_token_json(
     headers: &[(String, String)],
     body: &Value,
 ) -> AgentResult<Value> {
+    let cancel = nerve_core::CancelToken::never();
+    post_token_json_cancel(url, headers, body, &cancel)
+}
+
+/// Cancel-aware form of [`post_token_json`] for interactive login flows.
+pub fn post_token_json_cancel(
+    url: &str,
+    headers: &[(String, String)],
+    body: &Value,
+    cancel: &nerve_core::CancelToken,
+) -> AgentResult<Value> {
     let agent = http_agent(TOKEN_TIMEOUT);
-    post_json(&agent, url, headers, body)
+    with_retry(&RetryPolicy::default(), cancel, || {
+        send_token_json_once(&agent, url, headers, body)
+    })
+}
+
+fn send_token_json_once(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(String, String)],
+    body: &Value,
+) -> Attempt<Value> {
+    let mut req = agent
+        .post(url)
+        .header("Accept", "application/json")
+        .header("User-Agent", user_agent());
+    for (name, value) in headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let response = req.send_json(body);
+    token_response_attempt(response)
 }
 
 /// POST an `application/x-www-form-urlencoded` body to a token endpoint and
@@ -108,22 +139,73 @@ pub fn post_token_json(
 /// Used by providers (OpenAI, xAI) whose OAuth token endpoint requires form
 /// encoding. Mirrors `http_post_form_json` in the workstation auth module.
 pub fn post_token_form(url: &str, form: &[(&str, &str)]) -> AgentResult<Value> {
+    let cancel = nerve_core::CancelToken::never();
+    post_token_form_cancel(url, form, &cancel)
+}
+
+/// Cancel-aware form of [`post_token_form`] for interactive login flows.
+pub fn post_token_form_cancel(
+    url: &str,
+    form: &[(&str, &str)],
+    cancel: &nerve_core::CancelToken,
+) -> AgentResult<Value> {
     let agent = http_agent(TOKEN_TIMEOUT);
-    let mut response = agent
+    with_retry(&RetryPolicy::default(), cancel, || {
+        send_token_form_once(&agent, url, form)
+    })
+}
+
+fn send_token_form_once(agent: &ureq::Agent, url: &str, form: &[(&str, &str)]) -> Attempt<Value> {
+    let response = agent
         .post(url)
         .header("Accept", "application/json")
-        .send_form(form.iter().copied())
-        .map_err(|err| AgentError::Http(err.to_string()))?;
+        .header("User-Agent", user_agent())
+        .send_form(form.iter().copied());
+    token_response_attempt(response)
+}
+
+fn token_response_attempt(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Attempt<Value> {
+    let mut response = match response {
+        Ok(response) => response,
+        Err(err) => {
+            return Attempt::Retry {
+                error: AgentError::Http(err.to_string()),
+                retry_after: None,
+            };
+        }
+    };
     let status = response.status().as_u16();
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|err| AgentError::Http(err.to_string()))?;
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let text = match response.body_mut().read_to_string() {
+        Ok(text) => text,
+        Err(err) => {
+            return Attempt::Retry {
+                error: AgentError::Http(err.to_string()),
+                retry_after,
+            };
+        }
+    };
     if !(200..300).contains(&status) {
-        return Err(AgentError::Http(format!("HTTP {status}: {text}")));
+        let error = AgentError::Http(format!("HTTP {status}: {text}"));
+        return if is_retryable_status(status) {
+            Attempt::Retry { error, retry_after }
+        } else {
+            Attempt::Fatal(error)
+        };
     }
-    serde_json::from_str(&text)
-        .map_err(|err| AgentError::Parse(format!("invalid JSON response: {err}: {text}")))
+    match serde_json::from_str(&text) {
+        Ok(value) => Attempt::Done(value),
+        Err(err) => Attempt::Fatal(AgentError::Parse(format!(
+            "invalid JSON response: {err}: {text}"
+        ))),
+    }
 }
 
 /// The redirect parameters captured from an OAuth callback.

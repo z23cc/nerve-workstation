@@ -200,9 +200,12 @@ pub(crate) fn run(args: AgentArgs) -> Result<()> {
 fn login(args: AgentLoginArgs) -> Result<()> {
     let provider = args.provider.provider_id();
     let strategy = auth::strategy_for(provider);
+    let cancel = CancelToken::new();
+    install_interrupt_handler(&cancel);
     let opts = LoginOptions {
         no_browser: args.no_browser,
         manual_paste: args.manual_paste,
+        cancel,
         ..LoginOptions::default()
     };
     let credential = strategy
@@ -429,7 +432,7 @@ fn truncate(text: &str, max: usize) -> String {
 /// can be interrupted cleanly. Unix-only: the handler only sets an atomic
 /// (async-signal-safe); a watcher thread propagates it to the token.
 #[cfg(unix)]
-fn install_interrupt_handler(cancel: &CancelToken) {
+pub(crate) fn install_interrupt_handler(cancel: &CancelToken) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -454,4 +457,4 @@ fn install_interrupt_handler(cancel: &CancelToken) {
 
 /// On non-Unix platforms SIGINT keeps its default (terminate) behavior.
 #[cfg(not(unix))]
-fn install_interrupt_handler(_cancel: &CancelToken) {}
+pub(crate) fn install_interrupt_handler(_cancel: &CancelToken) {}

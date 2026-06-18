@@ -78,10 +78,13 @@ fn login(args: LoginArgs) -> Result<()> {
     }
 
     println!("Signing in to xAI Grok OAuth (SuperGrok / Premium+)...");
+    let cancel = nerve_core::CancelToken::new();
+    crate::agent::install_interrupt_handler(&cancel);
     let opts = LoginOptions {
         no_browser: args.no_browser,
         manual_paste: args.manual_paste,
         timeout: std::time::Duration::from_secs(args.timeout_seconds),
+        cancel,
     };
     let credential = auth::strategy_for(ProviderId::Xai)
         .login(&opts)

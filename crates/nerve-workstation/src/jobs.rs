@@ -4,6 +4,7 @@
 //! only the runtime daemon's local lifecycle mechanics: in-memory retention,
 //! thread spawning, event emission wiring, and cooperative cancellation tokens.
 
+use crate::auth::AuthManager;
 use crate::policy::{Policy, ToolGate};
 use crate::session::SessionStore;
 use crate::session_manager::SessionManager;
@@ -38,6 +39,8 @@ pub(crate) struct JobManager {
     session_store: Option<SessionStore>,
     /// Host executor for the protocol `session.*` command family.
     sessions: SessionManager,
+    /// Host executor for the protocol `auth.*` command family.
+    auth: AuthManager,
     jobs: Mutex<JobStore>,
     next_id: AtomicU64,
     emit: Arc<EventEmitter>,
@@ -116,6 +119,7 @@ impl JobManager {
             policy,
             session_store,
             sessions,
+            auth: AuthManager::default(),
             jobs: Mutex::new(JobStore::default()),
             next_id: AtomicU64::new(1),
             emit,
@@ -226,6 +230,8 @@ impl JobManager {
             self.run_agent_command(&job_id, command, &token)
         } else if is_session_command(&command) {
             self.sessions.handle_command(command, &token)
+        } else if is_auth_command(&command) {
+            self.auth.handle_command(command, &token)
         } else {
             self.runtime.handle_command_cancellable(command, &token)
         };
@@ -424,6 +430,16 @@ fn is_session_command(command: &RuntimeCommand) -> bool {
             | RuntimeCommand::SessionGet { .. }
             | RuntimeCommand::SessionList
             | RuntimeCommand::SessionClose { .. }
+    )
+}
+
+fn is_auth_command(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::AuthStart { .. }
+            | RuntimeCommand::AuthComplete { .. }
+            | RuntimeCommand::AuthStatus { .. }
+            | RuntimeCommand::AuthLogout { .. }
     )
 }
 

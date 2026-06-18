@@ -110,6 +110,12 @@ where
             | RuntimeCommand::SessionClose { .. } => Err(RuntimeError::adapter(
                 "session commands are executed by the host session manager, not the core runtime",
             )),
+            RuntimeCommand::AuthStart { .. }
+            | RuntimeCommand::AuthComplete { .. }
+            | RuntimeCommand::AuthStatus { .. }
+            | RuntimeCommand::AuthLogout { .. } => Err(RuntimeError::adapter(
+                "auth commands are executed by the host auth manager, not the core runtime",
+            )),
         }
     }
 }
