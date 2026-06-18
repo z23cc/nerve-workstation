@@ -340,6 +340,12 @@ impl ToolGate {
         }
     }
 
+    /// Session gate over an already-resolved policy: `Ask` is delegated to the
+    /// runtime-protocol approval round-trip.
+    pub(crate) fn with_approver(policy: Policy, approver: Arc<dyn Approver>) -> Self {
+        Self { policy, approver }
+    }
+
     /// Wrap `inner` with this gate's policy and approver.
     pub(crate) fn wrap<T: ToolBox>(self, inner: T) -> PolicyToolBox<T> {
         PolicyToolBox::new(inner, self.policy, self.approver)

@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding agent operating inside the Nerve Workstation \
+pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding agent operating inside the Nerve Workstation \
 code-intelligence engine. You have deterministic, snapshot-backed tools for searching, reading, \
 navigating, and editing a codebase. Plan briefly, call tools to gather context before acting, make \
 minimal correct changes, and stop when the task is complete. Prefer reading exact lines over \
@@ -400,6 +400,7 @@ fn record_and_run(
         orchestrator.run(task, cancel, &mut recording_sink)
     }
     .map_err(|err| anyhow!("agent run failed: {err}"));
+    record.set_history(orchestrator.history().to_vec());
     record.finish(result.as_ref().ok());
     match store.write(&record) {
         Ok(path) => eprintln!("\u{2713} session saved: {}", path.display()),
@@ -491,12 +492,12 @@ fn install_interrupt_handler(_cancel: &CancelToken) {}
 /// Bridges nerve's tool [`Runtime`](NerveRuntime) to the agent's [`ToolBox`]
 /// seam: tool specs are read from the runtime and calls are dispatched through
 /// the same path the MCP/daemon adapters use.
-struct RuntimeToolBox {
+pub(crate) struct RuntimeToolBox {
     runtime: Arc<NerveRuntime>,
 }
 
 impl RuntimeToolBox {
-    fn new(runtime: Arc<NerveRuntime>) -> Self {
+    pub(crate) fn new(runtime: Arc<NerveRuntime>) -> Self {
         Self { runtime }
     }
 }

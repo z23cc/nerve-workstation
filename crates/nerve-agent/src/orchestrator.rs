@@ -151,6 +151,23 @@ impl<'a> Orchestrator<'a> {
         self
     }
 
+    /// Seed the conversation with prior messages before the next [`run`](Self::run).
+    ///
+    /// This is additive for host-managed sessions: a one-shot run still starts
+    /// from an empty history, while a session can resume by supplying the
+    /// transcript accumulated so far.
+    #[must_use]
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// Current conversation history, including all messages appended during a run.
+    #[must_use]
+    pub fn history(&self) -> &[Message] {
+        &self.history
+    }
+
     /// Run the agent loop against `task`, streaming events into `sink`.
     ///
     /// Wraps [`Orchestrator::run_loop`] with the lifecycle [`Hook`] seam:
@@ -205,8 +222,9 @@ impl<'a> Orchestrator<'a> {
         // consumes that channel). Seeding a `Role::System` message here too
         // would double-send the prompt on providers that also map history
         // system messages into the wire (OpenAI `developer` item, xAI `system`
-        // message); Anthropic drops them. Keep the seed to the user turn only.
-        self.history = vec![Message::user(task)];
+        // message); Anthropic drops them. Append only the new user turn so a
+        // host-managed session can seed prior history and continue it.
+        self.history.push(Message::user(task));
         let tools = self.filtered_tools();
 
         let mut usage = Usage::default();
@@ -690,6 +708,44 @@ mod tests {
         }
     }
 
+    /// A provider that records each request's message contents.
+    struct HistoryProvider {
+        requests: std::sync::Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl HistoryProvider {
+        fn new() -> Self {
+            Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<Vec<Message>> {
+            self.requests.lock().expect("requests lock").clone()
+        }
+    }
+
+    impl LlmProvider for HistoryProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::Anthropic
+        }
+
+        fn chat(
+            &self,
+            req: &ChatRequest,
+            _cancel: &CancelToken,
+            sink: &mut dyn FnMut(ChatDelta),
+        ) -> AgentResult<ChatResponse> {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(req.messages.clone());
+            let reply = response("ack", Vec::new(), FinishReason::Stop);
+            sink(ChatDelta::Text(reply.content.clone()));
+            Ok(reply)
+        }
+    }
+
     /// A hook that augments the system prompt and records the lifecycle it sees.
     struct RecordingHook {
         events: std::sync::Mutex<Vec<String>>,
@@ -720,6 +776,26 @@ mod tests {
         fn on_end(&self, outcome: &RunOutcome) {
             *self.ended.lock().expect("ended lock") = Some(outcome.reason.clone());
         }
+    }
+
+    #[test]
+    fn seeded_history_is_preserved_and_extended() {
+        let provider = HistoryProvider::new();
+        let toolbox = MockToolBox::new();
+        let seed = vec![Message::user("first"), Message::assistant("one")];
+        let mut orch = Orchestrator::new(&provider, &toolbox, def()).with_history(seed.clone());
+
+        orch.run("second", &CancelToken::never(), &mut |_| {})
+            .expect("run should complete");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].len(), 3);
+        assert_eq!(requests[0][0].content, "first");
+        assert_eq!(requests[0][1].content, "one");
+        assert_eq!(requests[0][2].content, "second");
+        assert_eq!(orch.history().len(), 4);
+        assert_eq!(orch.history()[3].content, "ack");
     }
 
     #[test]

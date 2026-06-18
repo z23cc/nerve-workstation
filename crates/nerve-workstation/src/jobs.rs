@@ -6,6 +6,7 @@
 
 use crate::policy::{Policy, ToolGate};
 use crate::session::SessionStore;
+use crate::session_manager::SessionManager;
 use crate::{agent, providers::ProviderRegistry, tools};
 use nerve_agent::AgentEvent;
 use nerve_core::CancelToken;
@@ -35,6 +36,8 @@ pub(crate) struct JobManager {
     /// Where `agent.run` transcripts are persisted (P5). `None` disables
     /// persistence (e.g. when no sessions dir could be resolved).
     session_store: Option<SessionStore>,
+    /// Host executor for the protocol `session.*` command family.
+    sessions: SessionManager,
     jobs: Mutex<JobStore>,
     next_id: AtomicU64,
     emit: Arc<EventEmitter>,
@@ -99,14 +102,23 @@ impl JobManager {
         session_store: Option<SessionStore>,
         emit: impl Fn(RuntimeEvent) + Send + Sync + 'static,
     ) -> Self {
+        let emit: Arc<EventEmitter> = Arc::new(emit);
+        let sessions = SessionManager::new(
+            Arc::clone(&runtime),
+            registry.clone(),
+            policy.clone(),
+            session_store.clone(),
+            Arc::clone(&emit),
+        );
         Self {
             runtime,
             registry,
             policy,
             session_store,
+            sessions,
             jobs: Mutex::new(JobStore::default()),
             next_id: AtomicU64::new(1),
-            emit: Arc::new(emit),
+            emit,
         }
     }
 
@@ -212,6 +224,8 @@ impl JobManager {
         ));
         let outcome = if matches!(command, RuntimeCommand::AgentRun { .. }) {
             self.run_agent_command(&job_id, command, &token)
+        } else if is_session_command(&command) {
+            self.sessions.handle_command(command, &token)
         } else {
             self.runtime.handle_command_cancellable(command, &token)
         };
@@ -397,6 +411,19 @@ fn validate_job_id(job_id: &str) -> Result<(), JobError> {
 
 fn is_valid_job_id_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+}
+
+fn is_session_command(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::SessionStart { .. }
+            | RuntimeCommand::SessionMessage { .. }
+            | RuntimeCommand::SessionInterrupt { .. }
+            | RuntimeCommand::SessionRespond { .. }
+            | RuntimeCommand::SessionGet { .. }
+            | RuntimeCommand::SessionList
+            | RuntimeCommand::SessionClose { .. }
+    )
 }
 
 fn map_agent_event(job_id: &str, event: AgentEvent) -> Option<RuntimeEvent> {

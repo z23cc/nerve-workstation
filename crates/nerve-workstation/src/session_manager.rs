@@ -1,0 +1,607 @@
+//! Workstation-owned Session Manager for protocol `session.*` commands.
+//!
+//! `nerve-runtime` defines session commands/events as transport-neutral data;
+//! this module is the daemon composition root that executes them with
+//! `nerve-agent`, policy, provider registry, persistence, and runtime event
+//! emission.
+
+use crate::capabilities::{Capabilities, ResolvedAgent};
+use crate::policy::{Approver, Policy, ToolGate};
+use crate::session::{SessionRecord, SessionStore};
+use crate::{agent, providers::ProviderRegistry, tools};
+use nerve_agent::{AgentDef, AgentEvent, Message, Orchestrator};
+use nerve_core::{CancelToken, WorkspaceResolver};
+use nerve_runtime::{
+    AgentEventKind, RuntimeCommand, RuntimeError, RuntimeEvent, SessionApprovalDecision,
+};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
+
+const APPROVAL_POLL: Duration = Duration::from_millis(100);
+
+type EventEmitter = dyn Fn(RuntimeEvent) + Send + Sync + 'static;
+
+pub(crate) struct SessionManager {
+    runtime: Arc<tools::NerveRuntime>,
+    registry: ProviderRegistry,
+    policy: Policy,
+    store: Option<SessionStore>,
+    sessions: Mutex<HashMap<String, LiveSession>>,
+    approvals: Arc<ApprovalHub>,
+    emit: Arc<EventEmitter>,
+}
+
+struct LiveSession {
+    id: String,
+    config: SessionConfig,
+    history: Vec<Message>,
+    record: SessionRecord,
+    status: SessionStatus,
+    current_cancel: Option<CancelToken>,
+}
+
+#[derive(Clone)]
+struct SessionConfig {
+    workspace: Option<String>,
+    provider: String,
+    model: String,
+    system_prompt: Option<String>,
+    agent: Option<String>,
+    max_turns: Option<u32>,
+    temperature: Option<f32>,
+    reasoning_effort: Option<String>,
+    tool_filter: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionStatus {
+    Idle,
+    Running,
+    Closed,
+}
+
+impl SessionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+impl SessionManager {
+    pub(crate) fn new(
+        runtime: Arc<tools::NerveRuntime>,
+        registry: ProviderRegistry,
+        policy: Policy,
+        store: Option<SessionStore>,
+        emit: Arc<EventEmitter>,
+    ) -> Self {
+        Self {
+            runtime,
+            registry,
+            policy,
+            store,
+            sessions: Mutex::new(HashMap::new()),
+            approvals: Arc::new(ApprovalHub::new(Arc::clone(&emit))),
+            emit,
+        }
+    }
+
+    pub(crate) fn handle_command(
+        &self,
+        command: RuntimeCommand,
+        token: &CancelToken,
+    ) -> Result<Value, RuntimeError> {
+        match command {
+            RuntimeCommand::SessionStart {
+                workspace,
+                provider,
+                model,
+                system_prompt,
+                agent,
+                resume,
+                max_turns,
+                temperature,
+                reasoning_effort,
+                tool_filter,
+            } => self.start(
+                SessionConfig {
+                    workspace,
+                    provider,
+                    model,
+                    system_prompt,
+                    agent,
+                    max_turns,
+                    temperature,
+                    reasoning_effort,
+                    tool_filter,
+                },
+                resume,
+            ),
+            RuntimeCommand::SessionMessage { session_id, text } => {
+                self.message(&session_id, &text, token)
+            }
+            RuntimeCommand::SessionInterrupt { session_id } => self.interrupt(&session_id),
+            RuntimeCommand::SessionRespond {
+                session_id,
+                request_id,
+                decision,
+            } => Ok(json!({
+                "responded": self.approvals.respond(&session_id, &request_id, decision)
+            })),
+            RuntimeCommand::SessionGet { session_id } => self.get(&session_id),
+            RuntimeCommand::SessionList => Ok(json!({ "sessions": self.list() })),
+            RuntimeCommand::SessionClose { session_id } => self.close(&session_id),
+            _ => Err(RuntimeError::adapter("expected session.* command")),
+        }
+    }
+
+    fn start(&self, config: SessionConfig, resume: Option<String>) -> Result<Value, RuntimeError> {
+        let (id, history, record) = match resume {
+            Some(id) => self.resume_record(&id)?,
+            None => {
+                let record = SessionRecord::begin(&config.provider, &config.model, "");
+                (record.id.clone(), Vec::new(), record)
+            }
+        };
+        let session = LiveSession {
+            id: id.clone(),
+            config,
+            history,
+            record,
+            status: SessionStatus::Idle,
+            current_cancel: None,
+        };
+        self.sessions
+            .lock()
+            .expect("session lock")
+            .insert(id.clone(), session);
+        self.emit(RuntimeEvent::session_started(id.clone()));
+        Ok(json!({ "session_id": id }))
+    }
+
+    fn resume_record(
+        &self,
+        id: &str,
+    ) -> Result<(String, Vec<Message>, SessionRecord), RuntimeError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| RuntimeError::adapter("session resume unavailable: no session store"))?;
+        let record = store.load(id).map_err(|err| {
+            RuntimeError::adapter(format!("failed to resume session {id}: {err}"))
+        })?;
+        let history = record.reconstructed_history();
+        Ok((record.id.clone(), history, record))
+    }
+
+    fn message(
+        &self,
+        session_id: &str,
+        text: &str,
+        token: &CancelToken,
+    ) -> Result<Value, RuntimeError> {
+        let (config, history) = self.begin_turn(session_id, text, token)?;
+        self.emit(RuntimeEvent::turn_started(session_id.to_string()));
+        let result = self.run_turn(session_id, &config, history, text, token);
+        self.finish_turn(session_id, result, token)
+    }
+
+    fn begin_turn(
+        &self,
+        session_id: &str,
+        text: &str,
+        token: &CancelToken,
+    ) -> Result<(SessionConfig, Vec<Message>), RuntimeError> {
+        let mut sessions = self.sessions.lock().expect("session lock");
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;
+        if session.status == SessionStatus::Running {
+            return Err(RuntimeError::adapter(format!(
+                "session {session_id} is already running"
+            )));
+        }
+        if session.record.task.is_empty() {
+            session.record.task = text.to_string();
+        }
+        session.status = SessionStatus::Running;
+        session.current_cancel = Some(token.clone());
+        Ok((session.config.clone(), session.history.clone()))
+    }
+
+    fn run_turn(
+        &self,
+        session_id: &str,
+        config: &SessionConfig,
+        history: Vec<Message>,
+        text: &str,
+        token: &CancelToken,
+    ) -> Result<TurnResult, RuntimeError> {
+        let root = self.root_for(config.workspace.as_deref());
+        let resolved = self.resolve_agent(config, root.as_deref())?;
+        let provider_name = config.provider.clone();
+        let provider = self
+            .registry
+            .resolve(&provider_name, None)
+            .map_err(|err| RuntimeError::adapter(err.to_string()))?;
+        let toolbox = ToolGate::with_approver(
+            self.policy.clone(),
+            Arc::new(ProtocolApprover::new(
+                session_id.to_string(),
+                Arc::clone(&self.approvals),
+                token.clone(),
+            )),
+        )
+        .wrap(agent::RuntimeToolBox::new(Arc::clone(&self.runtime)));
+        let def = agent_def(config, resolved);
+        let env_hook = crate::hooks::EnvironmentHook::new(crate::hooks::today_utc(), root);
+        let mut orchestrator = Orchestrator::new(&*provider, &toolbox, def)
+            .with_history(history)
+            .with_hooks(vec![&env_hook]);
+        let emit = Arc::clone(&self.emit);
+        let session = session_id.to_string();
+        let mut record_events = Vec::new();
+        let result = {
+            let mut sink = |event: AgentEvent| {
+                record_events.push(event.clone());
+                if let Some(runtime_event) = map_session_agent_event(&session, event) {
+                    emit(runtime_event);
+                }
+            };
+            orchestrator.run(text, token, &mut sink)
+        };
+        let history = orchestrator.history().to_vec();
+        match result {
+            Ok(outcome) => Ok(TurnResult {
+                history,
+                events: record_events,
+                outcome: Some(outcome),
+            }),
+            Err(_) if token.is_cancelled() => Err(RuntimeError::cancelled()),
+            Err(err) => Err(RuntimeError::adapter(err.to_string())),
+        }
+    }
+
+    fn root_for(&self, workspace: Option<&str>) -> Option<std::path::PathBuf> {
+        self.runtime
+            .resolver()
+            .resolve_workspace(workspace)
+            .ok()
+            .and_then(|workspace| workspace.roots().first().map(|root| root.path.clone()))
+    }
+
+    fn resolve_agent(
+        &self,
+        config: &SessionConfig,
+        root: Option<&std::path::Path>,
+    ) -> Result<ResolvedAgent, RuntimeError> {
+        match config.agent.as_deref() {
+            Some(name) => Capabilities::discover(root)
+                .resolve_agent(name)
+                .map_err(|err| RuntimeError::adapter(err.to_string())),
+            None => Ok(ResolvedAgent::default()),
+        }
+    }
+
+    fn finish_turn(
+        &self,
+        session_id: &str,
+        result: Result<TurnResult, RuntimeError>,
+        token: &CancelToken,
+    ) -> Result<Value, RuntimeError> {
+        let mut sessions = self.sessions.lock().expect("session lock");
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Err(RuntimeError::adapter(format!(
+                "unknown session: {session_id}"
+            )));
+        };
+        session.status = SessionStatus::Idle;
+        session.current_cancel = None;
+        if let Ok(turn) = &result {
+            for event in &turn.events {
+                session.record.push_event(event);
+            }
+            session.history = turn.history.clone();
+            session.record.set_history(turn.history.clone());
+            if let Some(outcome) = &turn.outcome {
+                session.record.finish(Some(outcome));
+            }
+            self.persist(&session.record);
+        }
+        drop(sessions);
+        self.emit(RuntimeEvent::session_idle(session_id.to_string()));
+        match result {
+            Ok(turn) => Ok(json!({
+                "session_id": session_id,
+                "reason": turn.outcome.as_ref().map(|outcome| outcome.reason.as_str()),
+                "turns": turn.outcome.as_ref().map(|outcome| outcome.turns),
+                "final_text": turn.outcome.as_ref().map(|outcome| outcome.final_text.as_str()),
+            })),
+            Err(_) if token.is_cancelled() => Err(RuntimeError::cancelled()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn persist(&self, record: &SessionRecord) {
+        if let Some(store) = &self.store
+            && let Err(err) = store.write(record)
+        {
+            eprintln!("⚠  failed to persist session {}: {err}", record.id);
+        }
+    }
+
+    fn interrupt(&self, session_id: &str) -> Result<Value, RuntimeError> {
+        let sessions = self.sessions.lock().expect("session lock");
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;
+        let interrupted = session.current_cancel.as_ref().is_some_and(|cancel| {
+            cancel.cancel();
+            true
+        });
+        Ok(json!({ "interrupted": interrupted }))
+    }
+
+    fn get(&self, session_id: &str) -> Result<Value, RuntimeError> {
+        let sessions = self.sessions.lock().expect("session lock");
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;
+        Ok(json!({ "session": session.snapshot() }))
+    }
+
+    fn list(&self) -> Vec<Value> {
+        let mut sessions: Vec<_> = self
+            .sessions
+            .lock()
+            .expect("session lock")
+            .values()
+            .map(LiveSession::snapshot)
+            .collect();
+        sessions.sort_by(|a, b| a["session_id"].as_str().cmp(&b["session_id"].as_str()));
+        sessions
+    }
+
+    fn close(&self, session_id: &str) -> Result<Value, RuntimeError> {
+        let removed = {
+            let mut sessions = self.sessions.lock().expect("session lock");
+            let Some(mut session) = sessions.remove(session_id) else {
+                return Err(RuntimeError::adapter(format!(
+                    "unknown session: {session_id}"
+                )));
+            };
+            if let Some(cancel) = session.current_cancel.take() {
+                cancel.cancel();
+            }
+            session.status = SessionStatus::Closed;
+            self.persist(&session.record);
+            true
+        };
+        self.emit(RuntimeEvent::session_closed(session_id.to_string()));
+        Ok(json!({ "closed": removed }))
+    }
+
+    fn emit(&self, event: RuntimeEvent) {
+        (self.emit)(event);
+    }
+}
+
+struct TurnResult {
+    history: Vec<Message>,
+    events: Vec<AgentEvent>,
+    outcome: Option<nerve_agent::RunOutcome>,
+}
+
+impl LiveSession {
+    fn snapshot(&self) -> Value {
+        json!({
+            "session_id": self.id,
+            "status": self.status.as_str(),
+            "provider": self.config.provider,
+            "model": self.config.model,
+            "agent": self.config.agent,
+            "history_len": self.history.len(),
+            "pending_approval": false,
+        })
+    }
+}
+
+struct ApprovalHub {
+    pending: Mutex<HashMap<ApprovalKey, mpsc::Sender<SessionApprovalDecision>>>,
+    next_id: AtomicU64,
+    emit: Arc<EventEmitter>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct ApprovalKey {
+    session_id: String,
+    request_id: String,
+}
+
+impl ApprovalHub {
+    fn new(emit: Arc<EventEmitter>) -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            emit,
+        }
+    }
+
+    fn request(
+        &self,
+        session_id: &str,
+        tool: &str,
+        arguments: &Value,
+        cancel: &CancelToken,
+    ) -> bool {
+        let request_id = format!("approval-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let (sender, receiver) = mpsc::channel();
+        let key = ApprovalKey {
+            session_id: session_id.to_string(),
+            request_id: request_id.clone(),
+        };
+        self.pending
+            .lock()
+            .expect("approval lock")
+            .insert(key, sender);
+        (self.emit)(RuntimeEvent::approval_requested(
+            session_id.to_string(),
+            request_id.clone(),
+            tool.to_string(),
+            arguments.clone(),
+        ));
+        let decision = loop {
+            if cancel.is_cancelled() {
+                break SessionApprovalDecision::Deny;
+            }
+            match receiver.recv_timeout(APPROVAL_POLL) {
+                Ok(decision) => break decision,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break SessionApprovalDecision::Deny,
+            }
+        };
+        self.pending
+            .lock()
+            .expect("approval lock")
+            .remove(&ApprovalKey {
+                session_id: session_id.to_string(),
+                request_id,
+            });
+        decision == SessionApprovalDecision::Allow
+    }
+
+    fn respond(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        decision: SessionApprovalDecision,
+    ) -> bool {
+        let key = ApprovalKey {
+            session_id: session_id.to_string(),
+            request_id: request_id.to_string(),
+        };
+        self.pending
+            .lock()
+            .expect("approval lock")
+            .remove(&key)
+            .is_some_and(|sender| sender.send(decision).is_ok())
+    }
+}
+
+struct ProtocolApprover {
+    session_id: String,
+    hub: Arc<ApprovalHub>,
+    cancel: CancelToken,
+}
+
+impl ProtocolApprover {
+    fn new(session_id: String, hub: Arc<ApprovalHub>, cancel: CancelToken) -> Self {
+        Self {
+            session_id,
+            hub,
+            cancel,
+        }
+    }
+}
+
+impl Approver for ProtocolApprover {
+    fn approve(&self, tool: &str, args: &Value) -> bool {
+        self.hub.request(&self.session_id, tool, args, &self.cancel)
+    }
+}
+
+fn agent_def(config: &SessionConfig, resolved: ResolvedAgent) -> AgentDef {
+    AgentDef {
+        system_prompt: config
+            .system_prompt
+            .clone()
+            .or(resolved.system_prompt)
+            .unwrap_or_else(|| agent::DEFAULT_SYSTEM_PROMPT.to_string()),
+        model: config.model.clone(),
+        max_turns: config.max_turns.or(resolved.max_turns).unwrap_or(40),
+        temperature: config.temperature.or(resolved.temperature),
+        reasoning_effort: config
+            .reasoning_effort
+            .clone()
+            .or(resolved.reasoning_effort),
+        tool_filter: config.tool_filter.clone().or(resolved.tool_filter),
+        ..AgentDef::default()
+    }
+}
+
+fn map_session_agent_event(session_id: &str, event: AgentEvent) -> Option<RuntimeEvent> {
+    let kind = match event {
+        AgentEvent::TurnStarted(turn) => AgentEventKind::TurnStarted {
+            turn: u64::from(turn),
+        },
+        AgentEvent::AssistantText(text) => AgentEventKind::Message { text },
+        AgentEvent::Reasoning(text) => AgentEventKind::Reasoning { text },
+        AgentEvent::ToolStarted { name, args } => AgentEventKind::ToolStarted {
+            tool: name,
+            arguments: args,
+        },
+        AgentEvent::ToolFinished { name, ok, output } => AgentEventKind::ToolFinished {
+            tool: name,
+            ok,
+            output,
+        },
+        AgentEvent::Interrupted(reason) => AgentEventKind::Interrupted { reason },
+        AgentEvent::Done { .. } => return None,
+    };
+    Some(RuntimeEvent::session_agent(session_id.to_string(), kind))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::thread;
+
+    #[test]
+    fn protocol_approver_allows_via_channel() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let hub = Arc::new(ApprovalHub::new(Arc::new(move |event| {
+            captured.lock().expect("events lock").push(event);
+        })));
+        let approver = ProtocolApprover::new("s1".into(), Arc::clone(&hub), CancelToken::never());
+        let handle = thread::spawn(move || approver.approve("edit", &json!({"path":"x"})));
+
+        let request_id = wait_for_request(&events);
+        assert!(hub.respond("s1", &request_id, SessionApprovalDecision::Allow));
+        assert!(handle.join().expect("approval thread"));
+    }
+
+    #[test]
+    fn protocol_approver_denies_via_channel() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let hub = Arc::new(ApprovalHub::new(Arc::new(move |event| {
+            captured.lock().expect("events lock").push(event);
+        })));
+        let approver = ProtocolApprover::new("s1".into(), Arc::clone(&hub), CancelToken::never());
+        let handle = thread::spawn(move || approver.approve("edit", &json!({"path":"x"})));
+
+        let request_id = wait_for_request(&events);
+        assert!(hub.respond("s1", &request_id, SessionApprovalDecision::Deny));
+        assert!(!handle.join().expect("approval thread"));
+    }
+
+    fn wait_for_request(events: &Mutex<Vec<RuntimeEvent>>) -> String {
+        for _ in 0..50 {
+            if let Some(RuntimeEvent::ApprovalRequested { request_id, .. }) =
+                events.lock().expect("events lock").first().cloned()
+            {
+                return request_id;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("approval request not emitted")
+    }
+}

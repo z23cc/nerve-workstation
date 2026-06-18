@@ -14,6 +14,7 @@ mod providers;
 mod rpc;
 mod server;
 mod session;
+mod session_manager;
 mod tools;
 mod workspace;
 mod xai;

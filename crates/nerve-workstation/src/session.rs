@@ -16,7 +16,7 @@
 //! Session layer (roadmap P0). Here we only persist and browse.
 
 use anyhow::{Context, Result, anyhow};
-use nerve_agent::{AgentEvent, RunOutcome};
+use nerve_agent::{AgentEvent, Message, RunOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -46,6 +46,11 @@ pub(crate) struct SessionRecord {
     pub(crate) model: String,
     /// The task prompt the agent was given.
     pub(crate) task: String,
+    /// Provider-neutral conversation history. Added for the interactive
+    /// Session layer; older one-shot transcripts omit it and are reconstructed
+    /// best-effort from `task` + `outcome` when resumed.
+    #[serde(default)]
+    pub(crate) history: Vec<Message>,
     /// The streamed transcript, in order.
     #[serde(default)]
     pub(crate) events: Vec<SessionEvent>,
@@ -111,9 +116,31 @@ impl SessionRecord {
             provider: provider.to_string(),
             model: model.to_string(),
             task: task.to_string(),
+            history: Vec::new(),
             events: Vec::new(),
             outcome: None,
         }
+    }
+
+    /// Replace the stored provider-neutral conversation history.
+    pub(crate) fn set_history(&mut self, history: Vec<Message>) {
+        self.history = history;
+    }
+
+    /// Conversation history for resume. New interactive-session records return
+    /// the exact provider-neutral messages; older one-shot records get a
+    /// best-effort reconstruction from the original task and final assistant text.
+    pub(crate) fn reconstructed_history(&self) -> Vec<Message> {
+        if !self.history.is_empty() {
+            return self.history.clone();
+        }
+        let mut history = vec![Message::user(self.task.clone())];
+        if let Some(outcome) = &self.outcome
+            && !outcome.final_text.is_empty()
+        {
+            history.push(Message::assistant(outcome.final_text.clone()));
+        }
+        history
     }
 
     /// Append one streamed event, coalescing consecutive assistant-text and
@@ -247,6 +274,7 @@ fn render_event(event: &SessionEvent) -> String {
 }
 
 /// A directory of session transcripts (`<dir>/<id>.json`).
+#[derive(Clone)]
 pub(crate) struct SessionStore {
     dir: PathBuf,
 }
@@ -477,6 +505,7 @@ mod tests {
             provider: "claude".into(),
             model: "m-1".into(),
             task: "do the thing".into(),
+            history: Vec::new(),
             events: vec![
                 SessionEvent::TurnStarted { turn: 1 },
                 SessionEvent::AssistantText {
@@ -514,6 +543,7 @@ mod tests {
         assert_eq!(loaded.provider, "claude");
         assert_eq!(loaded.model, "m-1");
         assert_eq!(loaded.task, record.task);
+        assert!(loaded.history.is_empty());
         assert_eq!(loaded.events.len(), 3);
         assert_eq!(loaded.outcome.unwrap().usage.output_tokens, 7);
     }
@@ -539,6 +569,7 @@ mod tests {
         let record = deserialize_record(&raw).unwrap();
         assert_eq!(record.schema_version, SCHEMA_VERSION);
         assert!(record.events.is_empty());
+        assert!(record.history.is_empty());
         assert!(record.outcome.is_none());
         assert!(record.finished_at_ms.is_none());
     }
@@ -556,6 +587,30 @@ mod tests {
         .to_string();
         let err = deserialize_record(&raw).unwrap_err();
         assert!(err.to_string().contains("newer than supported"), "{err}");
+    }
+
+    #[test]
+    fn history_round_trips_for_resume() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let mut record = sample("20260618T120000Z-000", 100);
+        record.set_history(vec![Message::user("hello"), Message::assistant("hi")]);
+        store.write(&record).unwrap();
+
+        let loaded = store.load(&record.id).unwrap();
+        let history = loaded.reconstructed_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "hello");
+        assert_eq!(history[1].content, "hi");
+    }
+
+    #[test]
+    fn older_transcript_reconstructs_minimal_history() {
+        let record = sample("20260618T120000Z-000", 100);
+        let history = record.reconstructed_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "do the thing");
+        assert_eq!(history[1].content, "done");
     }
 
     #[test]
