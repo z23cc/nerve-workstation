@@ -1,0 +1,26 @@
+[package]
+name = "nerve-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+url = { workspace = true }
+oauth2 = { workspace = true }
+tiny_http = { workspace = true }
+keyring = { workspace = true }
+directories = { workspace = true }
+fs4 = { workspace = true }
+regex = { workspace = true }
+nerve-core = { path = "../nerve-core" }

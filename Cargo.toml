@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/nerve-core", "crates/nerve-runtime", "crates/nerve-workstation"]
-exclude = ["fuzz"]
+members = ["crates/nerve-core", "crates/nerve-runtime", "crates/nerve-workstation", "crates/nerve-agent"]
+exclude = ["fuzz", "apps"]
 resolver = "3"
 
 [workspace.lints.rust]
@@ -45,6 +45,7 @@ tiny_http = "0.12"
 ureq = { version = "3", features = ["json", "multipart"] }
 url = "2"
 keyring = "4"
+libc = "0.2"
 tempfile = "3"
 insta = { version = "1", features = ["json", "redactions"] }
 criterion = { version = "0.5", default-features = false }
