@@ -9,3 +9,6 @@ crates/nerve-wasm/pkg/
 # semantic-search runtime artifacts (downloaded ONNX models, oracle exports)
 .fastembed_cache/
 prompt-exports/
+
+# agent session transcripts (P5 per-project persistence, written by `agent run`)
+.nerve/
