@@ -13,8 +13,8 @@ use crate::providers::ProviderRegistry;
 use crate::tools::NerveRuntime;
 use anyhow::{Result, anyhow};
 use nerve_agent::{
-    AgentDef, AgentError, AgentEvent, AgentResult, Message, Orchestrator, RunOutcome, ToolBox,
-    ToolSpec,
+    AgentDef, AgentError, AgentEvent, AgentResult, Hook, Message, Orchestrator, RunOutcome,
+    ToolBox, ToolSpec,
 };
 use nerve_core::{CancelToken, WorkspaceResolver};
 use serde::Deserialize;
@@ -81,11 +81,35 @@ impl SubAgentSpawner {
             parent,
         );
         let gated = self.gate.clone().wrap(raw);
-        let toolbox = CheckpointToolBox::new(gated, Arc::clone(&self.checkpoint));
+        let checkpoint_tb = CheckpointToolBox::new(gated, Arc::clone(&self.checkpoint));
+
+        // Long-term project memory, file-backed at `<root>/.nerve/memory.md`. Only wired
+        // when there is a project root — durable PROJECT facts need a project. Recall is the
+        // existing `on_start` seam; writes go through the `remember` tool. The `MemoryStore`
+        // port keeps a future SQLite backend a drop-in (see agent-long-term-memory.md).
+        let memory_store: Option<Arc<dyn crate::memory::MemoryStore>> = root.as_deref().map(|r| {
+            Arc::new(crate::memory::FileMemoryStore::new(
+                r.join(".nerve").join("memory.md"),
+            )) as Arc<dyn crate::memory::MemoryStore>
+        });
+        let toolbox: Box<dyn ToolBox> = match &memory_store {
+            Some(store) => Box::new(crate::memory::MemoryToolBox::new(
+                checkpoint_tb,
+                Arc::clone(store),
+            )),
+            None => Box::new(checkpoint_tb),
+        };
         let checkpoint_hook = CheckpointHook::new(Arc::clone(&self.checkpoint));
-        let mut orchestrator = Orchestrator::new(&*provider, &toolbox, def)
+        let memory_hook = memory_store
+            .as_ref()
+            .map(|store| crate::memory::MemoryHook::new(Arc::clone(store)));
+        let mut hooks: Vec<&dyn Hook> = vec![&env_hook, &checkpoint_hook];
+        if let Some(hook) = &memory_hook {
+            hooks.push(hook);
+        }
+        let mut orchestrator = Orchestrator::new(&*provider, &*toolbox, def)
             .with_history(history)
-            .with_hooks(vec![&env_hook, &checkpoint_hook]);
+            .with_hooks(hooks);
         run_collecting(&mut orchestrator, &config.task, cancel, sink)
     }
 }

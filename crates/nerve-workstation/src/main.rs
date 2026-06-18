@@ -11,6 +11,7 @@ mod daemon;
 mod hooks;
 mod jobs;
 mod mcp;
+mod memory;
 mod openai;
 mod policy;
 mod providers;

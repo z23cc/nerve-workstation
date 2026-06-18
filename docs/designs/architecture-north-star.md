@@ -67,6 +67,16 @@ the roadmap (P0) to be folded back in as a `RuntimeCommand`.
    capture programmatically; mobile/remote zero-paste is solved by a **token-sharing broker** (log in
    once on a trusted node; the refresh token never leaves it), with device-code flow as the secondary
    fallback — **not** by a loopback. "Paste the code" is only the degenerate manual fallback.
+8. **Agent memory enters through a `MemoryStore` port — file-first, promoted on evidence.**
+   Memory is non-deterministic agent state: it lives in `nerve-workstation`, never in
+   `nerve-core`. It is **three subsystems behind one port**, not one store — durable
+   distilled facts (small, always-injected → `FileMemoryStore` over `.nerve/memory.md`),
+   episodic / session history (large, queryable → P5 persistence; SQLite when needed), and
+   semantic recall (**reuse the `semantic` core feature**, never a second vector stack).
+   Write enters via the `ToolBox` seam (`remember`), recall via the `Hook::on_start` seam
+   (zero `nerve-agent` change). Promote a backend (file → SQLite) only on a *measured*
+   trigger — always-inject token budget exceeded, real write contention, or a structured-
+   query need — never speculatively. See `docs/designs/agent-long-term-memory.md`.
 
 ## 4. Crates & layers (current)
 
@@ -108,6 +118,7 @@ registry/config-driven extension points and to add the missing layers (marked �
 | Policy / Permission | — | ✗ none | ✗ **prerequisite for safe plugins** |
 | Hooks | — | orchestrator has lifecycle shape | ✗ interception points |
 | Persistence | — | jobs are in-memory | ✗ conversations / credentials / plugin config |
+| Agent memory (`MemoryStore`) | `nerve-workstation` | working-memory checkpoint shipped (`Hook::on_request`); long-term file-first proposed | promote file→SQLite on measured triggers; episodic = P5; recall reuses `semantic` (not a 2nd vector stack) |
 
 ## 6. Plugin architecture — layered by audience
 
