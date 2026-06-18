@@ -252,7 +252,7 @@ fn run_task(args: AgentRunArgs) -> Result<()> {
     }
     let config = AgentRunConfig {
         workspace: None,
-        provider,
+        provider: provider.clone(),
         model,
         task: args.task,
         system_prompt: resolved.system_prompt,
@@ -282,7 +282,12 @@ fn run_task(args: AgentRunArgs) -> Result<()> {
             outcome.reason, outcome.turns, outcome.usage.input_tokens, outcome.usage.output_tokens,
         ),
         Err(_) if cancel.is_cancelled() => println!("\n\u{26a0} interrupted"),
-        Err(err) => return Err(err),
+        Err(err) => {
+            if let Some(hint) = crate::xai::model_error_hint(&provider, &err.to_string()) {
+                return Err(anyhow!("{err}\n\n{hint}"));
+            }
+            return Err(err);
+        }
     }
     Ok(())
 }

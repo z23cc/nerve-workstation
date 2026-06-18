@@ -30,6 +30,25 @@ pub(crate) fn handle_tool_call(
     tools::handle_tool_call(registry, params)
 }
 
+/// If `provider` is xAI and `error` reads like a model-not-found/unsupported
+/// failure, return a hint listing the curated model ids (xAI's `/v1/models`
+/// under-reports, so we keep a curated list); otherwise `None`.
+pub(crate) fn model_error_hint(provider: &str, error: &str) -> Option<String> {
+    let provider = provider.to_ascii_lowercase();
+    if provider != "xai" && provider != "grok" {
+        return None;
+    }
+    let error = error.to_ascii_lowercase();
+    let model_error = error.contains("does not exist")
+        || error.contains("does not have access")
+        || (error.contains("model")
+            && (error.contains("not support") || error.contains("not found")));
+    model_error.then(|| {
+        let ids: Vec<&str> = catalog::CURATED_MODELS.iter().map(|(id, _)| *id).collect();
+        format!("known xAI models: {}", ids.join(", "))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +78,17 @@ mod tests {
         )
         .expect("dispatch");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn model_error_hint_targets_xai_model_errors() {
+        assert!(
+            model_error_hint("xai", "HTTP 404: model foo does not exist")
+                .expect("hint")
+                .contains("grok-composer-2.5-fast")
+        );
+        assert!(model_error_hint("grok", "model X is not supported").is_some());
+        assert!(model_error_hint("claude", "model foo does not exist").is_none());
+        assert!(model_error_hint("xai", "network timeout").is_none());
     }
 }
