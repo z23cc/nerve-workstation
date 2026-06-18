@@ -3,14 +3,15 @@ use nerve_core::WorkspaceRegistry;
 use serde_json::Value;
 
 const DEFAULT_CHAT_MODEL: &str = "grok-build-0.1";
-const DEFAULT_X_SEARCH_MODEL: &str = "grok-4.20-reasoning";
+const DEFAULT_X_SEARCH_MODEL: &str = "grok-4.20-0309-reasoning";
 const DEFAULT_WEB_SEARCH_MODEL: &str = "grok-build-0.1";
 const DEFAULT_IMAGE_MODEL: &str = "grok-imagine-image";
 const DEFAULT_VIDEO_MODEL: &str = "grok-imagine-video";
-const DEFAULT_IMAGE_TO_VIDEO_MODEL: &str = "grok-imagine-video-1.5-preview";
+const DEFAULT_IMAGE_TO_VIDEO_MODEL: &str = "grok-imagine-video-1.5";
 const DEFAULT_TTS_VOICE: &str = "eve";
 const DEFAULT_TTS_LANGUAGE: &str = "en";
 
+mod catalog;
 mod http;
 mod media;
 mod specs;
