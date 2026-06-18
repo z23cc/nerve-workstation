@@ -135,6 +135,22 @@ fn validate_xai_endpoint_pins_origin() {
     assert!(validate_xai_endpoint("https://user:pw@auth.x.ai/token", "token_endpoint").is_err());
 }
 
+#[test]
+fn anthropic_exchange_uses_flow_state_without_fragment() {
+    // Regression: the loopback callback's code carries no `#state`, so the real
+    // flow state must be sent — an empty state is rejected with HTTP 400.
+    let (code, state) = anthropic_code_state("auth-code-abc".to_string(), "REALSTATE");
+    assert_eq!(code, "auth-code-abc");
+    assert_eq!(state, "REALSTATE");
+}
+
+#[test]
+fn anthropic_exchange_prefers_nonempty_code_fragment() {
+    let (code, state) = anthropic_code_state("auth-code-abc#FRAG".to_string(), "REALSTATE");
+    assert_eq!(code, "auth-code-abc");
+    assert_eq!(state, "FRAG");
+}
+
 /// Percent-encode just the characters `url::Url` escapes in a query value,
 /// so the assertion above can locate the challenge regardless of encoding.
 fn urlencoding_fragment(raw: &str) -> String {

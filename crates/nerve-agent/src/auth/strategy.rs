@@ -153,12 +153,10 @@ impl AuthStrategy for AnthropicAuth {
     ) -> AgentResult<Credential> {
         ensure_login_provider(start, ProviderId::Anthropic)?;
         let raw_code = validated_code(start, callback)?;
-        // Anthropic's redirect can append `#state` to the code; split it off and
-        // use the fragment as the exchange `state` when present.
-        let (code, state) = match raw_code.split_once('#') {
-            Some((code, state)) if !state.is_empty() => (code.to_string(), state.to_string()),
-            _ => (raw_code, String::new()),
-        };
+        // Anthropic validates the echoed CSRF `state` on exchange, so the flow's
+        // real `state` must be sent; an empty string is rejected HTTP 400. A
+        // combined `code#state` callback's non-empty fragment overrides it.
+        let (code, state) = anthropic_code_state(raw_code, &start.state);
         let body = json!({
             "grant_type": "authorization_code",
             "client_id": ANTHROPIC_CLIENT_ID,
@@ -199,6 +197,19 @@ impl AuthStrategy for AnthropicAuth {
             refreshed.refresh_token = Some(refresh_token.to_string());
         }
         Ok(refreshed)
+    }
+}
+
+/// Resolve the `(code, state)` to send on the Anthropic token exchange.
+///
+/// Anthropic validates the echoed CSRF `state`, so the flow's real `state` must
+/// be sent — sending an empty string is rejected with HTTP 400 "Invalid request
+/// format". When a consent flow hands back a combined `code#state` string, a
+/// non-empty `#state` fragment takes precedence (matches the reference flow).
+fn anthropic_code_state(raw_code: String, default_state: &str) -> (String, String) {
+    match raw_code.split_once('#') {
+        Some((code, fragment)) if !fragment.is_empty() => (code.to_string(), fragment.to_string()),
+        _ => (raw_code, default_state.to_string()),
     }
 }
 
