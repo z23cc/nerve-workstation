@@ -267,6 +267,7 @@ impl JobManager {
             ));
         };
         let config = agent::AgentRunConfig {
+            workspace: None,
             provider,
             model,
             task,

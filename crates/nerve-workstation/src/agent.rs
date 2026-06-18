@@ -9,17 +9,14 @@
 use crate::capabilities::{Capabilities, ResolvedAgent};
 use crate::providers::ProviderRegistry;
 use crate::session::{SessionRecord, SessionStore};
+use crate::subagent::{AgentRunOutput, DEFAULT_MAX_DEPTH, SubAgentSpawner};
 use crate::tools::{self, NerveRuntime};
 use crate::workspace::{self, ServeArgs};
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 use nerve_agent::auth::{self, AuthMode, LoginOptions};
-use nerve_agent::{
-    AgentDef, AgentError, AgentEvent, AgentResult, Orchestrator, ProviderId, RunOutcome, ToolBox,
-    ToolSpec,
-};
-use nerve_core::{CancelToken, WorkspaceResolver};
-use serde_json::{Value, json};
+use nerve_agent::{AgentEvent, ProviderId, RunOutcome};
+use nerve_core::CancelToken;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,12 +25,6 @@ code-intelligence engine. You have deterministic, snapshot-backed tools for sear
 navigating, and editing a codebase. Plan briefly, call tools to gather context before acting, make \
 minimal correct changes, and stop when the task is complete. Prefer reading exact lines over \
 guessing, and keep prose concise.";
-
-/// Upper bound on a single tool result fed back to the model. nerve tools can
-/// return very large payloads (whole-file reads, repo maps); capping the first
-/// appearance keeps one call from dominating the context window. The
-/// orchestrator additionally elides older tool outputs as history grows.
-const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
 
 #[derive(Debug, Args)]
 pub(crate) struct AgentArgs {
@@ -257,6 +248,7 @@ fn run_task(args: AgentRunArgs) -> Result<()> {
         eprintln!("\u{26a0}  --allow-all: every tool call will run without a permission prompt");
     }
     let config = AgentRunConfig {
+        workspace: None,
         provider,
         model,
         task: args.task,
@@ -306,7 +298,10 @@ fn resolve_agent_def(args: &AgentRunArgs) -> Result<ResolvedAgent> {
 }
 
 /// Inputs to one agent run, shared by the CLI and the daemon `agent.run` job.
+#[derive(Clone)]
 pub(crate) struct AgentRunConfig {
+    /// Optional runtime workspace id/name used by sessions.
+    pub(crate) workspace: Option<String>,
     /// Provider name: a built-in alias or a `--provider-config` entry name.
     pub(crate) provider: String,
     pub(crate) model: String,
@@ -331,82 +326,73 @@ pub(crate) fn run_agent(
     sink: &mut dyn FnMut(AgentEvent),
     store: Option<&SessionStore>,
 ) -> Result<RunOutcome> {
-    // Gate the deterministic toolbox at the composition root: read-only tools
-    // run, mutating / `mcp__*` tools are denied or prompt for approval. The
-    // orchestrator stays unaware — it only ever sees `&dyn ToolBox`.
-    // Built-in lifecycle hook (composition root, P6): ground the agent with
-    // today's date and the working root. Resolve the root from the runtime
-    // before its Arc is moved into the toolbox; wall-clock access lives here in
-    // the binary, never in the deterministic kernel.
-    let root = runtime
-        .resolver()
-        .resolve_workspace(None)
-        .ok()
-        .and_then(|workspace| workspace.roots().first().map(|root| root.path.clone()));
-    let toolbox = gate.wrap(RuntimeToolBox::new(runtime));
-    let provider = registry.resolve(&config.provider, config.api_key.as_deref())?;
-    // Capture run metadata before `config`'s fields are moved into the def.
-    let provider_name = config.provider.clone();
-    let model_name = config.model.clone();
-    let def = AgentDef {
-        system_prompt: config
-            .system_prompt
-            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string()),
-        model: config.model,
-        max_turns: config.max_turns.unwrap_or(40),
-        temperature: config.temperature,
-        reasoning_effort: config.reasoning_effort,
-        tool_filter: config.tool_filter,
-        ..AgentDef::default()
+    let provider = config.provider.clone();
+    let model = config.model.clone();
+    let task = config.task.clone();
+    let spawner = SubAgentSpawner::new(runtime, registry.clone(), gate, DEFAULT_MAX_DEPTH);
+    let mut partial_events = Vec::new();
+    let result = {
+        let mut recording_sink = |event: AgentEvent| {
+            partial_events.push(event.clone());
+            sink(event);
+        };
+        spawner.run_at_depth(0, config, Vec::new(), cancel, &mut recording_sink)
     };
-    let env_hook = crate::hooks::EnvironmentHook::new(crate::hooks::today_utc(), root);
-    let mut orchestrator = Orchestrator::new(&*provider, &toolbox, def).with_hooks(vec![&env_hook]);
-    match store {
-        Some(store) => record_and_run(
-            &mut orchestrator,
-            &config.task,
-            cancel,
-            sink,
-            store,
-            &provider_name,
-            &model_name,
-        ),
-        None => orchestrator
-            .run(&config.task, cancel, sink)
-            .map_err(|err| anyhow!("agent run failed: {err}")),
+    match result {
+        Ok(output) => {
+            if let Some(store) = store {
+                persist_run_record(store, &output, &provider, &model, &task);
+            }
+            Ok(output.outcome)
+        }
+        Err(err) => {
+            if let Some(store) = store {
+                persist_partial_record(store, &partial_events, &provider, &model, &task);
+            }
+            Err(err)
+        }
     }
 }
 
-/// Drive the orchestrator while mirroring every [`AgentEvent`] into a
-/// [`SessionRecord`], then persist the transcript (P5, composition root). The
-/// orchestrator is untouched — we wrap the caller's `sink`. Persistence failures
-/// are logged, never propagated: a completed run must not be reported as failed
-/// because its transcript could not be written.
-fn record_and_run(
-    orchestrator: &mut Orchestrator<'_>,
-    task: &str,
-    cancel: &CancelToken,
-    sink: &mut dyn FnMut(AgentEvent),
+/// Persist a completed top-level run transcript (P5, composition root).
+/// Persistence failures are logged, never propagated: a completed run must not
+/// be reported as failed because its transcript could not be written.
+fn persist_run_record(
     store: &SessionStore,
+    output: &AgentRunOutput,
     provider: &str,
     model: &str,
-) -> Result<RunOutcome> {
+    task: &str,
+) {
     let mut record = SessionRecord::begin(provider, model, task);
-    let result = {
-        let mut recording_sink = |event: AgentEvent| {
-            record.push_event(&event);
-            sink(event);
-        };
-        orchestrator.run(task, cancel, &mut recording_sink)
+    for event in &output.events {
+        record.push_event(event);
     }
-    .map_err(|err| anyhow!("agent run failed: {err}"));
-    record.set_history(orchestrator.history().to_vec());
-    record.finish(result.as_ref().ok());
-    match store.write(&record) {
+    record.set_history(output.history.clone());
+    record.finish(Some(&output.outcome));
+    write_record(store, &record);
+}
+
+fn persist_partial_record(
+    store: &SessionStore,
+    events: &[AgentEvent],
+    provider: &str,
+    model: &str,
+    task: &str,
+) {
+    let mut record = SessionRecord::begin(provider, model, task);
+    for event in events {
+        record.push_event(event);
+    }
+    record.finish(None);
+    write_record(store, &record);
+}
+
+fn write_record(store: &SessionStore, record: &SessionRecord) {
+    match store.write(record) {
         Ok(path) => eprintln!("\u{2713} session saved: {}", path.display()),
         Err(err) => eprintln!("\u{26a0}  failed to persist session {}: {err}", record.id),
     }
-    result
 }
 
 fn emit_event(event: AgentEvent) {
@@ -439,25 +425,6 @@ fn truncate(text: &str, max: usize) -> String {
     out
 }
 
-/// Cap a tool result so a single call cannot dominate the context window. Small
-/// results pass through unchanged (preserving structure); oversized ones are
-/// rendered to text, truncated, and tagged so the model knows the view is
-/// partial.
-fn cap_tool_output(value: Value) -> Value {
-    let text = match &value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    let total = text.chars().count();
-    if total <= MAX_TOOL_OUTPUT_CHARS {
-        return value;
-    }
-    let head: String = text.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
-    Value::String(format!(
-        "{head}\n\u{2026}[tool output truncated: {MAX_TOOL_OUTPUT_CHARS} of {total} characters shown]"
-    ))
-}
-
 /// Install a Ctrl-C (SIGINT) handler that flips `cancel`, so a long agent run
 /// can be interrupted cleanly. Unix-only: the handler only sets an atomic
 /// (async-signal-safe); a watcher thread propagates it to the token.
@@ -488,57 +455,3 @@ fn install_interrupt_handler(cancel: &CancelToken) {
 /// On non-Unix platforms SIGINT keeps its default (terminate) behavior.
 #[cfg(not(unix))]
 fn install_interrupt_handler(_cancel: &CancelToken) {}
-
-/// Bridges nerve's tool [`Runtime`](NerveRuntime) to the agent's [`ToolBox`]
-/// seam: tool specs are read from the runtime and calls are dispatched through
-/// the same path the MCP/daemon adapters use.
-pub(crate) struct RuntimeToolBox {
-    runtime: Arc<NerveRuntime>,
-}
-
-impl RuntimeToolBox {
-    pub(crate) fn new(runtime: Arc<NerveRuntime>) -> Self {
-        Self { runtime }
-    }
-}
-
-impl ToolBox for RuntimeToolBox {
-    fn specs(&self) -> Vec<ToolSpec> {
-        let specs = self.runtime.tool_specs();
-        specs
-            .as_array()
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(|tool| {
-                        let name = tool.get("name")?.as_str()?.to_string();
-                        let description = tool
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                        let input_schema = tool
-                            .get("inputSchema")
-                            .cloned()
-                            .unwrap_or_else(|| json!({ "type": "object" }));
-                        Some(ToolSpec {
-                            name,
-                            description,
-                            input_schema,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn call(&self, name: &str, args: &Value, cancel: &CancelToken) -> AgentResult<Value> {
-        let params = json!({ "name": name, "arguments": args });
-        let result = self
-            .runtime
-            .handle_tool_call_cancellable(&params, cancel)
-            .map_err(|err| AgentError::Tool(err.to_string()))?;
-        let value = result.get("structuredContent").cloned().unwrap_or(result);
-        Ok(cap_tool_output(value))
-    }
-}

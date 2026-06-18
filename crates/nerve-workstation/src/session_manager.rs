@@ -8,8 +8,9 @@
 use crate::capabilities::{Capabilities, ResolvedAgent};
 use crate::policy::{Approver, Policy, ToolGate};
 use crate::session::{SessionRecord, SessionStore};
+use crate::subagent::{DEFAULT_MAX_DEPTH, SubAgentSpawner};
 use crate::{agent, providers::ProviderRegistry, tools};
-use nerve_agent::{AgentDef, AgentEvent, Message, Orchestrator};
+use nerve_agent::{AgentEvent, Message};
 use nerve_core::{CancelToken, WorkspaceResolver};
 use nerve_runtime::{
     AgentEventKind, RuntimeCommand, RuntimeError, RuntimeEvent, SessionApprovalDecision,
@@ -225,43 +226,33 @@ impl SessionManager {
     ) -> Result<TurnResult, RuntimeError> {
         let root = self.root_for(config.workspace.as_deref());
         let resolved = self.resolve_agent(config, root.as_deref())?;
-        let provider_name = config.provider.clone();
-        let provider = self
-            .registry
-            .resolve(&provider_name, None)
-            .map_err(|err| RuntimeError::adapter(err.to_string()))?;
-        let toolbox = ToolGate::with_approver(
+        let run_config = session_run_config(config, resolved, text);
+        let gate = ToolGate::with_approver(
             self.policy.clone(),
             Arc::new(ProtocolApprover::new(
                 session_id.to_string(),
                 Arc::clone(&self.approvals),
                 token.clone(),
             )),
-        )
-        .wrap(agent::RuntimeToolBox::new(Arc::clone(&self.runtime)));
-        let def = agent_def(config, resolved);
-        let env_hook = crate::hooks::EnvironmentHook::new(crate::hooks::today_utc(), root);
-        let mut orchestrator = Orchestrator::new(&*provider, &toolbox, def)
-            .with_history(history)
-            .with_hooks(vec![&env_hook]);
+        );
+        let spawner = SubAgentSpawner::new(
+            Arc::clone(&self.runtime),
+            self.registry.clone(),
+            gate,
+            DEFAULT_MAX_DEPTH,
+        );
         let emit = Arc::clone(&self.emit);
         let session = session_id.to_string();
-        let mut record_events = Vec::new();
-        let result = {
-            let mut sink = |event: AgentEvent| {
-                record_events.push(event.clone());
-                if let Some(runtime_event) = map_session_agent_event(&session, event) {
-                    emit(runtime_event);
-                }
-            };
-            orchestrator.run(text, token, &mut sink)
+        let mut sink = |event: AgentEvent| {
+            if let Some(runtime_event) = map_session_agent_event(&session, event) {
+                emit(runtime_event);
+            }
         };
-        let history = orchestrator.history().to_vec();
-        match result {
-            Ok(outcome) => Ok(TurnResult {
-                history,
-                events: record_events,
-                outcome: Some(outcome),
+        match spawner.run_at_depth(0, run_config, history, token, &mut sink) {
+            Ok(output) => Ok(TurnResult {
+                history: output.history,
+                events: output.events,
+                outcome: Some(output.outcome),
             }),
             Err(_) if token.is_cancelled() => Err(RuntimeError::cancelled()),
             Err(err) => Err(RuntimeError::adapter(err.to_string())),
@@ -516,22 +507,25 @@ impl Approver for ProtocolApprover {
     }
 }
 
-fn agent_def(config: &SessionConfig, resolved: ResolvedAgent) -> AgentDef {
-    AgentDef {
-        system_prompt: config
-            .system_prompt
-            .clone()
-            .or(resolved.system_prompt)
-            .unwrap_or_else(|| agent::DEFAULT_SYSTEM_PROMPT.to_string()),
+fn session_run_config(
+    config: &SessionConfig,
+    resolved: ResolvedAgent,
+    task: &str,
+) -> agent::AgentRunConfig {
+    agent::AgentRunConfig {
+        workspace: config.workspace.clone(),
+        provider: config.provider.clone(),
         model: config.model.clone(),
-        max_turns: config.max_turns.or(resolved.max_turns).unwrap_or(40),
+        task: task.to_string(),
+        system_prompt: config.system_prompt.clone().or(resolved.system_prompt),
+        max_turns: config.max_turns.or(resolved.max_turns),
         temperature: config.temperature.or(resolved.temperature),
         reasoning_effort: config
             .reasoning_effort
             .clone()
             .or(resolved.reasoning_effort),
         tool_filter: config.tool_filter.clone().or(resolved.tool_filter),
-        ..AgentDef::default()
+        api_key: None,
     }
 }
 

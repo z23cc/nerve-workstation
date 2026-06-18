@@ -316,6 +316,7 @@ fn denied(tool: &str, by: &str) -> AgentError {
 
 /// Policy + approver bundle handed to `run_agent` at the composition root. The
 /// CLI builds an interactive gate; the daemon builds a deny-on-`Ask` gate.
+#[derive(Clone)]
 pub(crate) struct ToolGate {
     policy: Policy,
     approver: Arc<dyn Approver>,

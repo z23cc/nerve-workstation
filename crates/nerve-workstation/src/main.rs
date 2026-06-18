@@ -1,6 +1,7 @@
 //! Stdio JSON-RPC server and small CLI for the context engine.
 
 mod agent;
+mod agent_toolbox;
 mod auth;
 mod capabilities;
 mod cli;
@@ -15,6 +16,7 @@ mod rpc;
 mod server;
 mod session;
 mod session_manager;
+mod subagent;
 mod tools;
 mod workspace;
 mod xai;
