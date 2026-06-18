@@ -5,6 +5,8 @@
 //! holds a borrowed provider/toolbox and drives the LLM/tool loop in
 //! [`Orchestrator::run`].
 
+use std::borrow::Cow;
+
 use nerve_core::CancelToken;
 
 use crate::error::{AgentError, AgentResult};
@@ -19,6 +21,28 @@ const HISTORY_COMPACT_THRESHOLD: usize = 96_000;
 const HISTORY_KEEP_RECENT: usize = 8;
 /// Placeholder substituted for an elided tool output during compaction.
 const ELIDED_TOOL_OUTPUT: &str = "[tool output elided to fit context]";
+/// When this many turns (or fewer) remain, warn the model so it wraps up instead
+/// of being abruptly cut off at `max_turns`.
+const TURN_BUDGET_WARN: u32 = 3;
+/// Pushed once (opt-in) when the model first signals completion, prompting it to
+/// re-verify the result before the run ends.
+const COMPLETION_VERIFY_PROMPT: &str = "Before finishing: double-check that you actually \
+accomplished the task — re-verify the key result against the original request. If anything is \
+incomplete or unverified, keep working (call tools to finish or check); if it is genuinely done, \
+give your final answer.";
+
+/// Near the turn cap, append a heads-up so the model finishes and reports partial
+/// progress instead of being cut off at `max_turns`. Returns the prompt unchanged
+/// when there is ample budget (or the cap is itself tiny).
+fn turn_budget_prompt(system: &str, remaining: u32, max_turns: u32) -> Cow<'_, str> {
+    if max_turns <= TURN_BUDGET_WARN || remaining > TURN_BUDGET_WARN {
+        return Cow::Borrowed(system);
+    }
+    Cow::Owned(format!(
+        "{system}\n\n[{remaining} turn(s) left before this run ends. Prioritize finishing \
+         and reporting the task; don't start work you can't complete in time.]"
+    ))
+}
 
 /// Static configuration for an agent run.
 #[derive(Clone, Debug)]
@@ -39,6 +63,9 @@ pub struct AgentDef {
     pub reasoning_effort: Option<String>,
     /// Optional allowlist of tool names; `None` means all tools.
     pub tool_filter: Option<Vec<String>>,
+    /// Opt-in: after the model first signals completion, give it one chance to
+    /// re-verify it actually finished (catches premature stops). Off by default.
+    pub verify_completion: bool,
 }
 
 impl Default for AgentDef {
@@ -52,6 +79,7 @@ impl Default for AgentDef {
             temperature: None,
             reasoning_effort: None,
             tool_filter: None,
+            verify_completion: false,
         }
     }
 }
@@ -234,6 +262,7 @@ impl<'a> Orchestrator<'a> {
         let mut final_text = String::new();
         let mut consecutive_failures: u32 = 0;
         let mut requests: u32 = 0;
+        let mut verified = false;
 
         for turn in 1..=self.def.max_turns {
             if cancel.is_cancelled() {
@@ -241,7 +270,9 @@ impl<'a> Orchestrator<'a> {
             }
             sink(AgentEvent::TurnStarted(turn));
 
-            let response = self.execute_turn(system_prompt, &tools, cancel, sink)?;
+            let remaining = self.def.max_turns - turn + 1;
+            let turn_system = turn_budget_prompt(system_prompt, remaining, self.def.max_turns);
+            let response = self.execute_turn(turn_system.as_ref(), &tools, cancel, sink)?;
             requests += 1;
             accumulate_usage(&mut usage, &response.usage);
             if !response.content.is_empty() {
@@ -249,6 +280,14 @@ impl<'a> Orchestrator<'a> {
             }
 
             if response.tool_calls.is_empty() && response.finish_reason == FinishReason::Stop {
+                if self.def.verify_completion && !verified {
+                    // Opt-in: one self-check pass before accepting completion, so the
+                    // model can catch a premature stop. Bounded to fire at most once.
+                    verified = true;
+                    self.history.push(Message::user(COMPLETION_VERIFY_PROMPT));
+                    self.compact_history();
+                    continue;
+                }
                 sink(AgentEvent::Done {
                     reason: "completed".to_string(),
                 });
@@ -386,19 +425,26 @@ impl<'a> Orchestrator<'a> {
                 ok,
                 output: output.clone(),
             });
-            self.history
-                .push(Message::tool(call.id.clone(), call.name.clone(), output));
-
             if ok {
                 *consecutive_failures = 0;
-            } else {
-                *consecutive_failures += 1;
-                if let Some(limit) = self.def.max_tool_failures
-                    && *consecutive_failures > limit
-                {
-                    return Ok(Some(format!("max_tool_failures ({limit}) exceeded")));
-                }
+                self.history
+                    .push(Message::tool(call.id.clone(), call.name.clone(), output));
+                continue;
             }
+
+            *consecutive_failures += 1;
+            if let Some(limit) = self.def.max_tool_failures
+                && *consecutive_failures > limit
+            {
+                self.history
+                    .push(Message::tool(call.id.clone(), call.name.clone(), output));
+                return Ok(Some(format!("max_tool_failures ({limit}) exceeded")));
+            }
+            // From the second consecutive failure on, surface the remaining failure
+            // budget so the model changes approach instead of repeating a failing call.
+            let body = failure_feedback(output, *consecutive_failures, self.def.max_tool_failures);
+            self.history
+                .push(Message::tool(call.id.clone(), call.name.clone(), body));
         }
         Ok(None)
     }
@@ -417,6 +463,27 @@ impl<'a> Orchestrator<'a> {
             };
             self.history[idx].content = ELIDED_TOOL_OUTPUT.to_string();
         }
+    }
+}
+
+/// Append an adaptive nudge to a failed tool result once failures repeat, so the
+/// model changes approach instead of looping on the same call. The first failure
+/// passes through untouched (it may just be transient).
+fn failure_feedback(output: String, consecutive_failures: u32, limit: Option<u32>) -> String {
+    if consecutive_failures < 2 {
+        return output;
+    }
+    match limit {
+        Some(limit) => format!(
+            "{output}\n\n[{consecutive_failures} consecutive tool failures; {} attempt(s) \
+             left before this run aborts. Try a DIFFERENT approach — do not repeat the \
+             same call.]",
+            limit + 1 - consecutive_failures,
+        ),
+        None => format!(
+            "{output}\n\n[{consecutive_failures} consecutive tool failures; try a DIFFERENT \
+             approach rather than repeating the same call.]"
+        ),
     }
 }
 
@@ -665,6 +732,84 @@ mod tests {
             events.last(),
             Some(AgentEvent::Interrupted(reason)) if reason.contains("max_tool_failures")
         ));
+    }
+
+    #[test]
+    fn repeated_tool_failures_nudge_the_model_with_remaining_budget() {
+        // The toolbox always errors and the model keeps calling. From the 2nd
+        // consecutive failure on, the tool result carries a budget nudge so the
+        // model can adapt; the first failure passes through untouched.
+        let failing = response(
+            "try a bad tool",
+            vec![ToolCall {
+                id: "x".into(),
+                name: "missing".into(),
+                arguments: serde_json::json!({}),
+            }],
+            FinishReason::ToolUse,
+        );
+        let provider = MockProvider::new(vec![failing.clone(), failing.clone(), failing]);
+        let toolbox = MockToolBox::new();
+        let mut agent_def = def();
+        agent_def.max_turns = 3;
+        agent_def.max_tool_failures = Some(5); // high enough not to abort within 3 turns
+        let mut orch = Orchestrator::new(&provider, &toolbox, agent_def);
+
+        orch.run("go", &CancelToken::never(), &mut |_| {})
+            .expect("run should yield an outcome");
+
+        let tool_results: Vec<&str> = orch
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(tool_results.len(), 3);
+        // First failure: raw error, no nudge yet.
+        assert!(tool_results[0].contains("unknown tool"));
+        assert!(!tool_results[0].contains("DIFFERENT approach"));
+        // Repeated failures: budget nudge surfaced so the model changes approach.
+        assert!(tool_results[1].contains("DIFFERENT approach"));
+        assert!(tool_results[1].contains("attempt(s) left"));
+    }
+
+    #[test]
+    fn verify_completion_runs_one_self_check_before_finishing() {
+        // The model signals completion twice; with verify_completion on, the first
+        // stop triggers a single self-check pass, so the run takes an extra turn and
+        // the verify prompt lands in history.
+        let provider = MockProvider::new(vec![
+            response("done", Vec::new(), FinishReason::Stop),
+            response("really done", Vec::new(), FinishReason::Stop),
+        ]);
+        let toolbox = MockToolBox::new();
+        let mut agent_def = def();
+        agent_def.verify_completion = true;
+        let mut orch = Orchestrator::new(&provider, &toolbox, agent_def);
+
+        let outcome = orch
+            .run("go", &CancelToken::never(), &mut |_| {})
+            .expect("run completes");
+
+        assert_eq!(outcome.reason, "completed");
+        assert_eq!(outcome.turns, 2); // the self-check added exactly one turn
+        assert!(
+            orch.history
+                .iter()
+                .any(|m| m.role == Role::User && m.content.contains("double-check"))
+        );
+    }
+
+    #[test]
+    fn turn_budget_prompt_warns_only_near_the_cap() {
+        // Ample budget: prompt unchanged.
+        assert_eq!(turn_budget_prompt("sys", 10, 40).as_ref(), "sys");
+        // Near the cap: a heads-up is appended.
+        let near = turn_budget_prompt("sys", 2, 40);
+        assert!(near.starts_with("sys"));
+        assert!(near.contains("turn(s) left"));
+        // Tiny caps never warn (the whole run is trivially near the cap).
+        assert_eq!(turn_budget_prompt("sys", 1, 2).as_ref(), "sys");
     }
 
     #[test]

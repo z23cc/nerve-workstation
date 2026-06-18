@@ -559,6 +559,7 @@ fn session_run_config(
         tool_filter: config.tool_filter.clone().or(resolved.tool_filter),
         api_key: None,
         distill_memory: false,
+        verify_completion: false,
     }
 }
 

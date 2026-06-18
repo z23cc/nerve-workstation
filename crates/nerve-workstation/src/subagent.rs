@@ -194,6 +194,7 @@ fn agent_def(config: &AgentRunConfig) -> AgentDef {
         temperature: config.temperature,
         reasoning_effort: config.reasoning_effort.clone(),
         tool_filter: config.tool_filter.clone(),
+        verify_completion: config.verify_completion,
         ..AgentDef::default()
     }
 }
@@ -235,6 +236,7 @@ fn sub_config(parent: &ParentRun, args: SpawnAgentArgs) -> Result<AgentRunConfig
         tool_filter: resolved.tool_filter,
         api_key,
         distill_memory: false,
+        verify_completion: false,
     })
 }
 

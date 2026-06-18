@@ -130,6 +130,10 @@ struct AgentRunArgs {
     /// (opt-in; off by default — one extra LLM call per qualifying session).
     #[arg(long = "distill-memory")]
     distill_memory: bool,
+    /// After the model first signals completion, give it one chance to verify it
+    /// actually finished (opt-in; off by default — one extra turn when it triggers).
+    #[arg(long = "verify-completion")]
+    verify_completion: bool,
     /// The task for the agent to perform.
     task: String,
 }
@@ -278,6 +282,7 @@ fn run_task(args: AgentRunArgs) -> Result<()> {
         tool_filter: resolved.tool_filter,
         api_key: args.api_key,
         distill_memory: args.distill_memory,
+        verify_completion: args.verify_completion,
     };
     // P5: persist this run's transcript under the project's `.nerve/sessions`
     // (falling back to the global config home). A resolution failure only
@@ -342,6 +347,8 @@ pub(crate) struct AgentRunConfig {
     pub(crate) api_key: Option<String>,
     /// Opt-in: distil durable facts into long-term memory after a substantive run.
     pub(crate) distill_memory: bool,
+    /// Opt-in: one completion self-check pass before the run finishes.
+    pub(crate) verify_completion: bool,
 }
 
 /// Build the toolbox + provider and drive the orchestrator. The single execution
