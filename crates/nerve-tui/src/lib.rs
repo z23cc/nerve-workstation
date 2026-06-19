@@ -4,9 +4,11 @@
 //! This crate speaks to `nerve daemon --stdio` exactly as the TypeScript client
 //! does, reusing the `nerve-runtime` protocol types directly (no codegen). T1
 //! ships the protocol client ([`protocol`]), a no-LLM smoke round-trip
-//! ([`smoke`]), and a minimal streaming shell ([`app`]). Later waves port the
-//! full rendering/commands/approval UX.
+//! ([`smoke`]), and a minimal streaming shell ([`app`]). T2 adds the rich
+//! transcript/markdown/highlight/diff rendering ([`ui`]); later waves port the
+//! commands/approval UX.
 
 pub mod app;
 pub mod protocol;
 pub mod smoke;
+pub mod ui;

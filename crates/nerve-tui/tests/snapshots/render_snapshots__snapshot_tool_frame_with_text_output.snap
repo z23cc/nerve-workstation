@@ -1,0 +1,9 @@
+---
+source: crates/nerve-tui/tests/render_snapshots.rs
+expression: "styled(&block, 40)"
+---
+«green»╭─ «green»✓ «cyan»read_file«dim» · 1.5s «dim»src/main.rs«green» ─────╮
+«green»│ «dim»fn main() {                         «green» │
+«green»│ «dim»println!("hi");                     «green» │
+«green»│ «dim»}                                   «green» │
+«green»╰──────────────────────────────────────╯

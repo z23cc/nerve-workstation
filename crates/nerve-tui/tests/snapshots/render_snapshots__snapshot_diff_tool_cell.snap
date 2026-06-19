@@ -1,0 +1,12 @@
+---
+source: crates/nerve-tui/tests/render_snapshots.rs
+expression: "styled(&block, 50)"
+---
+«green»╭─ «green»✓ «cyan»edit«dim» · 42ms «dim»x«green» ──────────────────────────────╮
+«green»│ «dim»--- a/x                                       «green» │
+«green»│ «dim»+++ b/x                                       «green» │
+«green»│ «cyan»@@ -1,2 +1,2 @@                               «green» │
+«green»│ «dim» context                                      «green» │
+«green»│ «red»-«red+rev»old«red» line here                                «green» │
+«green»│ «green»+«green+rev»new«green» line here                                «green» │
+«green»╰────────────────────────────────────────────────╯

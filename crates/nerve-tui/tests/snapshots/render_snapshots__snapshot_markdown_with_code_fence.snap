@@ -1,0 +1,12 @@
+---
+source: crates/nerve-tui/tests/render_snapshots.rs
+expression: "styled(&block, 40)"
+---
+«cyan+bold»Heading
+
+Some «bold»bold and «yellow»code.
+
+«cyan»• one
+«cyan»• two
+
+  «magenta»let x = «yellow»42; «gray»// note

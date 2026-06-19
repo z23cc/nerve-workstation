@@ -1,0 +1,7 @@
+---
+source: crates/nerve-tui/tests/render_snapshots.rs
+expression: "format!(\"{reasoning}\\n--\\n{warn}\")"
+---
+«dim»· «dim»considering the options
+--
+«yellow»interrupted: user

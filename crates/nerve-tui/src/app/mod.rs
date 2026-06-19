@@ -94,7 +94,10 @@ impl Shell {
                 event = self.events.recv() => if let Some(redraw) = self.on_event(event) {
                     dirty = redraw;
                 },
-                _ = tick.tick() => dirty = self.state.running,
+                _ = tick.tick() => if self.state.running {
+                    self.state.tick_spinner();
+                    dirty = true;
+                },
             }
             if dirty {
                 self.draw(&mut guard)?;
