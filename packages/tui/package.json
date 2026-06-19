@@ -6,6 +6,7 @@
   "description": "TypeScript TUI frontend scaffolding for Nerve runtime daemon",
   "scripts": {
     "smoke": "bun src/cli/smoke.ts",
+    "chat": "bun src/cli/chat.ts",
     "test": "bun test test/*.test.ts",
     "check": "bun test test/*.test.ts"
   },
