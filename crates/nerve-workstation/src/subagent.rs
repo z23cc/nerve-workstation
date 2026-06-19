@@ -80,8 +80,7 @@ impl SubAgentSpawner {
             depth,
             parent,
         );
-        let gated = self.gate.clone().wrap(raw);
-        let checkpoint_tb = CheckpointToolBox::new(gated, Arc::clone(&self.checkpoint));
+        let checkpoint_tb = CheckpointToolBox::new(raw, Arc::clone(&self.checkpoint));
 
         // Long-term project memory, file-backed at `<root>/.nerve/memory.md`. Only wired
         // when there is a project root — durable PROJECT facts need a project. Recall is the
@@ -92,12 +91,15 @@ impl SubAgentSpawner {
                 r.join(".nerve").join("memory.md"),
             )) as Arc<dyn crate::memory::MemoryStore>
         });
+        // P4 gate is the OUTERMOST decorator: every tool the model can call — read tools,
+        // spawn_agent, and the agent-state tools (update_checkpoint/remember) — flows through
+        // it (north-star invariant 9). Safe tools are classified Allow in the policy.
         let toolbox: Box<dyn ToolBox> = match &memory_store {
-            Some(store) => Box::new(crate::memory::MemoryToolBox::new(
+            Some(store) => Box::new(self.gate.clone().wrap(crate::memory::MemoryToolBox::new(
                 checkpoint_tb,
                 Arc::clone(store),
-            )),
-            None => Box::new(checkpoint_tb),
+            ))),
+            None => Box::new(self.gate.clone().wrap(checkpoint_tb)),
         };
         let checkpoint_hook = CheckpointHook::new(Arc::clone(&self.checkpoint));
         let memory_hook = memory_store

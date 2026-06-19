@@ -77,6 +77,16 @@ the roadmap (P0) to be folded back in as a `RuntimeCommand`.
    (zero `nerve-agent` change). Promote a backend (file → SQLite) only on a *measured*
    trigger — always-inject token budget exceeded, real write contention, or a structured-
    query need — never speculatively. See `docs/designs/agent-long-term-memory.md`.
+9. **The permission gate is the outermost toolbox boundary.** P4 authorization
+   (`PolicyToolBox`) must wrap the *entire* tool decorator stack, so every tool the model can
+   call — read tools, `spawn_agent`, decorator-added tools (`update_checkpoint`, `remember`),
+   and any future `run_command` — passes through it. Safe tools are classified **Allow** in
+   the policy, never left ungated by sitting outside the gate; write/exec tools are **Ask**.
+   **Containment is separate and orthogonal:** P4 decides *whether* a call runs; the
+   `SandboxLauncher` port decides *what the spawned process may touch*. Execution capability
+   is bound to the **trust context** (local CLI may use the best-effort launcher; a
+   daemon/remote run must require a strong-isolation backend or refuse). See
+   `docs/designs/agent-exec-sandbox.md`.
 
 ## 4. Crates & layers (current)
 

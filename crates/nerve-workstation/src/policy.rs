@@ -66,6 +66,12 @@ const READONLY_TOOLS: &[&str] = &[
     "git",
 ];
 
+/// Agent-internal state tools that write only to `.nerve/` (working / long-term
+/// memory), never the codebase or the outside world — safe to run without prompting,
+/// like the read-only tools. Auto-allowed so the outermost gate (invariant 9) does not
+/// prompt for them.
+const SAFE_AGENT_TOOLS: &[&str] = &["update_checkpoint", "remember"];
+
 /// What to do with a tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -126,7 +132,7 @@ impl Policy {
     /// The built-in baseline: read-only tools `Allow`, everything else `Ask`.
     fn builtin() -> Self {
         Self {
-            rules: readonly_allow_rules(),
+            rules: builtin_allow_rules(),
             default: PolicyAction::Ask,
             allow_all: false,
         }
@@ -174,7 +180,7 @@ impl Policy {
                 default = action;
             }
         }
-        rules.extend(readonly_allow_rules());
+        rules.extend(builtin_allow_rules());
         Self {
             rules,
             default,
@@ -202,10 +208,13 @@ impl Policy {
     }
 }
 
-/// Built-in read-only allow rules, one per [`READONLY_TOOLS`] entry.
-fn readonly_allow_rules() -> Vec<PolicyRule> {
+/// Built-in allow rules: the read-only tools plus the agent-internal state tools
+/// (`SAFE_AGENT_TOOLS`). Auto-allowed so making the permission gate the outermost
+/// decorator (north-star invariant 9) does not start prompting for them.
+fn builtin_allow_rules() -> Vec<PolicyRule> {
     READONLY_TOOLS
         .iter()
+        .chain(SAFE_AGENT_TOOLS.iter())
         .map(|&tool| PolicyRule {
             tool: tool.to_string(),
             action: PolicyAction::Allow,
@@ -456,6 +465,8 @@ mod tests {
             "git",
             "semantic_search",
             "get_repo_map",
+            "update_checkpoint",
+            "remember",
         ] {
             assert_eq!(policy.decide(tool), PolicyAction::Allow, "{tool}");
         }
@@ -465,6 +476,7 @@ mod tests {
             "delete",
             "move",
             "ast_edit",
+            "spawn_agent",
             "mcp__fs__write",
             "brand_new_tool",
         ] {
