@@ -94,7 +94,12 @@ pub(crate) struct ResolvedAgent {
 /// stored highest-precedence first (project before global); the first match
 /// wins, and built-ins are consulted last.
 pub(crate) struct Capabilities {
-    bases: Vec<PathBuf>,
+    /// Discovery bases, highest precedence first, each paired with the source it
+    /// actually represents. The source is tracked alongside the path (not inferred
+    /// from the array index) because `discover` only pushes the project base when a
+    /// project root exists — so with no project root, `bases[0]` is the *global*
+    /// config home and must be labelled as such.
+    bases: Vec<(SkillSource, PathBuf)>,
 }
 
 impl Capabilities {
@@ -104,18 +109,25 @@ impl Capabilities {
     pub(crate) fn discover(project_dir: Option<&Path>) -> Self {
         let mut bases = Vec::new();
         if let Some(root) = project_dir {
-            bases.push(root.join(".nerve"));
+            bases.push((SkillSource::Project, root.join(".nerve")));
         }
         if let Ok(home) = nerve_agent::auth::config_home() {
-            bases.push(home);
+            bases.push((SkillSource::Global, home));
         }
         Self { bases }
     }
 
-    /// Construct from explicit base directories (highest precedence first),
+    /// Construct from explicit project/global base directories (each optional),
     /// bypassing environment-derived discovery. Test-only.
     #[cfg(test)]
-    fn from_bases(bases: Vec<PathBuf>) -> Self {
+    fn from_sources(project: Option<PathBuf>, global: Option<PathBuf>) -> Self {
+        let mut bases = Vec::new();
+        if let Some(project) = project {
+            bases.push((SkillSource::Project, project));
+        }
+        if let Some(global) = global {
+            bases.push((SkillSource::Global, global));
+        }
         Self { bases }
     }
 
@@ -179,7 +191,7 @@ impl Capabilities {
     /// Load and parse the agent definition `name`, honoring precedence.
     fn load_agent_def(&self, name: &str) -> Result<AgentDefFile> {
         validate_name(name)?;
-        for base in &self.bases {
+        for (_source, base) in &self.bases {
             let path = base.join("agents").join(format!("{name}.json"));
             if path.is_file() {
                 let raw = std::fs::read_to_string(&path)
@@ -198,16 +210,15 @@ impl Capabilities {
     /// extract the description — the body itself is not retained for the prompt.
     fn load_skill_meta(&self, name: &str) -> Result<SkillMeta> {
         validate_name(name)?;
-        // Bases are project-first, then global; index 0 is the highest-precedence
-        // non-built-in source. A single global base is labelled "global"; were a
-        // dedicated "shared" base ever added ahead of global, the ordinal labelling
-        // would extend without touching callers.
-        for (index, base) in self.bases.iter().enumerate() {
+        // Each base carries its real source (project / global), so labelling
+        // reflects what the base *is*, not its array position — important when no
+        // project root exists and the only base is the global config home.
+        for (source, base) in &self.bases {
             let path = base.join("skills").join(format!("{name}.md"));
             if path.is_file() {
                 let body = std::fs::read_to_string(&path)
                     .with_context(|| format!("failed to read skill: {}", path.display()))?;
-                return Ok(SkillMeta::from_body(name, &body, base_source(index)));
+                return Ok(SkillMeta::from_body(name, &body, *source));
             }
         }
         if let Some(raw) = builtin(BUILTIN_SKILLS, name) {
@@ -233,16 +244,6 @@ impl std::fmt::Display for SkillSource {
             Self::Global => "global",
             Self::BuiltIn => "built-in",
         })
-    }
-}
-
-/// Map a discovery-base index to its source label. Base 0 is the project base
-/// (`<root>/.nerve`); any later base is the global config home.
-fn base_source(index: usize) -> SkillSource {
-    if index == 0 {
-        SkillSource::Project
-    } else {
-        SkillSource::Global
     }
 }
 
@@ -329,7 +330,7 @@ mod tests {
 
     #[test]
     fn builtin_agent_discloses_skill_metadata_only() {
-        let caps = Capabilities::from_bases(vec![]);
+        let caps = Capabilities::from_sources(None, None);
         let resolved = caps.resolve_agent("coder").expect("resolve coder");
         let prompt = resolved.system_prompt.expect("system prompt");
         // Base prompt is present, plus a compact metadata footer naming the skill
@@ -349,7 +350,7 @@ mod tests {
 
     #[test]
     fn unknown_agent_errors() {
-        let err = Capabilities::from_bases(vec![])
+        let err = Capabilities::from_sources(None, None)
             .resolve_agent("does-not-exist")
             .expect_err("should fail");
         assert!(err.to_string().contains("unknown agent"));
@@ -359,7 +360,7 @@ mod tests {
     fn project_overrides_builtin() {
         let dir = tempdir().unwrap();
         agent_file(dir.path(), "coder", r#"{"system_prompt":"PROJECT CODER"}"#);
-        let caps = Capabilities::from_bases(vec![dir.path().to_path_buf()]);
+        let caps = Capabilities::from_sources(Some(dir.path().to_path_buf()), None);
         let prompt = caps.resolve_agent("coder").unwrap().system_prompt.unwrap();
         // Project file fully shadows the built-in (it lists no skills, so no
         // footer is added).
@@ -373,10 +374,10 @@ mod tests {
         let global = tempdir().unwrap();
         agent_file(project.path(), "foo", r#"{"system_prompt":"FROM PROJECT"}"#);
         agent_file(global.path(), "foo", r#"{"system_prompt":"FROM GLOBAL"}"#);
-        let caps = Capabilities::from_bases(vec![
-            project.path().to_path_buf(),
-            global.path().to_path_buf(),
-        ]);
+        let caps = Capabilities::from_sources(
+            Some(project.path().to_path_buf()),
+            Some(global.path().to_path_buf()),
+        );
         assert_eq!(
             caps.resolve_agent("foo").unwrap().system_prompt.unwrap(),
             "FROM PROJECT"
@@ -399,7 +400,7 @@ mod tests {
             "# Override tools\n\nbody not inlined",
         );
         skill_file(dir.path(), "extra", "Extra skill summary\n\nmore body");
-        let prompt = Capabilities::from_bases(vec![dir.path().to_path_buf()])
+        let prompt = Capabilities::from_sources(Some(dir.path().to_path_buf()), None)
             .resolve_agent("multi")
             .unwrap()
             .system_prompt
@@ -426,10 +427,10 @@ mod tests {
         // `from-global` only exists in the global base; `nerve-tools` falls all
         // the way through to the built-in.
         skill_file(global.path(), "from-global", "# Global skill\n\nx");
-        let prompt = Capabilities::from_bases(vec![
-            project.path().to_path_buf(),
-            global.path().to_path_buf(),
-        ])
+        let prompt = Capabilities::from_sources(
+            Some(project.path().to_path_buf()),
+            Some(global.path().to_path_buf()),
+        )
         .resolve_agent("mix")
         .unwrap()
         .system_prompt
@@ -454,7 +455,7 @@ mod tests {
     fn missing_skill_errors() {
         let dir = tempdir().unwrap();
         agent_file(dir.path(), "broken", r#"{"skills":["ghost"]}"#);
-        let err = Capabilities::from_bases(vec![dir.path().to_path_buf()])
+        let err = Capabilities::from_sources(Some(dir.path().to_path_buf()), None)
             .resolve_agent("broken")
             .expect_err("should fail");
         assert!(err.to_string().contains("not found"));
@@ -468,7 +469,7 @@ mod tests {
             "tuned",
             r#"{"model":"m1","provider":"p1","max_turns":7,"temperature":0.25,"reasoning_effort":"high","tool_filter":["read_file","edit"]}"#,
         );
-        let resolved = Capabilities::from_bases(vec![dir.path().to_path_buf()])
+        let resolved = Capabilities::from_sources(Some(dir.path().to_path_buf()), None)
             .resolve_agent("tuned")
             .unwrap();
         assert_eq!(resolved.model.as_deref(), Some("m1"));
@@ -486,7 +487,7 @@ mod tests {
 
     #[test]
     fn invalid_names_are_rejected() {
-        let caps = Capabilities::from_bases(vec![]);
+        let caps = Capabilities::from_sources(None, None);
         for bad in ["../evil", "a/b", "", "dots.here", "back\\slash"] {
             assert!(
                 caps.resolve_agent(bad).is_err(),
@@ -499,10 +500,30 @@ mod tests {
     fn empty_def_yields_no_prompt() {
         let dir = tempdir().unwrap();
         agent_file(dir.path(), "blank", "{}");
-        let resolved = Capabilities::from_bases(vec![dir.path().to_path_buf()])
+        let resolved = Capabilities::from_sources(Some(dir.path().to_path_buf()), None)
             .resolve_agent("blank")
             .unwrap();
         assert!(resolved.system_prompt.is_none());
         assert!(resolved.model.is_none());
+    }
+
+    #[test]
+    fn no_project_root_labels_only_base_as_global() {
+        // Regression: with no project root, the single base is the global config
+        // home. It must be labelled "global", not "project" (the old index-based
+        // inference mislabelled `bases[0]` as project regardless of what it was).
+        let global = tempdir().unwrap();
+        agent_file(global.path(), "g", r#"{"skills":["only-global"]}"#);
+        skill_file(global.path(), "only-global", "# Global only\n\nbody");
+        let prompt = Capabilities::from_sources(None, Some(global.path().to_path_buf()))
+            .resolve_agent("g")
+            .unwrap()
+            .system_prompt
+            .unwrap();
+        assert!(
+            prompt.contains("- only-global (global): Global only"),
+            "global-only base must be labelled global, got:\n{prompt}"
+        );
+        assert!(!prompt.contains("(project)"));
     }
 }

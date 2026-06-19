@@ -38,7 +38,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -55,6 +55,12 @@ const SSE_KEEPALIVE: &str = ": keep-alive\n\n";
 /// gap may have missed events older than this window (it then resyncs by polling
 /// job/session state). Sized to cover a typical reconnect blip, not full history.
 const SSE_REPLAY_CAPACITY: usize = 1024;
+
+/// Per-subscriber outbound channel depth. The channel is bounded so a stalled
+/// `/events` reader cannot make `broadcast` grow memory without limit; a
+/// subscriber whose buffer fills is treated as a dead/slow client and pruned
+/// (it can reconnect with `Last-Event-ID` to replay what it missed).
+const SSE_SUBSCRIBER_CAPACITY: usize = 512;
 
 /// The self-contained runtime GUI, embedded into the binary so the daemon serves
 /// it with no build step or external assets. It is a *client* of Protocol v3:
@@ -406,7 +412,7 @@ struct Subscriber {
     /// `None` = unfiltered (all frames); `Some(session_id)` = only that session's
     /// frames plus global ones.
     session_filter: Option<String>,
-    sender: mpsc::Sender<Arc<SseFrame>>,
+    sender: SyncSender<Arc<SseFrame>>,
 }
 
 impl SseHub {
@@ -426,7 +432,7 @@ impl SseHub {
         after_seq: Option<u64>,
     ) -> (u64, Receiver<Arc<SseFrame>>, Vec<Arc<SseFrame>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(SSE_SUBSCRIBER_CAPACITY);
         let mut state = crate::sync::lock_recover(&self.inner);
         let backlog = match after_seq {
             Some(after) => state
@@ -462,12 +468,18 @@ impl SseHub {
             state.replay.pop_front();
         }
         state.subscribers.retain(|subscriber| {
-            // A subscriber the frame isn't addressed to is kept untouched; only a
-            // failed send (dropped receiver) to a frame we *do* address prunes it.
-            // A long-idle subscriber is also pruned when its connection closes —
-            // its `/events` thread calls `unsubscribe` on disconnect.
+            // A subscriber the frame isn't addressed to is kept untouched. For one
+            // we *do* address, a non-blocking `try_send` keeps `broadcast` from
+            // ever blocking on a slow reader: a full buffer (stalled `/events`
+            // reader) or a dropped receiver both prune the subscriber — a slow
+            // client is treated as disconnected (it can reconnect and replay via
+            // `Last-Event-ID`). A long-idle subscriber is also pruned when its
+            // connection closes (its `/events` thread calls `unsubscribe`).
             if frame.visible_to(subscriber.session_filter.as_deref()) {
-                subscriber.sender.send(Arc::clone(&frame)).is_ok()
+                match subscriber.sender.try_send(Arc::clone(&frame)) {
+                    Ok(()) => true,
+                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+                }
             } else {
                 true
             }
@@ -912,6 +924,28 @@ mod tests {
         assert!(frame.json.contains("runtime/event"));
         // The dead subscriber was pruned on its failed send.
         assert_eq!(hub.subscriber_count(), 1);
+    }
+
+    #[test]
+    fn hub_prunes_subscriber_whose_buffer_fills() {
+        // A stalled `/events` reader (receiver never drained) must not let
+        // `broadcast` grow memory without bound: once its bounded buffer fills,
+        // the subscriber is treated as a slow/dead client and pruned.
+        let hub = SseHub::new();
+        let (_id, rx, _) = hub.subscribe(None, None);
+        // Never drain `rx`. Send one frame past the buffer capacity.
+        for seq in 1..=(SSE_SUBSCRIBER_CAPACITY as u64 + 1) {
+            hub.broadcast(notification(seq, None));
+        }
+        // The buffer filled, so the overflowing send pruned the subscriber.
+        assert_eq!(hub.subscriber_count(), 0);
+        // The frames buffered before the overflow are still readable (bounded,
+        // not lost wholesale): exactly the capacity's worth.
+        let mut received = 0;
+        while rx.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, SSE_SUBSCRIBER_CAPACITY);
     }
 
     #[test]

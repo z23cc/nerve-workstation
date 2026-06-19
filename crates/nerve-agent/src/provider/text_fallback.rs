@@ -3,7 +3,7 @@
 //! Most providers emit native tool-call blocks, but some models (or degraded
 //! responses) instead *describe* a call inline in the assistant text — either as
 //! an Anthropic-style `<tool_use>{...}</tool_use>` element or as a fenced
-//! ```json code block. When a turn yields **no** native tool calls, this module
+//! `json` code block. When a turn yields **no** native tool calls, this module
 //! recovers any such textual calls so the orchestrator can still dispatch them.
 //!
 //! This is intentionally narrow — two well-known shapes, not a per-model dialect
@@ -25,6 +25,13 @@ pub(crate) fn recover_tool_calls(content: &str) -> Vec<ToolCall> {
     collect_tagged(content, &mut calls);
     if calls.is_empty() {
         collect_fenced_json(content, &mut calls);
+    }
+    // Assign synthetic ids once, after collection, so two same-named recovered
+    // calls in one turn get distinct ids. The Anthropic wire keys tool_use /
+    // tool_result pairs by id, so a name-only id would collide and corrupt the
+    // next request. The index makes the id unique within the turn.
+    for (i, call) in calls.iter_mut().enumerate() {
+        call.id = format!("text_fallback_{i}_{}", call.name);
     }
     calls
 }
@@ -84,9 +91,10 @@ fn call_from_json_text(text: &str) -> Option<ToolCall> {
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     Some(ToolCall {
-        // Textual calls have no provider id; a stable synthetic id keeps the
-        // result correlated to this call within the turn.
-        id: format!("text_fallback_{name}"),
+        // Textual calls have no provider id; `recover_tool_calls` assigns a
+        // turn-unique synthetic id after collection (a name-only id here would
+        // collide for duplicate same-named calls).
+        id: String::new(),
         name: name.to_string(),
         arguments,
     })
@@ -116,6 +124,25 @@ mod tests {
         assert_eq!(calls[0].name, "a");
         assert_eq!(calls[1].name, "b");
         assert_eq!(calls[1].arguments, json!({"x": 1}));
+        // Synthetic ids are index-prefixed and thus unique across the turn.
+        assert_eq!(calls[0].id, "text_fallback_0_a");
+        assert_eq!(calls[1].id, "text_fallback_1_b");
+    }
+
+    #[test]
+    fn same_named_calls_get_distinct_ids() {
+        // Two same-named recovered calls in one turn must NOT share an id: the
+        // Anthropic wire keys tool_use/tool_result by id, so a collision would
+        // corrupt the next request. The index disambiguates them.
+        let content = "<tool_use>{\"name\":\"search\",\"input\":{\"q\":\"a\"}}</tool_use>\
+            <tool_use>{\"name\":\"search\",\"input\":{\"q\":\"b\"}}</tool_use>";
+        let calls = recover_tool_calls(content);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[1].name, "search");
+        assert_ne!(calls[0].id, calls[1].id);
+        assert_eq!(calls[0].id, "text_fallback_0_search");
+        assert_eq!(calls[1].id, "text_fallback_1_search");
     }
 
     #[test]

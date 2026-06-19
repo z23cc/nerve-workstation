@@ -242,7 +242,68 @@ fn value_to_string(value: &serde_json::Value) -> String {
 }
 
 /// Add a response's token counts into the running total, saturating on overflow.
+/// All four fields fold (including the cache fields), so the aggregated
+/// `RunOutcome.usage` and the cost hook see real cache_read / cache_creation
+/// totals rather than always-zero.
 pub(super) fn accumulate_usage(total: &mut Usage, delta: &Usage) {
     total.input_tokens = total.input_tokens.saturating_add(delta.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(delta.output_tokens);
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(delta.cache_read_tokens);
+    total.cache_creation_tokens = total
+        .cache_creation_tokens
+        .saturating_add(delta.cache_creation_tokens);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulate_usage_folds_all_four_fields() {
+        let mut total = Usage::default();
+        accumulate_usage(
+            &mut total,
+            &Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 7,
+                cache_creation_tokens: 3,
+            },
+        );
+        accumulate_usage(
+            &mut total,
+            &Usage {
+                input_tokens: 20,
+                output_tokens: 8,
+                cache_read_tokens: 1,
+                cache_creation_tokens: 4,
+            },
+        );
+        assert_eq!(total.input_tokens, 30);
+        assert_eq!(total.output_tokens, 13);
+        // Cache fields must accumulate too — previously they stayed 0.
+        assert_eq!(total.cache_read_tokens, 8);
+        assert_eq!(total.cache_creation_tokens, 7);
+    }
+
+    #[test]
+    fn accumulate_usage_saturates_on_overflow() {
+        let mut total = Usage {
+            cache_read_tokens: u32::MAX,
+            cache_creation_tokens: u32::MAX,
+            ..Default::default()
+        };
+        accumulate_usage(
+            &mut total,
+            &Usage {
+                cache_read_tokens: 5,
+                cache_creation_tokens: 5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(total.cache_read_tokens, u32::MAX);
+        assert_eq!(total.cache_creation_tokens, u32::MAX);
+    }
 }

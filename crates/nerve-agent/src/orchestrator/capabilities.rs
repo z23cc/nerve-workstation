@@ -32,6 +32,19 @@ impl Default for ModelCapabilities {
 /// substring contained in the (lowercased) model id wins. Ordered most- to
 /// least-specific so e.g. `claude-3-5-haiku` is matched before a bare `claude`.
 const TABLE: &[(&str, ModelCapabilities)] = &[
+    // Extended-context Claude variants MUST precede the bare-family entries
+    // below: the scan is in-order substring matching, so a bare `opus`/`claude`
+    // needle would otherwise match the 1M-context Opus 4.8 at 200k and trigger
+    // token-based compaction far too early. The needle is anchored on the `[1m]`
+    // suffix bracket to avoid a mildly collision-prone bare `1m`. Output budget
+    // is the Opus family's 32k.
+    (
+        "opus-4-8[1m]",
+        ModelCapabilities {
+            context_window: 1_000_000,
+            max_output_tokens: 32_000,
+        },
+    ),
     // Anthropic Claude: 200k window. Sonnet/Opus generate up to 64k; Haiku 8k.
     (
         "haiku",
@@ -133,6 +146,22 @@ mod tests {
         // A bare claude id still resolves (the catch-all claude entry).
         assert_eq!(
             ModelCapabilities::for_model("claude-x").context_window,
+            200_000
+        );
+    }
+
+    #[test]
+    fn extended_context_opus_reports_one_million_window() {
+        // The 1M-context Opus 4.8 must NOT fall through to the bare `opus`/`claude`
+        // 200k entry (which would compact far too early). The `[1m]`-anchored entry
+        // wins the in-order scan.
+        let caps = ModelCapabilities::for_model("claude-opus-4-8[1m]");
+        assert_eq!(caps.context_window, 1_000_000);
+        // Output budget stays the Opus family's 32k.
+        assert_eq!(caps.max_output_tokens, 32_000);
+        // The non-1M Opus id still resolves to the standard 200k window.
+        assert_eq!(
+            ModelCapabilities::for_model("claude-opus-4-8").context_window,
             200_000
         );
     }
