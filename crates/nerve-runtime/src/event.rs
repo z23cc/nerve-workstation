@@ -58,6 +58,16 @@ pub enum RuntimeEvent {
         session_id: String,
         event: AgentEventKind,
     },
+    /// Advisory streaming fragment of an in-progress tool call, scoped to its
+    /// job. Carries a raw provider delta string; UI-only and additive — clients
+    /// that don't render streaming tool calls may ignore it. The producer is
+    /// wired in a later wave; this variant only reserves the protocol shape.
+    ToolCallDelta {
+        job_id: String,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<u64>,
+    },
     /// A session turn needs a client/human decision before continuing.
     ApprovalRequested {
         session_id: String,
@@ -112,6 +122,13 @@ pub enum AgentEventKind {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        /// Prompt tokens served from the provider's prompt cache, when reported.
+        /// Additive and optional: producers that don't track caching omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        /// Prompt tokens written into the provider's prompt cache, when reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_tokens: Option<u64>,
     },
 }
 
@@ -137,6 +154,19 @@ impl RuntimeEvent {
         Self::SessionAgent {
             session_id: session_id.into(),
             event,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_call_delta(
+        job_id: impl Into<String>,
+        delta: impl Into<String>,
+        index: Option<u64>,
+    ) -> Self {
+        Self::ToolCallDelta {
+            job_id: job_id.into(),
+            delta: delta.into(),
+            index,
         }
     }
 

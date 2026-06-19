@@ -99,6 +99,29 @@ impl Default for RuntimeEventCapabilities {
     }
 }
 
+/// Params payload of a `runtime/event` notification: the event itself plus a
+/// monotonic, per-stream sequence number so clients can detect dropped events
+/// and request replay. The event fields are flattened, so this is backward
+/// compatible with clients that read the bare event from `params`; `event_seq`
+/// is an additive sibling field (defaulting to 0 until a later wave assigns the
+/// real monotonic value at emit time).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEventNotification {
+    /// Monotonically increasing, gap-detectable sequence number for this stream.
+    #[serde(default)]
+    pub event_seq: u64,
+    #[serde(flatten)]
+    pub event: RuntimeEvent,
+}
+
+impl RuntimeEventNotification {
+    #[must_use]
+    pub fn new(event_seq: u64, event: RuntimeEvent) -> Self {
+        Self { event_seq, event }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeJobCapabilities {
@@ -151,6 +174,7 @@ pub struct RuntimeProtocolSchema {
     pub json_value: serde_json::Value,
     pub runtime_command: RuntimeCommand,
     pub runtime_event: RuntimeEvent,
+    pub runtime_event_notification: RuntimeEventNotification,
     pub runtime_info: RuntimeInfo,
     pub runtime_tool_spec: RuntimeToolSpec,
     pub runtime_job_error: RuntimeJobError,

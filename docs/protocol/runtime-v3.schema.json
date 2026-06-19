@@ -125,6 +125,24 @@
         },
         {
           "properties": {
+            "cache_creation_tokens": {
+              "description": "Prompt tokens written into the provider's prompt cache, when reported.",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cache_read_tokens": {
+              "description": "Prompt tokens served from the provider's prompt cache, when reported. Additive and optional: producers that don't track caching omit it.",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "input_tokens": {
               "format": "uint64",
               "minimum": 0.0,
@@ -890,6 +908,37 @@
           "type": "object"
         },
         {
+          "description": "Advisory streaming fragment of an in-progress tool call, scoped to its job. Carries a raw provider delta string; UI-only and additive — clients that don't render streaming tool calls may ignore it. The producer is wired in a later wave; this variant only reserves the protocol shape.",
+          "properties": {
+            "delta": {
+              "type": "string"
+            },
+            "index": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "tool_call_delta"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "delta",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
           "description": "A session turn needs a client/human decision before continuing.",
           "properties": {
             "arguments": true,
@@ -952,6 +1001,372 @@
       "required": [
         "method"
       ],
+      "type": "object"
+    },
+    "RuntimeEventNotification": {
+      "description": "Params payload of a `runtime/event` notification: the event itself plus a monotonic, per-stream sequence number so clients can detect dropped events and request replay. The event fields are flattened, so this is backward compatible with clients that read the bare event from `params`; `event_seq` is an additive sibling field (defaulting to 0 until a later wave assigns the real monotonic value at emit time).",
+      "oneOf": [
+        {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "tool_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "job_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "job_progress"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "message",
+            "stage",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_cancel_requested"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_completed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "$ref": "#/definitions/RuntimeJobError"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "job_cancelled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A structured step from the built-in agent loop, scoped to its job.",
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/AgentEventKind"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "agent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session has been created or resumed.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session has started processing a user turn.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "turn_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session is ready for the next client action.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_idle"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed session has been closed.",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_closed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A structured agent-loop step scoped to an interactive session.",
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/AgentEventKind"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session_agent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "session_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Advisory streaming fragment of an in-progress tool call, scoped to its job. Carries a raw provider delta string; UI-only and additive — clients that don't render streaming tool calls may ignore it. The producer is wired in a later wave; this variant only reserves the protocol shape.",
+          "properties": {
+            "delta": {
+              "type": "string"
+            },
+            "index": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "tool_call_delta"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "delta",
+            "job_id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A session turn needs a client/human decision before continuing.",
+          "properties": {
+            "arguments": true,
+            "request_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "approval_requested"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "request_id",
+            "session_id",
+            "tool",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A host-managed authentication lifecycle update.",
+          "properties": {
+            "kind": {
+              "$ref": "#/definitions/AuthEventKind"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "auth"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "eventSeq": {
+          "default": 0,
+          "description": "Monotonically increasing, gap-detectable sequence number for this stream.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "RuntimeInfo": {
@@ -1281,6 +1696,9 @@
     "runtimeEvent": {
       "$ref": "#/definitions/RuntimeEvent"
     },
+    "runtimeEventNotification": {
+      "$ref": "#/definitions/RuntimeEventNotification"
+    },
     "runtimeInfo": {
       "$ref": "#/definitions/RuntimeInfo"
     },
@@ -1322,6 +1740,7 @@
     "jsonValue",
     "runtimeCommand",
     "runtimeEvent",
+    "runtimeEventNotification",
     "runtimeInfo",
     "runtimeJob",
     "runtimeJobCancelRequest",

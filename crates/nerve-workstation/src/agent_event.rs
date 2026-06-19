@@ -31,6 +31,10 @@ pub(crate) fn agent_event_kind(event: AgentEvent) -> Option<AgentEventKind> {
         } => AgentEventKind::Usage {
             input_tokens: u64::from(input_tokens),
             output_tokens: u64::from(output_tokens),
+            // Cache token reporting is wired in a later (agent) wave; the agent
+            // event doesn't carry it yet, so omit the optional fields.
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
         },
         AgentEvent::Done { .. } => return None,
     })

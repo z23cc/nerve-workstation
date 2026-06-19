@@ -170,6 +170,12 @@ export type RuntimeEvent =
       type: "session_agent";
     }
   | {
+      delta: string;
+      index?: number | null;
+      job_id: string;
+      type: "tool_call_delta";
+    }
+  | {
       arguments: unknown;
       request_id: string;
       session_id: string;
@@ -213,6 +219,14 @@ export type AgentEventKind =
       reason: string;
     }
   | {
+      /**
+       * Prompt tokens written into the provider's prompt cache, when reported.
+       */
+      cache_creation_tokens?: number | null;
+      /**
+       * Prompt tokens served from the provider's prompt cache, when reported. Additive and optional: producers that don't track caching omit it.
+       */
+      cache_read_tokens?: number | null;
       input_tokens: number;
       kind: "usage";
       output_tokens: number;
@@ -222,6 +236,91 @@ export type AgentEventKind =
  */
 export type AuthEventKind = "login_pending" | "login_completed" | "login_failed" | "credential_refreshed";
 /**
+ * Params payload of a `runtime/event` notification: the event itself plus a monotonic, per-stream sequence number so clients can detect dropped events and request replay. The event fields are flattened, so this is backward compatible with clients that read the bare event from `params`; `event_seq` is an additive sibling field (defaulting to 0 until a later wave assigns the real monotonic value at emit time).
+ */
+export type RuntimeEventNotification = {
+  /**
+   * Monotonically increasing, gap-detectable sequence number for this stream.
+   */
+  eventSeq?: number;
+} & RuntimeEventNotification1;
+export type RuntimeEventNotification1 =
+  | {
+      command: string;
+      job_id: string;
+      tool_name?: string | null;
+      type: "job_started";
+    }
+  | {
+      current?: number | null;
+      job_id: string;
+      message: string;
+      stage: string;
+      total?: number | null;
+      type: "job_progress";
+    }
+  | {
+      job_id: string;
+      type: "job_cancel_requested";
+    }
+  | {
+      job_id: string;
+      type: "job_completed";
+    }
+  | {
+      error: RuntimeJobError;
+      job_id: string;
+      type: "job_failed";
+    }
+  | {
+      job_id: string;
+      type: "job_cancelled";
+    }
+  | {
+      event: AgentEventKind;
+      job_id: string;
+      type: "agent";
+    }
+  | {
+      session_id: string;
+      type: "session_started";
+    }
+  | {
+      session_id: string;
+      type: "turn_started";
+    }
+  | {
+      session_id: string;
+      type: "session_idle";
+    }
+  | {
+      session_id: string;
+      type: "session_closed";
+    }
+  | {
+      event: AgentEventKind;
+      session_id: string;
+      type: "session_agent";
+    }
+  | {
+      delta: string;
+      index?: number | null;
+      job_id: string;
+      type: "tool_call_delta";
+    }
+  | {
+      arguments: unknown;
+      request_id: string;
+      session_id: string;
+      tool: string;
+      type: "approval_requested";
+    }
+  | {
+      kind: AuthEventKind;
+      provider: string;
+      type: "auth";
+    };
+/**
  * Status values used by daemon-owned runtime jobs.
  */
 export type RuntimeJobStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled";
@@ -230,6 +329,7 @@ export interface RuntimeProtocolSchema {
   jsonValue: unknown;
   runtimeCommand: RuntimeCommand;
   runtimeEvent: RuntimeEvent;
+  runtimeEventNotification: RuntimeEventNotification;
   runtimeInfo: RuntimeInfo;
   runtimeJob: RuntimeJobSnapshot;
   runtimeJobCancelRequest: RuntimeJobCancelRequest;

@@ -11,7 +11,7 @@ use nerve_runtime::{
     protocol::{
         RUNTIME_DAEMON_NAME, RUNTIME_EVENT_METHOD, RUNTIME_INFO_METHOD, RUNTIME_JOB_CANCEL_METHOD,
         RUNTIME_JOB_GET_METHOD, RUNTIME_JOB_LIST_METHOD, RUNTIME_JOB_START_METHOD,
-        RUNTIME_TOOLS_LIST_METHOD, RuntimeInfo,
+        RUNTIME_TOOLS_LIST_METHOD, RuntimeEventNotification, RuntimeInfo,
     },
 };
 use serde_json::{Value, json};
@@ -183,7 +183,11 @@ fn emit_error(
 }
 
 pub(super) fn runtime_event_notification(event: RuntimeEvent) -> Value {
-    json!({ "jsonrpc": "2.0", "method": RUNTIME_EVENT_METHOD, "params": event })
+    // `event_seq` defaults to 0 here; assigning a real monotonic per-stream
+    // sequence at emit time is a later wave. The carrier flattens the event, so
+    // `params` stays backward compatible with clients reading the bare event.
+    let params = RuntimeEventNotification::new(0, event);
+    json!({ "jsonrpc": "2.0", "method": RUNTIME_EVENT_METHOD, "params": params })
 }
 
 fn runtime_info() -> Value {
