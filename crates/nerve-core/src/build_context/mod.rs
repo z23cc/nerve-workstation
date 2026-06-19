@@ -9,7 +9,11 @@ use crate::{
 };
 #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
 use crate::{SemanticSearchMode, SemanticSearchRequest};
-use crate::{repomap::RepoMapResponse, selection::SelectionKey};
+use crate::{
+    repomap::RepoMapResponse,
+    selection::SelectionKey,
+    workspace_context::{RenderCache, workspace_context_for_selection_cached},
+};
 use serde::{Deserialize, Serialize};
 
 mod reference_expansion;
@@ -133,14 +137,24 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
         &repo_map,
         &semantic_scores,
     );
-    let (mut selection, mut excluded) =
-        allocate_selection(provider, snapshot, &ranked, request.token_budget, max_files)?;
+    // One render cache spans the greedy allocation and reference expansion:
+    // each (file, mode) is rendered once instead of re-rendered per trial.
+    let mut render_cache = RenderCache::new(snapshot.generation);
+    let (mut selection, mut excluded) = allocate_selection(
+        provider,
+        snapshot,
+        &ranked,
+        request.token_budget,
+        max_files,
+        &mut render_cache,
+    )?;
     excluded.extend(reference_expansion::expand_reference_codemap_selection(
         provider,
         snapshot,
         &mut selection,
         request.token_budget,
         cancel,
+        &mut render_cache,
     )?);
     remove_selected_exclusions(&mut excluded, &selection);
     let mut workspace = workspace_context_for_selection(
@@ -371,6 +385,7 @@ fn allocate_selection<P: CatalogProvider>(
     ranked: &[Candidate<'_>],
     token_budget: usize,
     max_files: usize,
+    render_cache: &mut RenderCache,
 ) -> Result<(Selection, Vec<BuildContextExcludedFile>), NerveError> {
     let mut selection = Selection::default();
     let mut excluded = Vec::new();
@@ -391,7 +406,7 @@ fn allocate_selection<P: CatalogProvider>(
             next_selection
                 .files
                 .insert(selection_key(candidate.entry), mode);
-            let workspace = workspace_context_for_selection(
+            let workspace = workspace_context_for_selection_cached(
                 provider,
                 snapshot,
                 &next_selection,
@@ -402,6 +417,7 @@ fn allocate_selection<P: CatalogProvider>(
                     ],
                     instructions: None,
                 },
+                render_cache,
             )?;
             if workspace.tokens.total_tokens <= token_budget {
                 selection = next_selection;

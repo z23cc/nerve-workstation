@@ -88,6 +88,46 @@ pub fn workspace_context_for_selection<P: CatalogProvider>(
     selection: &Selection,
     request: &WorkspaceContextRequest,
 ) -> Result<WorkspaceContextResponse, NerveError> {
+    let mut cache = RenderCache::new(snapshot.generation);
+    workspace_context_for_selection_cached(provider, snapshot, selection, request, &mut cache)
+}
+
+/// Per-file render memoization for repeated `workspace_context` assembly.
+///
+/// `build_context`'s greedy allocator assembles many overlapping selections
+/// that differ by a single trial file. Rendering each already-selected file
+/// from scratch on every trial is `O(files²)`. Rendered text and its token
+/// breakdown are a pure function of `(SelectionKey, SelectionMode, generation)`,
+/// so they are cached here and reused byte-for-byte across trials. The final
+/// `count_tokens` over the assembled context is *not* cached: BPE is not
+/// additive across the `\n\n` joins, so the whole-string count is the only
+/// faithful total and must be recomputed per assembly.
+pub(crate) struct RenderCache {
+    generation: u64,
+    entries: BTreeMap<(SelectionKey, SelectionMode), RenderedFile>,
+}
+
+impl RenderCache {
+    pub(crate) fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            entries: BTreeMap::new(),
+        }
+    }
+}
+
+/// Assemble an explicit selection, memoizing per-file rendering across calls.
+pub(crate) fn workspace_context_for_selection_cached<P: CatalogProvider>(
+    provider: &P,
+    snapshot: &CatalogSnapshot,
+    selection: &Selection,
+    request: &WorkspaceContextRequest,
+    cache: &mut RenderCache,
+) -> Result<WorkspaceContextResponse, NerveError> {
+    debug_assert_eq!(
+        cache.generation, snapshot.generation,
+        "RenderCache reused across snapshot generations"
+    );
     let include = IncludeSet::from_request(request);
     let selected = selected_entries(provider, snapshot, selection);
 
@@ -103,7 +143,7 @@ pub fn workspace_context_for_selection<P: CatalogProvider>(
     let mut file_tokens = Vec::new();
     let mut rendered_files = Vec::new();
     for selected_file in selected {
-        let rendered = render_selected_file(provider, &selected_file)?;
+        let rendered = render_selected_file_cached(provider, &selected_file, cache)?;
         file_tokens.push(rendered.tokens);
         rendered_files.push(rendered.text);
     }
@@ -186,7 +226,7 @@ struct SelectedFile<'a> {
     mode: SelectionMode,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RenderedFile {
     text: String,
     tokens: WorkspaceContextFileTokens,
@@ -244,6 +284,20 @@ fn render_selected_file<P: CatalogProvider>(
         SelectionMode::Slices(ranges) => render_slices_file(provider, selected, ranges),
         SelectionMode::CodemapOnly => render_codemap_file(provider, selected),
     }
+}
+
+fn render_selected_file_cached<P: CatalogProvider>(
+    provider: &P,
+    selected: &SelectedFile<'_>,
+    cache: &mut RenderCache,
+) -> Result<RenderedFile, NerveError> {
+    let key = (selected.key.clone(), selected.mode.clone());
+    if let Some(rendered) = cache.entries.get(&key) {
+        return Ok(rendered.clone());
+    }
+    let rendered = render_selected_file(provider, selected)?;
+    cache.entries.insert(key, rendered.clone());
+    Ok(rendered)
 }
 
 fn render_full_file<P: CatalogProvider>(

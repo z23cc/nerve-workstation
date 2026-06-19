@@ -14,14 +14,14 @@ use std::{
 };
 
 /// Inclusive 1-based line range used by slice selections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LineRange {
     pub start_line: usize,
     pub end_line: usize,
 }
 
 /// Selection mode for one file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionMode {
     Full,

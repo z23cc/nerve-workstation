@@ -1,8 +1,11 @@
 use super::{BuildContextExcludedFile, format_score};
 use crate::{
     CancelToken, CatalogEntry, CatalogProvider, CatalogSnapshot, NerveError, Selection,
-    SelectionMode, WorkspaceContextInclude, WorkspaceContextRequest, repomap::IndexedFile,
-    repomap::indexed_files_cancellable, selection::SelectionKey, workspace_context_for_selection,
+    SelectionMode, WorkspaceContextInclude, WorkspaceContextRequest,
+    repomap::IndexedFile,
+    repomap::indexed_files_cancellable,
+    selection::SelectionKey,
+    workspace_context::{RenderCache, workspace_context_for_selection_cached},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +23,7 @@ pub(super) fn expand_reference_codemap_selection<P: CatalogProvider + Sync>(
     selection: &mut Selection,
     token_budget: usize,
     cancel: &CancelToken,
+    render_cache: &mut RenderCache,
 ) -> Result<Vec<BuildContextExcludedFile>, NerveError> {
     if selection.files.is_empty() || token_budget == 0 {
         return Ok(Vec::new());
@@ -36,7 +40,14 @@ pub(super) fn expand_reference_codemap_selection<P: CatalogProvider + Sync>(
         let Some(entry) = entries_by_path.get(path.as_str()) else {
             continue;
         };
-        if !try_add_codemap(provider, snapshot, selection, entry, token_budget)? {
+        if !try_add_codemap(
+            provider,
+            snapshot,
+            selection,
+            entry,
+            token_budget,
+            render_cache,
+        )? {
             excluded.push(expansion_excluded_file(
                 provider,
                 entry,
@@ -143,6 +154,7 @@ fn try_add_codemap<P: CatalogProvider>(
     selection: &mut Selection,
     entry: &CatalogEntry,
     token_budget: usize,
+    render_cache: &mut RenderCache,
 ) -> Result<bool, NerveError> {
     let key = selection_key(entry);
     if selection.files.contains_key(&key) {
@@ -151,7 +163,7 @@ fn try_add_codemap<P: CatalogProvider>(
 
     let mut next_selection = selection.clone();
     next_selection.files.insert(key, SelectionMode::CodemapOnly);
-    let workspace = workspace_context_for_selection(
+    let workspace = workspace_context_for_selection_cached(
         provider,
         snapshot,
         &next_selection,
@@ -162,6 +174,7 @@ fn try_add_codemap<P: CatalogProvider>(
             ],
             instructions: None,
         },
+        render_cache,
     )?;
 
     if workspace.tokens.total_tokens <= token_budget {
