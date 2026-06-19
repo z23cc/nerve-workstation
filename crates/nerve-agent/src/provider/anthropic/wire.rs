@@ -184,10 +184,18 @@ fn neutral_to_blocks(msg: &Message) -> Option<(String, Vec<Value>)> {
     }
 }
 
-/// Build the content blocks for an assistant message: optional text plus any
-/// `tool_use` blocks reconstructed from its `tool_calls`.
+/// Build the content blocks for an assistant message: a replayed `thinking`
+/// block (when present) first, then optional text, then any `tool_use` blocks
+/// reconstructed from its `tool_calls`.
+///
+/// Anthropic requires the thinking block to lead the turn and carry the original
+/// `signature` verbatim; a block without a signature is omitted (replaying
+/// unsigned thinking is rejected).
 fn assistant_blocks(msg: &Message) -> Vec<Value> {
     let mut blocks: Vec<Value> = Vec::new();
+    if let Some(thinking) = thinking_replay_block(msg) {
+        blocks.push(thinking);
+    }
     if !msg.content.is_empty() {
         blocks.push(text_block(&msg.content));
     }
@@ -203,6 +211,18 @@ fn assistant_blocks(msg: &Message) -> Vec<Value> {
         blocks.push(text_block(""));
     }
     blocks
+}
+
+/// A `thinking` block replaying the message's prior reasoning, or `None` when
+/// there is no reasoning or it lacks the signature Anthropic requires verbatim.
+fn thinking_replay_block(msg: &Message) -> Option<Value> {
+    let reasoning = msg.reasoning.as_ref()?;
+    let signature = reasoning.signature.as_deref()?;
+    Some(json!({
+        "type": "thinking",
+        "thinking": reasoning.text,
+        "signature": signature,
+    }))
 }
 
 /// A `text` content block.
@@ -357,6 +377,44 @@ mod tests {
         assert_eq!(tr["type"], "tool_result");
         assert_eq!(tr["tool_use_id"], "tc_1");
         assert_eq!(tr["content"], "the result");
+    }
+
+    #[test]
+    fn assistant_reasoning_replays_thinking_block_first_with_signature() {
+        use crate::message::Reasoning;
+        let mut req = base_req();
+        let mut assistant = Message::assistant("the answer");
+        assistant.reasoning = Some(Reasoning {
+            text: "let me think".to_string(),
+            signature: Some("sig-xyz".to_string()),
+        });
+        req.messages = vec![Message::user("q"), assistant];
+        let body = build_body(&req, &cred(AuthMode::ApiKey));
+        let msgs = body["messages"].as_array().unwrap();
+        let blocks = msgs[1]["content"].as_array().unwrap();
+        // Thinking block leads, carrying the verbatim signature, then the text.
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "let me think");
+        assert_eq!(blocks[0]["signature"], "sig-xyz");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "the answer");
+    }
+
+    #[test]
+    fn assistant_reasoning_without_signature_is_not_replayed() {
+        use crate::message::Reasoning;
+        let mut req = base_req();
+        let mut assistant = Message::assistant("answer");
+        assistant.reasoning = Some(Reasoning {
+            text: "unsigned thought".to_string(),
+            signature: None,
+        });
+        req.messages = vec![Message::user("q"), assistant];
+        let body = build_body(&req, &cred(AuthMode::ApiKey));
+        let blocks = body["messages"][1]["content"].as_array().unwrap();
+        // No thinking block: an unsigned replay would be rejected by Anthropic.
+        assert!(blocks.iter().all(|b| b["type"] != "thinking"));
+        assert_eq!(blocks[0]["type"], "text");
     }
 
     #[test]

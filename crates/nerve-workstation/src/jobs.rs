@@ -458,8 +458,24 @@ fn is_auth_command(command: &RuntimeCommand) -> bool {
 }
 
 fn map_agent_event(job_id: &str, event: AgentEvent) -> Option<RuntimeEvent> {
+    // Streaming tool-call fragments map to the job-scoped `ToolCallDelta`
+    // RuntimeEvent (advisory/UI-only) rather than a structured agent step.
+    if let AgentEvent::ToolCallDelta { name, arguments } = &event {
+        let delta = tool_call_delta_payload(name, arguments);
+        return Some(RuntimeEvent::tool_call_delta(
+            job_id.to_string(),
+            delta,
+            None,
+        ));
+    }
     crate::agent_event::agent_event_kind(event)
         .map(|kind| RuntimeEvent::agent(job_id.to_string(), kind))
+}
+
+/// Render an advisory tool-call delta as a compact `name(arguments)` string for
+/// the UI-only `ToolCallDelta` event. The wire shape carries a raw delta string.
+fn tool_call_delta_payload(name: &str, arguments: &serde_json::Value) -> String {
+    format!("{name}({arguments})")
 }
 
 fn now_ms() -> u64 {

@@ -109,6 +109,8 @@ impl Assembler {
         ChatResponse {
             content: self.content,
             reasoning: (!self.reasoning.is_empty()).then_some(self.reasoning),
+            // The Responses API does not return a replayable reasoning signature.
+            reasoning_signature: None,
             tool_calls,
             finish_reason,
             usage: self.usage,
@@ -246,11 +248,18 @@ fn finish_reason_for(status: Option<&str>, calls: &BTreeMap<u64, CallBuffer>) ->
     }
 }
 
-/// Token accounting from a Responses `usage` object.
+/// Token accounting from a Responses `usage` object. Cached prompt tokens are
+/// reported under `input_tokens_details.cached_tokens`; OpenAI does not surface a
+/// separate cache-creation count, so that stays `0`.
 fn parse_usage(usage: &Value) -> Usage {
+    let cache_read_tokens = usage
+        .get("input_tokens_details")
+        .map_or(0, |details| field_u32(details, "cached_tokens"));
     Usage {
         input_tokens: field_u32(usage, "input_tokens"),
         output_tokens: field_u32(usage, "output_tokens"),
+        cache_read_tokens,
+        cache_creation_tokens: 0,
     }
 }
 

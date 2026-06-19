@@ -29,6 +29,9 @@ enum OpenBlock {
 pub struct ResponseBuilder {
     content: String,
     reasoning: String,
+    /// Opaque signature for the thinking block (from `signature_delta`), which
+    /// must be replayed verbatim on the next turn or Anthropic rejects it.
+    reasoning_signature: String,
     tool_calls: Vec<ToolCall>,
     finish_reason: Option<FinishReason>,
     usage: Usage,
@@ -107,6 +110,11 @@ impl ResponseBuilder {
                     sink(ChatDelta::Reasoning(text));
                 }
             }
+            Some("signature_delta") => {
+                // The signature arrives whole (not chunked); append defensively.
+                self.reasoning_signature
+                    .push_str(&str_field(delta, "signature"));
+            }
             Some("input_json_delta") => {
                 if let Some(OpenBlock::ToolUse { json_buf, .. }) = self.current.as_mut() {
                     json_buf.push_str(&str_field(delta, "partial_json"));
@@ -144,13 +152,21 @@ impl ResponseBuilder {
 
     /// Merge token counts from a `usage` object, keeping the larger of any
     /// previously-seen value (Anthropic reports input once, output cumulatively).
+    /// Cache hits/writes are reported on `message_start` as
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`.
     fn merge_usage(&mut self, usage: &Value) {
-        if let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) {
-            self.usage.input_tokens = self.usage.input_tokens.max(input as u32);
-        }
-        if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) {
-            self.usage.output_tokens = self.usage.output_tokens.max(output as u32);
-        }
+        merge_u32_max(&mut self.usage.input_tokens, usage, "input_tokens");
+        merge_u32_max(&mut self.usage.output_tokens, usage, "output_tokens");
+        merge_u32_max(
+            &mut self.usage.cache_read_tokens,
+            usage,
+            "cache_read_input_tokens",
+        );
+        merge_u32_max(
+            &mut self.usage.cache_creation_tokens,
+            usage,
+            "cache_creation_input_tokens",
+        );
     }
 
     /// Consume the builder and assemble the final [`ChatResponse`].
@@ -170,9 +186,15 @@ impl ResponseBuilder {
         } else {
             Some(self.reasoning)
         };
+        let reasoning_signature = if self.reasoning_signature.is_empty() {
+            None
+        } else {
+            Some(self.reasoning_signature)
+        };
         ChatResponse {
             content: self.content,
             reasoning,
+            reasoning_signature,
             tool_calls: self.tool_calls,
             finish_reason,
             usage: self.usage,
@@ -222,6 +244,14 @@ fn str_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+/// Raise `slot` to the larger of its current value and `usage[key]` (as `u32`),
+/// leaving it untouched when the field is absent.
+fn merge_u32_max(slot: &mut u32, usage: &Value, key: &str) {
+    if let Some(value) = usage.get(key).and_then(Value::as_u64) {
+        *slot = (*slot).max(value as u32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,11 +291,30 @@ mod tests {
             resp.usage,
             Usage {
                 input_tokens: 10,
-                output_tokens: 3
+                output_tokens: 3,
+                ..Usage::default()
             }
         );
         assert!(matches!(deltas[0], ChatDelta::Text(ref s) if s == "Hel"));
         assert!(matches!(deltas[1], ChatDelta::Text(ref s) if s == "lo"));
+    }
+
+    #[test]
+    fn captures_cache_read_and_creation_tokens() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"usage": {
+                "input_tokens": 5,
+                "cache_read_input_tokens": 1_024,
+                "cache_creation_input_tokens": 256
+            }}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}),
+            json!({"type": "message_stop"}),
+        ];
+        let (_, resp, _) = run(&events);
+        assert_eq!(resp.usage.input_tokens, 5);
+        assert_eq!(resp.usage.output_tokens, 7);
+        assert_eq!(resp.usage.cache_read_tokens, 1_024);
+        assert_eq!(resp.usage.cache_creation_tokens, 256);
     }
 
     #[test]
@@ -279,6 +328,20 @@ mod tests {
         let (deltas, resp, _) = run(&events);
         assert_eq!(resp.reasoning.as_deref(), Some("hmm"));
         assert!(matches!(deltas[0], ChatDelta::Reasoning(ref s) if s == "hmm"));
+    }
+
+    #[test]
+    fn captures_thinking_signature_for_replay() {
+        let events = vec![
+            json!({"type": "content_block_start", "content_block": {"type": "thinking"}}),
+            json!({"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "step"}}),
+            json!({"type": "content_block_delta", "delta": {"type": "signature_delta", "signature": "sig-abc123"}}),
+            json!({"type": "content_block_stop"}),
+            json!({"type": "message_stop"}),
+        ];
+        let (_, resp, _) = run(&events);
+        assert_eq!(resp.reasoning.as_deref(), Some("step"));
+        assert_eq!(resp.reasoning_signature.as_deref(), Some("sig-abc123"));
     }
 
     #[test]

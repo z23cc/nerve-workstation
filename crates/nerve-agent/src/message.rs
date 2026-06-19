@@ -38,6 +38,21 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// An assistant reasoning ("thinking") block carried alongside a message.
+///
+/// Minimal on purpose: the visible `text` plus the provider `signature` that
+/// some vendors (Anthropic) require to be replayed *verbatim* on the next turn,
+/// or they reject the request. Providers that don't sign reasoning leave
+/// `signature` `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reasoning {
+    /// The reasoning text the model emitted.
+    pub text: String,
+    /// Opaque provider signature for the block, replayed verbatim when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
 /// A single conversation message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
@@ -45,6 +60,9 @@ pub struct Message {
     pub role: Role,
     /// Textual content of the message.
     pub content: String,
+    /// Assistant reasoning block to replay on the next turn, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
     /// Tool calls requested by an assistant message.
     pub tool_calls: Vec<ToolCall>,
     /// For a `Tool` message, the id of the call this result answers.
@@ -78,6 +96,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: content.into(),
+            reasoning: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
@@ -88,6 +107,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            reasoning: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -106,12 +126,23 @@ pub enum FinishReason {
 }
 
 /// Token accounting for a single response.
+///
+/// The cache fields are populated by providers that report prompt caching
+/// (currently Anthropic); they default to `0` for providers that don't, so
+/// existing constructors that set only `input_tokens`/`output_tokens` keep
+/// working via struct-update (`..Default::default()`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Number of input (prompt) tokens.
     pub input_tokens: u32,
     /// Number of output (completion) tokens.
     pub output_tokens: u32,
+    /// Prompt tokens served from the provider's prompt cache (`0` if unreported).
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    /// Prompt tokens written into the provider's prompt cache (`0` if unreported).
+    #[serde(default)]
+    pub cache_creation_tokens: u32,
 }
 
 /// An incremental piece of a streaming chat response.
@@ -132,6 +163,10 @@ pub struct ChatResponse {
     pub content: String,
     /// Assembled reasoning text, if the model produced any.
     pub reasoning: Option<String>,
+    /// Opaque provider signature for the reasoning block, when the provider
+    /// returns one (Anthropic). Must be replayed verbatim on the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_signature: Option<String>,
     /// Tool calls the model requested.
     pub tool_calls: Vec<ToolCall>,
     /// Why generation stopped.

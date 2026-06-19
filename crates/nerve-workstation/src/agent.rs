@@ -483,6 +483,9 @@ fn emit_event(event: AgentEvent) {
         // The CLI prints a final token total in the run summary, so per-turn
         // usage deltas are not echoed here.
         AgentEvent::Usage { .. } => {}
+        // Advisory streaming fragment; the assembled call is shown via
+        // `ToolStarted`, so the CLI ignores the partial deltas.
+        AgentEvent::ToolCallDelta { .. } => {}
         AgentEvent::Done { reason } => println!("\n\u{25cf} {reason}"),
     }
 }

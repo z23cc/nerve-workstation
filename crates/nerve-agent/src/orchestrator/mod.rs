@@ -3,46 +3,30 @@
 //! This module defines the configuration ([`AgentDef`]), the streamed
 //! [`AgentEvent`]s, and the final [`RunOutcome`], plus the [`Orchestrator`] that
 //! holds a borrowed provider/toolbox and drives the LLM/tool loop in
-//! [`Orchestrator::run`].
+//! [`Orchestrator::run`]. The per-turn mechanics live in [`turn`] and the
+//! history-bounding pass in [`compaction`].
 
-use std::borrow::Cow;
+mod capabilities;
+mod compaction;
+mod overflow;
+mod turn;
+
+pub use capabilities::ModelCapabilities;
 
 use nerve_core::CancelToken;
 
 use crate::error::{AgentError, AgentResult};
-use crate::message::{
-    ChatDelta, ChatRequest, ChatResponse, FinishReason, Message, Role, ToolCall, ToolSpec, Usage,
-};
+use crate::message::{FinishReason, Message, Usage};
 use crate::provider::{LlmProvider, ToolBox};
 
-/// Total serialized-history budget (chars) before compaction kicks in.
-const HISTORY_COMPACT_THRESHOLD: usize = 96_000;
-/// Number of most-recent messages always preserved verbatim by compaction.
-const HISTORY_KEEP_RECENT: usize = 8;
-/// Placeholder substituted for an elided tool output during compaction.
-const ELIDED_TOOL_OUTPUT: &str = "[tool output elided to fit context]";
-/// When this many turns (or fewer) remain, warn the model so it wraps up instead
-/// of being abruptly cut off at `max_turns`.
-const TURN_BUDGET_WARN: u32 = 3;
+use turn::{accumulate_usage, turn_budget_prompt};
+
 /// Pushed once (opt-in) when the model first signals completion, prompting it to
 /// re-verify the result before the run ends.
 const COMPLETION_VERIFY_PROMPT: &str = "Before finishing: double-check that you actually \
 accomplished the task — re-verify the key result against the original request. If anything is \
 incomplete or unverified, keep working (call tools to finish or check); if it is genuinely done, \
 give your final answer.";
-
-/// Near the turn cap, append a heads-up so the model finishes and reports partial
-/// progress instead of being cut off at `max_turns`. Returns the prompt unchanged
-/// when there is ample budget (or the cap is itself tiny).
-fn turn_budget_prompt(system: &str, remaining: u32, max_turns: u32) -> Cow<'_, str> {
-    if max_turns <= TURN_BUDGET_WARN || remaining > TURN_BUDGET_WARN {
-        return Cow::Borrowed(system);
-    }
-    Cow::Owned(format!(
-        "{system}\n\n[{remaining} turn(s) left before this run ends. Prioritize finishing \
-         and reporting the task; don't start work you can't complete in time.]"
-    ))
-}
 
 /// Static configuration for an agent run.
 #[derive(Clone, Debug)]
@@ -110,6 +94,17 @@ pub enum AgentEvent {
     Usage {
         input_tokens: u32,
         output_tokens: u32,
+        /// Prompt tokens served from the provider's prompt cache (`0` if unreported).
+        cache_read_tokens: u32,
+        /// Prompt tokens written into the provider's prompt cache (`0` if unreported).
+        cache_creation_tokens: u32,
+    },
+    /// An advisory fragment of an in-progress tool call (streaming), forwarded
+    /// for UI only. Dispatch always uses the *assembled* call from the response;
+    /// this never drives tool execution.
+    ToolCallDelta {
+        name: String,
+        arguments: serde_json::Value,
     },
     /// The run completed with a terminal reason.
     Done { reason: String },
@@ -128,6 +123,21 @@ pub struct RunOutcome {
     pub usage: Usage,
 }
 
+/// Restored state for resuming an [`Orchestrator`] from a persisted session.
+///
+/// Carries the prior transcript so a continued run sees earlier turns —
+/// including the *results* of tool calls already executed — without re-running
+/// them, plus any run counters worth preserving. Intentionally minimal data:
+/// host/session wiring (mapping a persisted checkpoint into these fields) lands
+/// in a later wave; this is the seam it will target.
+#[derive(Clone, Debug, Default)]
+pub struct ResumeState {
+    /// Transcript accumulated so far (user/assistant/tool messages).
+    pub history: Vec<Message>,
+    /// Context-overflow truncations already performed in the prior session.
+    pub truncations: u32,
+}
+
 /// Observe/augment lifecycle hooks invoked by the [`Orchestrator`] around a run.
 ///
 /// This is an **observe/augment** seam, deliberately distinct from two
@@ -144,7 +154,7 @@ pub trait Hook: Send + Sync {
     fn on_start(&self, _system_prompt: &mut String) {}
 
     /// Called for every provider request after it is built and before it is sent.
-    fn on_request(&self, _req: &mut ChatRequest) {}
+    fn on_request(&self, _req: &mut crate::message::ChatRequest) {}
 
     /// Called for every [`AgentEvent`] as it is streamed out (observe-only).
     fn on_event(&self, _event: &AgentEvent) {}
@@ -160,21 +170,59 @@ pub struct Orchestrator<'a> {
     provider: &'a dyn LlmProvider,
     toolbox: &'a dyn ToolBox,
     def: AgentDef,
+    /// Context/output budgets for `def.model`, resolved once at construction.
+    caps: ModelCapabilities,
     history: Vec<Message>,
     hooks: Vec<&'a dyn Hook>,
+    /// Count of context-overflow truncations performed during the current run.
+    truncations: u32,
 }
 
 impl<'a> Orchestrator<'a> {
     /// Build an orchestrator over a borrowed provider and toolbox. No lifecycle
     /// hooks are registered; use [`Orchestrator::with_hooks`] to add them.
     pub fn new(provider: &'a dyn LlmProvider, toolbox: &'a dyn ToolBox, def: AgentDef) -> Self {
+        let caps = ModelCapabilities::for_model(&def.model);
         Self {
             provider,
             toolbox,
             def,
+            caps,
             history: Vec::new(),
             hooks: Vec::new(),
+            truncations: 0,
         }
+    }
+
+    /// Build an orchestrator resuming a persisted session from `state`.
+    ///
+    /// The prior transcript (including already-executed tool results) is loaded
+    /// so the next [`run`](Self::run) continues from it without re-issuing those
+    /// tool calls; restored counters (e.g. truncations) carry over. Equivalent to
+    /// [`new`](Self::new) when `state` is [`ResumeState::default`].
+    pub fn resume(
+        provider: &'a dyn LlmProvider,
+        toolbox: &'a dyn ToolBox,
+        def: AgentDef,
+        state: ResumeState,
+    ) -> Self {
+        let caps = ModelCapabilities::for_model(&def.model);
+        Self {
+            provider,
+            toolbox,
+            def,
+            caps,
+            history: state.history,
+            hooks: Vec::new(),
+            truncations: state.truncations,
+        }
+    }
+
+    /// Number of context-overflow truncations performed so far. A host can
+    /// surface this (e.g. to warn that history was lossily shortened).
+    #[must_use]
+    pub fn truncations(&self) -> u32 {
+        self.truncations
     }
 
     /// Register lifecycle [`Hook`]s, returning `self` for chaining. Hooks fire in
@@ -283,6 +331,8 @@ impl<'a> Orchestrator<'a> {
             sink(AgentEvent::Usage {
                 input_tokens: response.usage.input_tokens,
                 output_tokens: response.usage.output_tokens,
+                cache_read_tokens: response.usage.cache_read_tokens,
+                cache_creation_tokens: response.usage.cache_creation_tokens,
             });
             if !response.content.is_empty() {
                 final_text = response.content.clone();
@@ -352,179 +402,20 @@ impl<'a> Orchestrator<'a> {
         })
     }
 
-    /// Tool specs advertised to the model, narrowed by `def.tool_filter`.
-    fn filtered_tools(&self) -> Vec<ToolSpec> {
-        let specs = self.toolbox.specs();
-        match &self.def.tool_filter {
-            None => specs,
-            Some(allow) => specs
-                .into_iter()
-                .filter(|spec| allow.iter().any(|name| name == &spec.name))
-                .collect(),
-        }
-    }
-
-    /// Issue one provider request, forwarding streamed deltas as events, then
-    /// append the assistant message to history and return the assembled reply.
-    fn execute_turn(
-        &mut self,
-        system_prompt: &str,
-        tools: &[ToolSpec],
-        cancel: &CancelToken,
-        sink: &mut dyn FnMut(AgentEvent),
-    ) -> AgentResult<ChatResponse> {
-        let mut req = ChatRequest {
-            model: self.def.model.clone(),
-            system: Some(system_prompt.to_string()),
-            messages: self.history.clone(),
-            tools: tools.to_vec(),
-            temperature: self.def.temperature,
-            max_tokens: None,
-            reasoning_effort: self.def.reasoning_effort.clone(),
-        };
-        for hook in &self.hooks {
-            hook.on_request(&mut req);
-        }
-
-        let response = self.provider.chat(&req, cancel, &mut |delta| match delta {
-            ChatDelta::Text(text) => sink(AgentEvent::AssistantText(text)),
-            ChatDelta::Reasoning(text) => sink(AgentEvent::Reasoning(text)),
-            ChatDelta::ToolCall(_) => {}
-        })?;
-
-        if cancel.is_cancelled() {
-            return Err(AgentError::Cancelled);
-        }
-
-        self.history.push(Message {
-            role: Role::Assistant,
-            content: response.content.clone(),
-            tool_calls: response.tool_calls.clone(),
-            tool_call_id: None,
-            name: None,
-        });
-        Ok(response)
-    }
-
-    /// Run every requested tool call, emitting lifecycle events and appending a
-    /// `Tool` result message per call. Returns `Some(reason)` when the failure
-    /// guardrail trips and the run should stop.
-    fn dispatch_tool_calls(
-        &mut self,
-        calls: &[ToolCall],
-        cancel: &CancelToken,
-        sink: &mut dyn FnMut(AgentEvent),
-        consecutive_failures: &mut u32,
-    ) -> AgentResult<Option<String>> {
-        for call in calls {
-            if cancel.is_cancelled() {
-                return Err(AgentError::Cancelled);
-            }
-            sink(AgentEvent::ToolStarted {
-                name: call.name.clone(),
-                args: call.arguments.clone(),
-            });
-
-            let (ok, output) = match self.toolbox.call(&call.name, &call.arguments, cancel) {
-                Ok(value) => (true, value_to_string(&value)),
-                Err(err) => (false, format!("error: {err}")),
-            };
-            sink(AgentEvent::ToolFinished {
-                name: call.name.clone(),
-                ok,
-                output: output.clone(),
-            });
-            if ok {
-                *consecutive_failures = 0;
-                self.history
-                    .push(Message::tool(call.id.clone(), call.name.clone(), output));
-                continue;
-            }
-
-            *consecutive_failures += 1;
-            if let Some(limit) = self.def.max_tool_failures
-                && *consecutive_failures > limit
-            {
-                self.history
-                    .push(Message::tool(call.id.clone(), call.name.clone(), output));
-                return Ok(Some(format!("max_tool_failures ({limit}) exceeded")));
-            }
-            // From the second consecutive failure on, surface the remaining failure
-            // budget so the model changes approach instead of repeating a failing call.
-            let body = failure_feedback(output, *consecutive_failures, self.def.max_tool_failures);
-            self.history
-                .push(Message::tool(call.id.clone(), call.name.clone(), body));
-        }
-        Ok(None)
-    }
-
-    /// Bound the serialized history: while it exceeds the threshold, elide the
-    /// oldest tool-result body, never touching the most recent messages.
+    /// Bound the history so it stays within the model's context window. The
+    /// trigger budget is derived from [`ModelCapabilities`]; see [`compaction`]
+    /// for the elision strategy.
     fn compact_history(&mut self) {
-        if self.history.len() <= HISTORY_KEEP_RECENT {
-            return;
-        }
-        let keep_from = self.history.len() - HISTORY_KEEP_RECENT;
-        while serialized_len(&self.history) > HISTORY_COMPACT_THRESHOLD {
-            let oldest = self.history[..keep_from].iter().position(is_elidable_tool);
-            let Some(idx) = oldest else {
-                break;
-            };
-            self.history[idx].content = ELIDED_TOOL_OUTPUT.to_string();
-        }
+        let threshold = compaction::compact_threshold_tokens(&self.caps);
+        compaction::compact_history(&mut self.history, threshold);
     }
-}
-
-/// Append an adaptive nudge to a failed tool result once failures repeat, so the
-/// model changes approach instead of looping on the same call. The first failure
-/// passes through untouched (it may just be transient).
-fn failure_feedback(output: String, consecutive_failures: u32, limit: Option<u32>) -> String {
-    if consecutive_failures < 2 {
-        return output;
-    }
-    match limit {
-        Some(limit) => format!(
-            "{output}\n\n[{consecutive_failures} consecutive tool failures; {} attempt(s) \
-             left before this run aborts. Try a DIFFERENT approach — do not repeat the \
-             same call.]",
-            limit + 1 - consecutive_failures,
-        ),
-        None => format!(
-            "{output}\n\n[{consecutive_failures} consecutive tool failures; try a DIFFERENT \
-             approach rather than repeating the same call.]"
-        ),
-    }
-}
-
-/// A tool message whose body can still be replaced by the compaction placeholder.
-fn is_elidable_tool(msg: &Message) -> bool {
-    msg.role == Role::Tool && msg.content != ELIDED_TOOL_OUTPUT
-}
-
-/// Render a successful tool result as a string: pass JSON strings through
-/// verbatim, serialize anything else compactly.
-fn value_to_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
-    }
-}
-
-/// Add a response's token counts into the running total, saturating on overflow.
-fn accumulate_usage(total: &mut Usage, delta: &Usage) {
-    total.input_tokens = total.input_tokens.saturating_add(delta.input_tokens);
-    total.output_tokens = total.output_tokens.saturating_add(delta.output_tokens);
-}
-
-/// Approximate serialized size of the conversation, used by the compaction guard.
-fn serialized_len(history: &[Message]) -> usize {
-    serde_json::to_string(history).map_or(0, |json| json.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::ProviderId;
+    use crate::message::{ChatDelta, ChatRequest, ChatResponse, Role, ToolCall, ToolSpec};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A provider that replays a fixed script of responses, one per `chat` call,
@@ -623,11 +514,13 @@ mod tests {
         ChatResponse {
             content: content.into(),
             reasoning: None,
+            reasoning_signature: None,
             tool_calls,
             finish_reason: finish,
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
+                ..Usage::default()
             },
         }
     }
@@ -1062,6 +955,261 @@ mod tests {
         assert_eq!(orch.def.system_prompt, "be helpful");
     }
 
+    /// A provider that fails its first `chat` with a context-overflow error and
+    /// then succeeds, recording the message count it saw on the retry.
+    struct OverflowOnceProvider {
+        calls: AtomicUsize,
+        retry_messages: std::sync::Mutex<Option<usize>>,
+    }
+
+    impl OverflowOnceProvider {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                retry_messages: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl LlmProvider for OverflowOnceProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::Anthropic
+        }
+
+        fn chat(
+            &self,
+            req: &ChatRequest,
+            _cancel: &CancelToken,
+            sink: &mut dyn FnMut(ChatDelta),
+        ) -> AgentResult<ChatResponse> {
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                return Err(AgentError::Http(
+                    "HTTP 400: prompt is too long: 250000 tokens > 200000 maximum".into(),
+                ));
+            }
+            *self.retry_messages.lock().expect("lock") = Some(req.messages.len());
+            let reply = response("recovered", Vec::new(), FinishReason::Stop);
+            sink(ChatDelta::Text(reply.content.clone()));
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn context_overflow_truncates_largest_tool_result_and_retries_once() {
+        let provider = OverflowOnceProvider::new();
+        let toolbox = MockToolBox::new();
+        let mut orch = Orchestrator::new(&provider, &toolbox, def());
+        // Seed a transcript carrying one very large tool result.
+        orch = orch.with_history(vec![
+            Message::user("earlier"),
+            Message::tool("call_big", "search", "X".repeat(40_000)),
+            Message::assistant("noted"),
+        ]);
+
+        let outcome = orch
+            .run("continue", &CancelToken::never(), &mut |_| {})
+            .expect("overflow should be recovered");
+
+        // Two provider calls: the overflow, then the successful retry.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(outcome.reason, "completed");
+        assert_eq!(outcome.final_text, "recovered");
+        // Exactly one truncation was recorded and the big body was stubbed.
+        assert_eq!(orch.truncations(), 1);
+        assert!(
+            orch.history
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content == compaction::ELIDED_TOOL_OUTPUT)
+        );
+        // The retry saw the same message count (truncation stubs in place, does
+        // not drop messages).
+        assert_eq!(
+            *provider.retry_messages.lock().expect("lock"),
+            Some(orch.history.len() - 1) // assistant reply appended after the call
+        );
+    }
+
+    #[test]
+    fn non_overflow_errors_are_not_retried() {
+        // A 401 must surface immediately, with no truncation and a single call.
+        struct AuthFail(AtomicUsize);
+        impl LlmProvider for AuthFail {
+            fn id(&self) -> ProviderId {
+                ProviderId::Anthropic
+            }
+            fn chat(
+                &self,
+                _req: &ChatRequest,
+                _cancel: &CancelToken,
+                _sink: &mut dyn FnMut(ChatDelta),
+            ) -> AgentResult<ChatResponse> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(AgentError::Http("HTTP 401: unauthorized".into()))
+            }
+        }
+        let provider = AuthFail(AtomicUsize::new(0));
+        let toolbox = MockToolBox::new();
+        let mut orch = Orchestrator::new(&provider, &toolbox, def())
+            .with_history(vec![Message::tool("c", "search", "X".repeat(40_000))]);
+
+        let err = orch
+            .run("go", &CancelToken::never(), &mut |_| {})
+            .expect_err("401 is fatal");
+        assert!(matches!(err, AgentError::Http(m) if m.contains("401")));
+        assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        assert_eq!(orch.truncations(), 0);
+    }
+
+    /// A provider that streams one tool-call delta on its first turn (advisory),
+    /// returns the assembled call, then stops.
+    struct StreamingToolProvider {
+        calls: AtomicUsize,
+    }
+
+    impl LlmProvider for StreamingToolProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::Anthropic
+        }
+
+        fn chat(
+            &self,
+            _req: &ChatRequest,
+            _cancel: &CancelToken,
+            sink: &mut dyn FnMut(ChatDelta),
+        ) -> AgentResult<ChatResponse> {
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                let call = tool_call("call_1", serde_json::json!({"text": "hi"}));
+                // Advisory streamed fragment, then the assembled response.
+                sink(ChatDelta::ToolCall(call.clone()));
+                return Ok(response("", vec![call], FinishReason::ToolUse));
+            }
+            let reply = response("done", Vec::new(), FinishReason::Stop);
+            sink(ChatDelta::Text(reply.content.clone()));
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn streamed_tool_call_deltas_are_forwarded_without_changing_dispatch() {
+        let provider = StreamingToolProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let toolbox = MockToolBox::new();
+        let mut orch = Orchestrator::new(&provider, &toolbox, def());
+
+        let mut events = Vec::new();
+        let outcome = orch
+            .run("go", &CancelToken::never(), &mut |event| events.push(event))
+            .expect("run completes");
+
+        // The advisory delta surfaced exactly once and carries the call shape.
+        let deltas: Vec<&AgentEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolCallDelta { .. }))
+            .collect();
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(
+            deltas[0],
+            AgentEvent::ToolCallDelta { name, .. } if name == "echo"
+        ));
+        // Dispatch still ran the assembled call exactly once (not driven by the delta).
+        assert_eq!(toolbox.call_count(), 1);
+        assert_eq!(outcome.reason, "completed");
+    }
+
+    /// A provider that returns reasoning text plus a signature, then stops.
+    struct ReasoningProvider;
+
+    impl LlmProvider for ReasoningProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::Anthropic
+        }
+
+        fn chat(
+            &self,
+            _req: &ChatRequest,
+            _cancel: &CancelToken,
+            sink: &mut dyn FnMut(ChatDelta),
+        ) -> AgentResult<ChatResponse> {
+            sink(ChatDelta::Reasoning("thinking".into()));
+            sink(ChatDelta::Text("answer".into()));
+            let mut reply = response("answer", Vec::new(), FinishReason::Stop);
+            reply.reasoning = Some("thinking".into());
+            reply.reasoning_signature = Some("sig-1".into());
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn assistant_message_round_trips_reasoning_and_signature() {
+        let provider = ReasoningProvider;
+        let toolbox = MockToolBox::new();
+        let mut orch = Orchestrator::new(&provider, &toolbox, def());
+        orch.run("go", &CancelToken::never(), &mut |_| {})
+            .expect("run completes");
+
+        // The assistant message carries the reasoning + signature for replay.
+        let assistant = orch
+            .history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("an assistant message");
+        let reasoning = assistant.reasoning.as_ref().expect("reasoning stored");
+        assert_eq!(reasoning.text, "thinking");
+        assert_eq!(reasoning.signature.as_deref(), Some("sig-1"));
+    }
+
+    #[test]
+    fn resume_seeds_prior_transcript_without_rerunning_tool_calls() {
+        // The prior session already called `echo` and recorded its result. The
+        // resumed run must see that transcript and NOT re-invoke the tool.
+        let provider = HistoryProvider::new();
+        let toolbox = MockToolBox::new();
+        let mut prior_assistant = Message::assistant("calling echo");
+        prior_assistant.tool_calls = vec![tool_call("call_prior", serde_json::json!({"t": 1}))];
+        let state = ResumeState {
+            history: vec![
+                Message::user("earlier task"),
+                prior_assistant,
+                Message::tool("call_prior", "echo", "prior result"),
+            ],
+            truncations: 2,
+        };
+        let mut orch = Orchestrator::resume(&provider, &toolbox, def(), state);
+
+        orch.run("next task", &CancelToken::never(), &mut |_| {})
+            .expect("resumed run completes");
+
+        // The prior tool call was NOT re-executed (only what this turn requests).
+        assert_eq!(toolbox.call_count(), 0);
+        // The provider's first request carried the full prior transcript plus the
+        // new user turn (4 messages: 3 seeded + the new "next task").
+        let requests = provider.requests();
+        assert_eq!(requests[0].len(), 4);
+        assert_eq!(requests[0][0].content, "earlier task");
+        assert_eq!(requests[0][2].role, Role::Tool);
+        assert_eq!(requests[0][2].content, "prior result");
+        assert_eq!(requests[0][3].content, "next task");
+        // Restored counters carried over.
+        assert_eq!(orch.truncations(), 2);
+    }
+
+    #[test]
+    fn resume_with_default_state_matches_new() {
+        // An empty ResumeState behaves exactly like `new` (empty history).
+        let provider = HistoryProvider::new();
+        let toolbox = MockToolBox::new();
+        let mut orch = Orchestrator::resume(&provider, &toolbox, def(), ResumeState::default());
+        orch.run("go", &CancelToken::never(), &mut |_| {})
+            .expect("run completes");
+        let requests = provider.requests();
+        assert_eq!(requests[0].len(), 1);
+        assert_eq!(requests[0][0].content, "go");
+        assert_eq!(orch.truncations(), 0);
+    }
+
     fn event_kind(event: &AgentEvent) -> &'static str {
         match event {
             AgentEvent::TurnStarted(_) => "turn",
@@ -1071,6 +1219,7 @@ mod tests {
             AgentEvent::ToolFinished { .. } => "tool_finished",
             AgentEvent::Interrupted(_) => "interrupted",
             AgentEvent::Usage { .. } => "usage",
+            AgentEvent::ToolCallDelta { .. } => "tool_call_delta",
             AgentEvent::Done { .. } => "done",
         }
     }

@@ -17,5 +17,7 @@ pub mod provider;
 pub use auth::{Credential, ProviderId};
 pub use error::{AgentError, AgentResult};
 pub use message::*;
-pub use orchestrator::{AgentDef, AgentEvent, Hook, Orchestrator, RunOutcome};
+pub use orchestrator::{
+    AgentDef, AgentEvent, Hook, ModelCapabilities, Orchestrator, ResumeState, RunOutcome,
+};
 pub use provider::{LlmProvider, ToolBox};

@@ -68,7 +68,8 @@ impl LlmProvider for XaiProvider {
         let body = build_body(req);
         let agent = http_agent(REQUEST_TIMEOUT);
         let mut reader = post_sse(&agent, &self.endpoint(), &self.headers(), &body, cancel)?;
-        drive_stream(&mut reader, cancel, sink)
+        let response = drive_stream(&mut reader, cancel, sink)?;
+        Ok(super::apply_text_fallback(response))
     }
 }
 
@@ -380,6 +381,8 @@ impl StreamState {
         ChatResponse {
             content: self.content,
             reasoning,
+            // xAI does not sign reasoning blocks.
+            reasoning_signature: None,
             tool_calls,
             finish_reason,
             usage: self.usage,
@@ -517,6 +520,7 @@ mod tests {
         let message = Message {
             role: Role::Assistant,
             content: String::new(),
+            reasoning: None,
             tool_calls: vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "echo".to_string(),

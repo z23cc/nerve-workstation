@@ -253,6 +253,7 @@ mod tests {
         ChatResponse {
             content: content.into(),
             reasoning: None,
+            reasoning_signature: None,
             tool_calls,
             finish_reason,
             usage: Usage::default(),

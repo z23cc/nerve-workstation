@@ -204,6 +204,9 @@ impl SessionRecord {
             // Per-turn token usage is surfaced live via the protocol; the
             // transcript keeps only the final total in the outcome.
             AgentEvent::Usage { .. } => {}
+            // Advisory streaming fragment (UI-only): not recorded in the
+            // transcript, which keeps the assembled tool calls.
+            AgentEvent::ToolCallDelta { .. } => {}
             AgentEvent::Done { reason } => self.events.push(SessionEvent::Done {
                 reason: reason.clone(),
             }),

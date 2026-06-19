@@ -169,7 +169,8 @@ impl LlmProvider for OpenAiResponsesProvider {
             return Err(AgentError::Cancelled);
         }
         let body = request::build_body(req, self.client_metadata());
-        self.stream(&body, cancel, sink)
+        let response = self.stream(&body, cancel, sink)?;
+        Ok(super::apply_text_fallback(response))
     }
 }
 
