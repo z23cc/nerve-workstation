@@ -8,6 +8,7 @@ mod capabilities;
 mod checkpoint;
 mod cli;
 mod commands;
+mod cost;
 mod daemon;
 mod exec_tool;
 mod hooks;

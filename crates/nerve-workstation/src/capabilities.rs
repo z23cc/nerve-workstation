@@ -10,8 +10,12 @@
 //!   fields the orchestrator's `AgentDef` exposes, plus a `skills` list. JSON is
 //!   used for consistency with `--mcp-config` / `--provider-config` and to avoid
 //!   adding a YAML dependency (the build stays offline-safe).
-//! - **Skills** are plain markdown files (`<name>.md`); an agent's listed skills
-//!   are composed into its system prompt, in order, after the base prompt.
+//! - **Skills** are plain markdown files (`<name>.md`). Skills are
+//!   *progressively disclosed*: only each skill's name + one-line description is
+//!   injected into the system prompt (a compact footer), not its full body. This
+//!   keeps the prompt small as the skill library grows; the body is fetched
+//!   on demand (out of scope here). The footer also surfaces which source won
+//!   (project / global / built-in) for each disclosed skill.
 //!
 //! Discovery base directories, highest precedence first — each holds `agents/`
 //! and `skills/` subdirectories:
@@ -43,7 +47,7 @@ const BUILTIN_SKILLS: &[(&str, &str)] = &[(
 /// `.json`) is the agent's name.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct AgentDefFile {
-    /// Base system prompt; skill bodies are appended after it.
+    /// Base system prompt; a skills *metadata* footer is appended after it.
     pub(crate) system_prompt: Option<String>,
     /// Model id (overridable by `--model`).
     pub(crate) model: Option<String>,
@@ -131,8 +135,10 @@ impl Capabilities {
         })
     }
 
-    /// Concatenate the base prompt and each referenced skill body, separated by
-    /// blank lines. Returns `None` when nothing contributes text.
+    /// Compose the base prompt followed by a compact *skills metadata* footer
+    /// (progressive disclosure): one `- name (source): description` line per
+    /// referenced skill, in listed order. The full body is deliberately *not*
+    /// inlined — it is fetched on demand. Returns `None` when nothing contributes.
     fn compose_system_prompt(&self, def: &AgentDefFile) -> Result<Option<String>> {
         let mut sections: Vec<String> = Vec::new();
         if let Some(base) = def.system_prompt.as_deref() {
@@ -141,18 +147,33 @@ impl Capabilities {
                 sections.push(base.to_string());
             }
         }
-        for skill in &def.skills {
-            let body = self.load_skill(skill)?;
-            let trimmed = body.trim();
-            if !trimmed.is_empty() {
-                sections.push(trimmed.to_string());
-            }
+        if let Some(footer) = self.compose_skills_footer(&def.skills)? {
+            sections.push(footer);
         }
         if sections.is_empty() {
             Ok(None)
         } else {
             Ok(Some(sections.join("\n\n")))
         }
+    }
+
+    /// Build the metadata footer for the referenced skills, or `None` if the
+    /// agent lists none. Resolving each skill still honors precedence and still
+    /// errors on a missing skill (an agent referencing a ghost skill is a config
+    /// error), but only its name/description/source reach the prompt.
+    fn compose_skills_footer(&self, skills: &[String]) -> Result<Option<String>> {
+        if skills.is_empty() {
+            return Ok(None);
+        }
+        let mut lines = vec!["## Available skills".to_string()];
+        for skill in skills {
+            let meta = self.load_skill_meta(skill)?;
+            lines.push(format!(
+                "- {} ({}): {}",
+                meta.name, meta.source, meta.description
+            ));
+        }
+        Ok(Some(lines.join("\n")))
     }
 
     /// Load and parse the agent definition `name`, honoring precedence.
@@ -172,21 +193,92 @@ impl Capabilities {
         bail!("unknown agent '{name}': not found in project (.nerve/agents), global, or built-ins");
     }
 
-    /// Load the markdown body of skill `name`, honoring precedence.
-    fn load_skill(&self, name: &str) -> Result<String> {
+    /// Resolve skill `name` to its disclosure metadata (name, one-line
+    /// description, winning source), honoring precedence. Reads the body only to
+    /// extract the description — the body itself is not retained for the prompt.
+    fn load_skill_meta(&self, name: &str) -> Result<SkillMeta> {
         validate_name(name)?;
-        for base in &self.bases {
+        // Bases are project-first, then global; index 0 is the highest-precedence
+        // non-built-in source. A single global base is labelled "global"; were a
+        // dedicated "shared" base ever added ahead of global, the ordinal labelling
+        // would extend without touching callers.
+        for (index, base) in self.bases.iter().enumerate() {
             let path = base.join("skills").join(format!("{name}.md"));
             if path.is_file() {
-                return std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read skill: {}", path.display()));
+                let body = std::fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read skill: {}", path.display()))?;
+                return Ok(SkillMeta::from_body(name, &body, base_source(index)));
             }
         }
         if let Some(raw) = builtin(BUILTIN_SKILLS, name) {
-            return Ok(raw.to_string());
+            return Ok(SkillMeta::from_body(name, raw, SkillSource::BuiltIn));
         }
         bail!("skill '{name}' not found in project (.nerve/skills), global, or built-ins");
     }
+}
+
+/// Where a resolved skill came from, surfaced in the disclosure footer so the
+/// model (and a human reading the prompt) can see which source won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillSource {
+    Project,
+    Global,
+    BuiltIn,
+}
+
+impl std::fmt::Display for SkillSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Project => "project",
+            Self::Global => "global",
+            Self::BuiltIn => "built-in",
+        })
+    }
+}
+
+/// Map a discovery-base index to its source label. Base 0 is the project base
+/// (`<root>/.nerve`); any later base is the global config home.
+fn base_source(index: usize) -> SkillSource {
+    if index == 0 {
+        SkillSource::Project
+    } else {
+        SkillSource::Global
+    }
+}
+
+/// One skill's progressive-disclosure metadata: just enough to advertise it in
+/// the system prompt without inlining its body.
+#[derive(Debug, Clone)]
+struct SkillMeta {
+    name: String,
+    description: String,
+    source: SkillSource,
+}
+
+impl SkillMeta {
+    /// Derive metadata from a skill's markdown body: the description is the first
+    /// non-empty line, with a leading markdown heading marker stripped, truncated
+    /// to a single compact line. Empty bodies yield a placeholder description.
+    fn from_body(name: &str, body: &str, source: SkillSource) -> Self {
+        let description = skill_description(body);
+        Self {
+            name: name.to_string(),
+            description,
+            source,
+        }
+    }
+}
+
+/// Extract a one-line description from a skill markdown body: the first non-blank
+/// line, sans a leading `#`/heading marker. Falls back to a placeholder when the
+/// body has no text.
+fn skill_description(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches('#').trim().to_string())
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| "(no description)".to_string())
 }
 
 /// Parse an agent definition from raw JSON, tagging errors with `source`.
@@ -236,13 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn builtin_agent_composes_skill() {
+    fn builtin_agent_discloses_skill_metadata_only() {
         let caps = Capabilities::from_bases(vec![]);
         let resolved = caps.resolve_agent("coder").expect("resolve coder");
         let prompt = resolved.system_prompt.expect("system prompt");
-        // Base prompt and the composed built-in skill are both present.
+        // Base prompt is present, plus a compact metadata footer naming the skill
+        // and its source — but NOT the full skill body.
         assert!(prompt.contains("You are Coder"));
-        assert!(prompt.contains("Nerve tools"));
+        assert!(prompt.contains("## Available skills"));
+        assert!(prompt.contains("- nerve-tools (built-in): Nerve tools"));
+        // Progressive disclosure: the body's tool list must not be inlined.
+        assert!(
+            !prompt.contains("`file_search`"),
+            "skill body should not be inlined:\n{prompt}"
+        );
         // Built-in coder leaves model/provider to the CLI.
         assert!(resolved.model.is_none());
         assert!(resolved.provider.is_none());
@@ -262,9 +361,10 @@ mod tests {
         agent_file(dir.path(), "coder", r#"{"system_prompt":"PROJECT CODER"}"#);
         let caps = Capabilities::from_bases(vec![dir.path().to_path_buf()]);
         let prompt = caps.resolve_agent("coder").unwrap().system_prompt.unwrap();
-        // Project file fully shadows the built-in (no composed built-in skill).
+        // Project file fully shadows the built-in (it lists no skills, so no
+        // footer is added).
         assert_eq!(prompt, "PROJECT CODER");
-        assert!(!prompt.contains("Nerve tools"));
+        assert!(!prompt.contains("Available skills"));
     }
 
     #[test]
@@ -284,23 +384,70 @@ mod tests {
     }
 
     #[test]
-    fn skill_override_and_order_compose() {
+    fn skill_metadata_footer_orders_and_labels_source() {
         let dir = tempdir().unwrap();
         agent_file(
             dir.path(),
             "multi",
             r#"{"system_prompt":"HEAD","skills":["nerve-tools","extra"]}"#,
         );
-        // Project skill shadows the built-in nerve-tools skill.
-        skill_file(dir.path(), "nerve-tools", "OVERRIDE TOOLS");
-        skill_file(dir.path(), "extra", "EXTRA SKILL");
+        // Project skill shadows the built-in nerve-tools skill; its first line is
+        // the disclosed description.
+        skill_file(
+            dir.path(),
+            "nerve-tools",
+            "# Override tools\n\nbody not inlined",
+        );
+        skill_file(dir.path(), "extra", "Extra skill summary\n\nmore body");
         let prompt = Capabilities::from_bases(vec![dir.path().to_path_buf()])
             .resolve_agent("multi")
             .unwrap()
             .system_prompt
             .unwrap();
-        // Base first, then skills in listed order, blank-line separated.
-        assert_eq!(prompt, "HEAD\n\nOVERRIDE TOOLS\n\nEXTRA SKILL");
+        // Base prompt, then a metadata footer with skills in listed order, each
+        // labelled with the winning source (project, here). Bodies are not inlined.
+        assert_eq!(
+            prompt,
+            "HEAD\n\n## Available skills\n- nerve-tools (project): Override tools\n- extra (project): Extra skill summary"
+        );
+        assert!(!prompt.contains("body not inlined"));
+        assert!(!prompt.contains("more body"));
+    }
+
+    #[test]
+    fn footer_surfaces_global_vs_builtin_source() {
+        let project = tempdir().unwrap();
+        let global = tempdir().unwrap();
+        agent_file(
+            project.path(),
+            "mix",
+            r#"{"skills":["from-global","nerve-tools"]}"#,
+        );
+        // `from-global` only exists in the global base; `nerve-tools` falls all
+        // the way through to the built-in.
+        skill_file(global.path(), "from-global", "# Global skill\n\nx");
+        let prompt = Capabilities::from_bases(vec![
+            project.path().to_path_buf(),
+            global.path().to_path_buf(),
+        ])
+        .resolve_agent("mix")
+        .unwrap()
+        .system_prompt
+        .unwrap();
+        assert!(prompt.contains("- from-global (global): Global skill"));
+        assert!(prompt.contains("- nerve-tools (built-in): Nerve tools"));
+    }
+
+    #[test]
+    fn skill_description_strips_heading_and_handles_empty() {
+        assert_eq!(skill_description("# Title here\n\nbody"), "Title here");
+        assert_eq!(
+            skill_description("plain first line\nsecond"),
+            "plain first line"
+        );
+        assert_eq!(skill_description("\n\n   \n## Deep\n"), "Deep");
+        assert_eq!(skill_description(""), "(no description)");
+        assert_eq!(skill_description("###\n"), "(no description)");
     }
 
     #[test]

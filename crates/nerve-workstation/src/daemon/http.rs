@@ -34,6 +34,7 @@ use crate::workspace;
 use anyhow::{Result, anyhow};
 use nerve_agent::auth::oauth::random_urlsafe;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,6 +49,12 @@ const SSE_HEARTBEAT: Duration = Duration::from_secs(15);
 
 /// SSE keep-alive comment frame: ignored by `EventSource`, keeps the socket hot.
 const SSE_KEEPALIVE: &str = ": keep-alive\n\n";
+
+/// How many recent events the hub keeps for `Last-Event-ID` replay. Bounded: on
+/// overflow the oldest frame is dropped, so a client that reconnects after a long
+/// gap may have missed events older than this window (it then resyncs by polling
+/// job/session state). Sized to cover a typical reconnect blip, not full history.
+const SSE_REPLAY_CAPACITY: usize = 1024;
 
 /// The self-contained runtime GUI, embedded into the binary so the daemon serves
 /// it with no build step or external assets. It is a *client* of Protocol v3:
@@ -239,43 +246,68 @@ fn route_rpc_body(router: &RuntimeDaemonRouter, body: &str) -> Option<Value> {
 // ---- GET /events (SSE) ----------------------------------------------------
 
 fn handle_events(hub: &Arc<SseHub>, request: Request, cors: Option<&str>) -> Result<()> {
-    let (id, receiver) = hub.subscribe();
+    let query = request.url().split_once('?').map(|(_, q)| q.to_string());
+    // Scope: `?session=<id>` filters fan-out to that session (+ global events).
+    let session_filter = query
+        .as_deref()
+        .and_then(|q| query_param(q, "session"))
+        .map(str::to_string);
+    // Replay cursor: SSE `Last-Event-ID` header (browser auto-reconnect) or an
+    // explicit `?last_seq=` (manual clients). The header wins when both are set.
+    let last_seq = header_value(&request, "Last-Event-ID")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| {
+            query
+                .as_deref()
+                .and_then(|q| query_param(q, "last_seq"))
+                .and_then(|v| v.parse::<u64>().ok())
+        });
+    let (id, receiver, backlog) = hub.subscribe(session_filter, last_seq);
     // The Origin echo is fixed for the life of the stream; copy it out before the
     // request is consumed by `into_writer`.
     let cors = cors.map(str::to_string);
     let mut writer = request.into_writer();
-    let result = stream_events(&mut writer, &receiver, cors.as_deref());
+    let result = stream_events(&mut writer, &receiver, &backlog, cors.as_deref());
     hub.unsubscribe(id);
     result
 }
 
-/// Write the SSE response head, then forward each broadcast notification as a
-/// `data:` frame until the client disconnects (a failed write) or the hub stops.
+/// Write the SSE response head, replay any buffered backlog, then forward each
+/// broadcast notification as an `id:`+`data:` frame until the client disconnects
+/// (a failed write) or the hub stops.
 fn stream_events(
     writer: &mut dyn Write,
-    receiver: &Receiver<Arc<str>>,
+    receiver: &Receiver<Arc<SseFrame>>,
+    backlog: &[Arc<SseFrame>],
     cors: Option<&str>,
 ) -> Result<()> {
     if write_sse_head(writer, cors).is_err() {
         return Ok(());
     }
+    for frame in backlog {
+        if write_sse_chunk(writer, sse_event_frame(frame).as_bytes()).is_err() {
+            return Ok(()); // client went away mid-replay
+        }
+    }
     loop {
-        let frame = match receiver.recv_timeout(SSE_HEARTBEAT) {
-            Ok(json) => sse_data_frame(&json),
+        let chunk = match receiver.recv_timeout(SSE_HEARTBEAT) {
+            Ok(frame) => sse_event_frame(&frame),
             Err(RecvTimeoutError::Timeout) => SSE_KEEPALIVE.to_string(),
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        if write_sse_chunk(writer, frame.as_bytes()).is_err() {
+        if write_sse_chunk(writer, chunk.as_bytes()).is_err() {
             break; // client went away
         }
     }
     Ok(())
 }
 
-/// Format a runtime notification as an SSE `data:` event. The JSON is a single
-/// line (serde never emits raw newlines), so one `data:` line is always valid.
-fn sse_data_frame(json: &str) -> String {
-    format!("data: {json}\n\n")
+/// Format a runtime notification as an SSE event, setting the `id:` field to the
+/// frame's `event_seq` so the browser reports it back via `Last-Event-ID` on
+/// reconnect. The JSON is a single line (serde never emits raw newlines), so one
+/// `data:` line is always valid.
+fn sse_event_frame(frame: &SseFrame) -> String {
+    format!("id: {}\ndata: {}\n\n", frame.seq, frame.json)
 }
 
 fn write_sse_head(writer: &mut dyn Write, cors: Option<&str>) -> std::io::Result<()> {
@@ -306,51 +338,150 @@ fn write_sse_chunk(writer: &mut dyn Write, payload: &[u8]) -> std::io::Result<()
 
 // ---- SSE broadcast hub ----------------------------------------------------
 
-/// A minimal broadcast hub: the router's single notification sink fans out to
-/// every open `/events` subscriber. It lives in the transport (not in
+/// One fan-out unit: the rendered JSON plus the routing facts the hub extracts
+/// from it once (so each subscriber doesn't re-parse). `session` scopes delivery;
+/// `seq` becomes the SSE `id:` and drives `Last-Event-ID` replay.
+struct SseFrame {
+    seq: u64,
+    /// `Some` for a session-scoped event (delivered only to subscribers watching
+    /// that session, plus unscoped subscribers); `None` for global events.
+    session: Option<String>,
+    json: Arc<str>,
+}
+
+impl SseFrame {
+    /// Build a frame from a `runtime/event` notification, lifting `event_seq` and
+    /// the event's `session_id` out of `params` for routing. Both are advisory: a
+    /// missing/garbled field degrades to seq `0` / unscoped rather than dropping.
+    fn from_notification(value: &Value) -> Self {
+        let params = value.get("params");
+        // `event_seq` serializes as camelCase `eventSeq` (the notification
+        // carrier's own `rename_all`); the flattened event keeps snake_case, so
+        // its `session_id` field stays `session_id`.
+        let seq = params
+            .and_then(|p| p.get("eventSeq"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let session = params
+            .and_then(|p| p.get("session_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Self {
+            seq,
+            session,
+            json: Arc::from(value.to_string()),
+        }
+    }
+
+    /// Whether this frame should reach a subscriber with the given session filter.
+    /// Unfiltered subscribers (`None`) see everything; a session subscriber sees
+    /// its own session-scoped frames plus all unscoped (global) frames.
+    fn visible_to(&self, filter: Option<&str>) -> bool {
+        match (filter, self.session.as_deref()) {
+            (None, _) => true,
+            (Some(_), None) => true,
+            (Some(want), Some(have)) => want == have,
+        }
+    }
+}
+
+/// A broadcast hub with per-session fan-out and bounded replay: the router's
+/// single notification sink feeds it, and every open `/events` subscriber
+/// receives only the frames its filter selects. It lives in the transport (not in
 /// `nerve-runtime`) so the protocol vocabulary stays untouched.
 struct SseHub {
-    subscribers: Mutex<Vec<Subscriber>>,
+    inner: Mutex<HubState>,
     next_id: AtomicU64,
+}
+
+#[derive(Default)]
+struct HubState {
+    subscribers: Vec<Subscriber>,
+    /// Bounded ring of recent frames for `Last-Event-ID` replay, oldest first.
+    replay: VecDeque<Arc<SseFrame>>,
 }
 
 struct Subscriber {
     id: u64,
-    sender: mpsc::Sender<Arc<str>>,
+    /// `None` = unfiltered (all frames); `Some(session_id)` = only that session's
+    /// frames plus global ones.
+    session_filter: Option<String>,
+    sender: mpsc::Sender<Arc<SseFrame>>,
 }
 
 impl SseHub {
     fn new() -> Self {
         Self {
-            subscribers: Mutex::new(Vec::new()),
+            inner: Mutex::new(HubState::default()),
             next_id: AtomicU64::new(1),
         }
     }
 
-    /// Register a subscriber, returning its id and the receiver its `/events`
-    /// connection drains.
-    fn subscribe(&self) -> (u64, Receiver<Arc<str>>) {
+    /// Register a subscriber with an optional session filter. Returns its id, the
+    /// receiver its `/events` connection drains, and any buffered frames after
+    /// `after_seq` that match the filter (bounded replay on reconnect).
+    fn subscribe(
+        &self,
+        session_filter: Option<String>,
+        after_seq: Option<u64>,
+    ) -> (u64, Receiver<Arc<SseFrame>>, Vec<Arc<SseFrame>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        crate::sync::lock_recover(&self.subscribers).push(Subscriber { id, sender });
-        (id, receiver)
+        let mut state = crate::sync::lock_recover(&self.inner);
+        let backlog = match after_seq {
+            Some(after) => state
+                .replay
+                .iter()
+                .filter(|frame| frame.seq > after && frame.visible_to(session_filter.as_deref()))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        state.subscribers.push(Subscriber {
+            id,
+            session_filter,
+            sender,
+        });
+        (id, receiver, backlog)
     }
 
     fn unsubscribe(&self, id: u64) {
-        crate::sync::lock_recover(&self.subscribers).retain(|subscriber| subscriber.id != id);
+        crate::sync::lock_recover(&self.inner)
+            .subscribers
+            .retain(|subscriber| subscriber.id != id);
     }
 
-    /// Fan a runtime notification out to all live subscribers, dropping any
-    /// whose receiver has hung up.
+    /// Record a runtime notification in the bounded replay ring and fan it out to
+    /// every live subscriber whose filter selects it, dropping any whose receiver
+    /// has hung up.
     fn broadcast(&self, value: Value) {
-        let frame: Arc<str> = Arc::from(value.to_string());
-        crate::sync::lock_recover(&self.subscribers)
-            .retain(|subscriber| subscriber.sender.send(Arc::clone(&frame)).is_ok());
+        let frame = Arc::new(SseFrame::from_notification(&value));
+        let mut state = crate::sync::lock_recover(&self.inner);
+        state.replay.push_back(Arc::clone(&frame));
+        while state.replay.len() > SSE_REPLAY_CAPACITY {
+            state.replay.pop_front();
+        }
+        state.subscribers.retain(|subscriber| {
+            // A subscriber the frame isn't addressed to is kept untouched; only a
+            // failed send (dropped receiver) to a frame we *do* address prunes it.
+            // A long-idle subscriber is also pruned when its connection closes —
+            // its `/events` thread calls `unsubscribe` on disconnect.
+            if frame.visible_to(subscriber.session_filter.as_deref()) {
+                subscriber.sender.send(Arc::clone(&frame)).is_ok()
+            } else {
+                true
+            }
+        });
     }
 
     #[cfg(test)]
     fn subscriber_count(&self) -> usize {
-        self.subscribers.lock().expect("sse hub lock").len()
+        self.inner.lock().expect("sse hub lock").subscribers.len()
+    }
+
+    #[cfg(test)]
+    fn replay_len(&self) -> usize {
+        self.inner.lock().expect("sse hub lock").replay.len()
     }
 }
 
@@ -614,9 +745,51 @@ mod tests {
         assert!(response.is_none());
     }
 
+    /// Build a `runtime/event` notification frame for hub tests, with a seq and
+    /// an optional `session_id` inside `params`, mirroring the live carrier shape.
+    fn notification(seq: u64, session: Option<&str>) -> Value {
+        let mut params = json!({ "eventSeq": seq, "type": "job_progress" });
+        if let Some(session_id) = session {
+            params["session_id"] = json!(session_id);
+        }
+        json!({ "jsonrpc": "2.0", "method": "runtime/event", "params": params })
+    }
+
     #[test]
-    fn sse_data_frame_wraps_json_payload() {
-        assert_eq!(sse_data_frame(r#"{"a":1}"#), "data: {\"a\":1}\n\n");
+    fn sse_event_frame_sets_id_and_data() {
+        let frame = SseFrame::from_notification(&notification(7, None));
+        assert_eq!(
+            sse_event_frame(&frame),
+            "id: 7\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"runtime/event\",\"params\":{\"eventSeq\":7,\"type\":\"job_progress\"}}\n\n"
+        );
+    }
+
+    #[test]
+    fn sse_frame_extracts_seq_and_session_for_routing() {
+        let scoped = SseFrame::from_notification(&notification(3, Some("sess-1")));
+        assert_eq!(scoped.seq, 3);
+        assert_eq!(scoped.session.as_deref(), Some("sess-1"));
+        let global = SseFrame::from_notification(&notification(4, None));
+        assert_eq!(global.seq, 4);
+        assert_eq!(global.session, None);
+        // A malformed frame degrades to seq 0 / unscoped rather than panicking.
+        let degraded = SseFrame::from_notification(&json!({ "params": "oops" }));
+        assert_eq!(degraded.seq, 0);
+        assert_eq!(degraded.session, None);
+    }
+
+    #[test]
+    fn frame_visibility_scopes_by_session() {
+        let scoped = SseFrame::from_notification(&notification(1, Some("a")));
+        let global = SseFrame::from_notification(&notification(2, None));
+        // Unfiltered subscriber sees everything.
+        assert!(scoped.visible_to(None));
+        assert!(global.visible_to(None));
+        // Session subscriber sees its own session and all global frames…
+        assert!(scoped.visible_to(Some("a")));
+        assert!(global.visible_to(Some("a")));
+        // …but not another session's frames.
+        assert!(!scoped.visible_to(Some("b")));
     }
 
     #[test]
@@ -730,14 +903,71 @@ mod tests {
     #[test]
     fn hub_broadcasts_to_live_subscribers_and_prunes_dead_ones() {
         let hub = SseHub::new();
-        let (_id_a, rx_a) = hub.subscribe();
-        let (_id_b, rx_b) = hub.subscribe();
+        let (_id_a, rx_a, _) = hub.subscribe(None, None);
+        let (_id_b, rx_b, _) = hub.subscribe(None, None);
         assert_eq!(hub.subscriber_count(), 2);
         drop(rx_b); // a disconnected client
-        hub.broadcast(json!({ "method": "runtime/event", "params": { "type": "ping" } }));
+        hub.broadcast(notification(1, None));
         let frame = rx_a.recv().expect("frame");
-        assert!(frame.contains("runtime/event"));
+        assert!(frame.json.contains("runtime/event"));
         // The dead subscriber was pruned on its failed send.
         assert_eq!(hub.subscriber_count(), 1);
+    }
+
+    #[test]
+    fn hub_scopes_session_events_to_matching_subscribers() {
+        let hub = SseHub::new();
+        let (_all_id, rx_all, _) = hub.subscribe(None, None);
+        let (_a_id, rx_a, _) = hub.subscribe(Some("sess-a".to_string()), None);
+        let (_b_id, rx_b, _) = hub.subscribe(Some("sess-b".to_string()), None);
+
+        // A frame for session A reaches the unfiltered + the A subscriber only.
+        hub.broadcast(notification(1, Some("sess-a")));
+        assert!(rx_all.recv().expect("all sees a").json.contains("sess-a"));
+        assert!(rx_a.recv().expect("a sees a").json.contains("sess-a"));
+        assert!(rx_b.try_recv().is_err(), "b must not see session a's event");
+
+        // A global (unscoped) frame reaches everyone.
+        hub.broadcast(notification(2, None));
+        assert_eq!(rx_all.recv().expect("all sees global").seq, 2);
+        assert_eq!(rx_a.recv().expect("a sees global").seq, 2);
+        assert_eq!(rx_b.recv().expect("b sees global").seq, 2);
+    }
+
+    #[test]
+    fn hub_replays_buffered_events_after_last_seq() {
+        let hub = SseHub::new();
+        hub.broadcast(notification(1, None));
+        hub.broadcast(notification(2, Some("sess-a")));
+        hub.broadcast(notification(3, Some("sess-b")));
+        hub.broadcast(notification(4, None));
+
+        // Unfiltered reconnect after seq 1 replays 2,3,4 in order.
+        let (_id, _rx, backlog) = hub.subscribe(None, Some(1));
+        let seqs: Vec<u64> = backlog.iter().map(|f| f.seq).collect();
+        assert_eq!(seqs, vec![2, 3, 4]);
+
+        // Session-A reconnect after seq 1 replays only A's event + the global one.
+        let (_id, _rx, backlog) = hub.subscribe(Some("sess-a".to_string()), Some(1));
+        let seqs: Vec<u64> = backlog.iter().map(|f| f.seq).collect();
+        assert_eq!(seqs, vec![2, 4], "session A skips session B's event 3");
+
+        // No cursor => no replay (a fresh subscriber gets only future frames).
+        let (_id, _rx, backlog) = hub.subscribe(None, None);
+        assert!(backlog.is_empty());
+    }
+
+    #[test]
+    fn hub_replay_ring_is_bounded() {
+        let hub = SseHub::new();
+        for seq in 1..=(SSE_REPLAY_CAPACITY as u64 + 50) {
+            hub.broadcast(notification(seq, None));
+        }
+        assert_eq!(hub.replay_len(), SSE_REPLAY_CAPACITY);
+        // The oldest were dropped: replay after seq 0 starts past the dropped ones.
+        let (_id, _rx, backlog) = hub.subscribe(None, Some(0));
+        assert_eq!(backlog.len(), SSE_REPLAY_CAPACITY);
+        let first = backlog.first().expect("non-empty backlog").seq;
+        assert_eq!(first, 51, "oldest 50 frames were evicted");
     }
 }

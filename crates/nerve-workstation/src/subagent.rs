@@ -13,17 +13,35 @@ use crate::providers::ProviderRegistry;
 use crate::tools::NerveRuntime;
 use anyhow::{Result, anyhow};
 use nerve_agent::{
-    AgentDef, AgentError, AgentEvent, AgentResult, Hook, Message, Orchestrator, RunOutcome,
-    ToolBox, ToolSpec,
+    AgentDef, AgentError, AgentEvent, AgentResult, Hook, Message, Orchestrator, ResumeState,
+    RunOutcome, ToolBox, ToolSpec,
 };
 use nerve_core::{CancelToken, WorkspaceResolver};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) const DEFAULT_MAX_DEPTH: usize = 2;
 const SPAWN_AGENT: &str = "spawn_agent";
+
+/// Default cap on how many sub-agent investigations run concurrently in a
+/// [`SubAgentSpawner::fan_out`]. Bounds thread + provider-connection pressure;
+/// ureq is synchronous so each investigation occupies a whole OS thread.
+///
+/// `fan_out` (and its default concurrency / arg constructor / labeller) is a
+/// primitive surfaced for callers (e.g. a future "investigate in parallel"
+/// tool). Its threading/cap policy is exercised through [`bounded_fan_out`] in
+/// tests, but the public entry point has no production caller yet — hence the
+/// dead-code allow. (The underlying [`bounded_fan_out`] *is* directly tested.)
+#[allow(dead_code, reason = "fan-out primitive awaiting a production caller")]
+pub(crate) const DEFAULT_FANOUT_CONCURRENCY: usize = 4;
+
+/// Sink the parent supplies so a child sub-agent's events surface (tagged with
+/// the child's id) instead of being discarded. Composition-root concern: it
+/// keeps `nerve-agent` unaware of sub-agent tagging.
+pub(crate) type SubAgentEventSink = dyn Fn(&str, &AgentEvent) + Send + Sync;
 
 #[derive(Debug)]
 pub(crate) struct AgentRunOutput {
@@ -39,6 +57,12 @@ pub(crate) struct SubAgentSpawner {
     gate: ToolGate,
     max_depth: usize,
     checkpoint: Arc<Mutex<Checkpoint>>,
+    /// Optional forwarding sink for child events; `None` keeps the prior
+    /// (discard) behaviour for callers that don't observe sub-agents.
+    event_sink: Option<Arc<SubAgentEventSink>>,
+    /// Monotonic source of sub-agent ids, shared across clones so ids are unique
+    /// within one parent run (clones share the same spawner identity).
+    next_sub_id: Arc<AtomicU64>,
 }
 
 impl SubAgentSpawner {
@@ -55,7 +79,23 @@ impl SubAgentSpawner {
             gate,
             max_depth,
             checkpoint,
+            event_sink: None,
+            next_sub_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Attach a forwarding sink so spawned sub-agents' events surface to the
+    /// parent (tagged with the child's id) rather than being discarded.
+    #[must_use]
+    pub(crate) fn with_event_sink(mut self, sink: Arc<SubAgentEventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Mint the next sub-agent id (`sub-<n>`), unique within this parent run.
+    fn next_sub_agent_id(&self) -> String {
+        let n = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
+        format!("sub-{n}")
     }
 
     pub(crate) fn run_at_depth(
@@ -94,13 +134,34 @@ impl SubAgentSpawner {
         let memory_hook = memory_store
             .as_ref()
             .map(|store| crate::memory::MemoryHook::new(Arc::clone(store)));
+        // Opt-in cost/cache telemetry through the Hook seam (#5): only when a
+        // budget is configured. The hook holds the run's cancel token so it can
+        // stop the run cooperatively once the estimate crosses the ceiling.
+        let cost_hook = config.cost_budget_usd.map(|budget| {
+            crate::cost::CostTelemetryHook::new(
+                config.model.clone(),
+                crate::cost::default_price_table(),
+                Some(budget),
+                cancel.clone(),
+            )
+        });
         let mut hooks: Vec<&dyn Hook> = vec![&env_hook, &checkpoint_hook];
         if let Some(hook) = &memory_hook {
             hooks.push(hook);
         }
-        let mut orchestrator = Orchestrator::new(&*provider, &*toolbox, def)
-            .with_history(history)
-            .with_hooks(hooks);
+        if let Some(hook) = &cost_hook {
+            hooks.push(hook);
+        }
+        // Seed prior transcript through the resume seam rather than `with_history`,
+        // so restored counters (e.g. context-overflow `truncations`) carry over and
+        // already-executed tool results are NOT re-run on the next turn (#3). A
+        // fresh run passes an empty history, which is equivalent to `new`.
+        let resume_state = ResumeState {
+            history,
+            truncations: config.resume_truncations,
+        };
+        let mut orchestrator =
+            Orchestrator::resume(&*provider, &*toolbox, def, resume_state).with_hooks(hooks);
         let output = run_collecting(&mut orchestrator, &config.task, cancel, sink)?;
 
         // Opt-in auto-distillation: after a substantive top-level run, a restricted
@@ -122,6 +183,35 @@ impl SubAgentSpawner {
             );
         }
         Ok(output)
+    }
+
+    /// Run a bounded parallel fan-out of independent investigations and join all
+    /// results. Each task runs as its own sub-agent (events forwarded + tagged via
+    /// `run_spawn`), at most `concurrency` at a time. ureq is synchronous, so each
+    /// in-flight task occupies one OS thread; the cap bounds that pressure. The
+    /// order of results matches the order of `tasks`. A per-task failure is
+    /// captured in its [`FanOutResult`] rather than aborting the whole fan-out.
+    ///
+    /// Read-only is the *caller's* responsibility: pass tasks/agents whose tool
+    /// filters exclude mutating tools (the gate is still the outer authority). The
+    /// fan-out itself adds no new tool authority.
+    #[allow(dead_code, reason = "fan-out primitive awaiting a production caller")]
+    pub(crate) fn fan_out(
+        &self,
+        depth: usize,
+        tasks: Vec<SpawnAgentArgs>,
+        parent: &ParentRun,
+        concurrency: usize,
+        cancel: &CancelToken,
+    ) -> Vec<FanOutResult> {
+        bounded_fan_out(tasks, concurrency, cancel, |args| {
+            let label = task_label(&args);
+            let outcome = self.run_spawn(depth + 1, parent, args, cancel);
+            FanOutResult {
+                task: label,
+                outcome,
+            }
+        })
     }
 
     /// Assemble the agent's toolbox for one run. The P4 gate stays the
@@ -187,8 +277,17 @@ impl SpawnRunner for SubAgentSpawner {
         cancel: &CancelToken,
     ) -> AgentResult<RunOutcome> {
         let config = sub_config(parent, args).map_err(|err| AgentError::Tool(err.to_string()))?;
-        let mut internal_sink = |_event: AgentEvent| {};
-        self.run_at_depth(depth, config, Vec::new(), cancel, &mut internal_sink)
+        let sub_id = self.next_sub_agent_id();
+        // Forward each child event to the parent's sink tagged with `sub_id`, so
+        // the child's progress surfaces instead of being silently discarded. With
+        // no sink attached this is a cheap no-op (prior behaviour).
+        let sink = self.event_sink.clone();
+        let mut forwarding_sink = |event: AgentEvent| {
+            if let Some(sink) = &sink {
+                sink(&sub_id, &event);
+            }
+        };
+        self.run_at_depth(depth, config, Vec::new(), cancel, &mut forwarding_sink)
             .map(|output| output.outcome)
             .map_err(|err| AgentError::Tool(format!("spawn_agent failed: {err}")))
     }
@@ -281,6 +380,10 @@ fn sub_config(parent: &ParentRun, args: SpawnAgentArgs) -> Result<AgentRunConfig
         // parent's capability; refuse is the safe default for the launcher field.
         allow_exec: false,
         exec_launcher: crate::sandbox::refuse_launcher(),
+        // Spawned sub-agents always start fresh.
+        resume_truncations: 0,
+        // Sub-agents inherit no budget guard; the parent's guard already bounds it.
+        cost_budget_usd: None,
     })
 }
 
@@ -323,7 +426,7 @@ impl ParentRun {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SpawnAgentArgs {
     task: String,
     #[serde(default)]
@@ -332,6 +435,102 @@ pub(crate) struct SpawnAgentArgs {
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
+}
+
+impl SpawnAgentArgs {
+    /// Build args for a fan-out investigation from a task (and optional named
+    /// agent), inheriting provider/model from the parent. Used by callers that
+    /// drive [`SubAgentSpawner::fan_out`] with read-only investigations.
+    #[allow(dead_code, reason = "fan-out primitive awaiting a production caller")]
+    pub(crate) fn investigation(task: impl Into<String>, agent: Option<String>) -> Self {
+        Self {
+            task: task.into(),
+            agent,
+            provider: None,
+            model: None,
+        }
+    }
+}
+
+/// One task's result within a [`SubAgentSpawner::fan_out`]. `outcome` carries the
+/// per-task error rather than aborting the whole fan-out, so one failed
+/// investigation doesn't lose its siblings' work.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct FanOutResult {
+    pub(crate) task: String,
+    pub(crate) outcome: AgentResult<RunOutcome>,
+}
+
+impl FanOutResult {
+    fn cancelled(task: String) -> Self {
+        Self {
+            task,
+            outcome: Err(AgentError::Cancelled),
+        }
+    }
+
+    fn panicked() -> Self {
+        Self {
+            task: String::new(),
+            outcome: Err(AgentError::Tool("sub-agent thread panicked".to_string())),
+        }
+    }
+}
+
+/// A short label for a fan-out task, for result attribution.
+#[allow(dead_code, reason = "used by the fan-out primitive awaiting a caller")]
+fn task_label(args: &SpawnAgentArgs) -> String {
+    args.task.clone()
+}
+
+/// Run `work` over `inputs` with at most `concurrency` in flight at once,
+/// preserving input order in the output. Bounded via std scoped threads in waves
+/// of `cap` — no extra semaphore. A pre-cancelled run short-circuits to a
+/// `cancelled` result per remaining input. A worker panic degrades to a
+/// `panicked` result rather than poisoning the join. Generic over the work item
+/// and worker so the threading/cap policy is unit-testable without a real
+/// sub-agent.
+#[cfg_attr(not(test), allow(dead_code))]
+fn bounded_fan_out<I, W>(
+    inputs: Vec<I>,
+    concurrency: usize,
+    cancel: &CancelToken,
+    work: W,
+) -> Vec<FanOutResult>
+where
+    I: Send,
+    W: Fn(I) -> FanOutResult + Sync,
+{
+    let cap = concurrency.max(1);
+    let mut results: Vec<FanOutResult> = Vec::with_capacity(inputs.len());
+    let mut remaining = inputs.into_iter();
+    loop {
+        let wave: Vec<I> = remaining.by_ref().take(cap).collect();
+        if wave.is_empty() {
+            break;
+        }
+        if cancel.is_cancelled() {
+            results.extend(
+                wave.into_iter()
+                    .map(|_| FanOutResult::cancelled(String::new())),
+            );
+            continue;
+        }
+        let work = &work;
+        let done: Vec<FanOutResult> = std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .into_iter()
+                .map(|item| scope.spawn(move || work(item)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or_else(|_| FanOutResult::panicked()))
+                .collect()
+        });
+        results.extend(done);
+    }
+    results
 }
 
 pub(crate) trait SpawnRunner: Send + Sync {
@@ -583,5 +782,119 @@ mod tests {
             .call("read_file", &json!({ "path": "x" }), &CancelToken::never())
             .expect("delegated");
         assert_eq!(out["name"], "read_file");
+    }
+
+    fn ok_result(task: &str) -> FanOutResult {
+        FanOutResult {
+            task: task.to_string(),
+            outcome: Ok(RunOutcome {
+                reason: "completed".into(),
+                turns: 1,
+                final_text: task.to_string(),
+                usage: Usage::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn bounded_fan_out_preserves_order_and_runs_all() {
+        let inputs = vec!["a", "b", "c", "d", "e"];
+        let results = bounded_fan_out(inputs, 2, &CancelToken::never(), ok_result);
+        let labels: Vec<&str> = results.iter().map(|r| r.task.as_str()).collect();
+        // Order matches input order even though waves run concurrently.
+        assert_eq!(labels, vec!["a", "b", "c", "d", "e"]);
+        assert!(results.iter().all(|r| r.outcome.is_ok()));
+    }
+
+    #[test]
+    fn bounded_fan_out_respects_concurrency_cap() {
+        use std::sync::atomic::AtomicUsize;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let inputs: Vec<u32> = (0..12).collect();
+        let in_flight_w = Arc::clone(&in_flight);
+        let peak_w = Arc::clone(&peak);
+        let results = bounded_fan_out(inputs, 3, &CancelToken::never(), move |n| {
+            let now = in_flight_w.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_w.fetch_max(now, Ordering::SeqCst);
+            // Hold the slot briefly so concurrent workers overlap within a wave.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            in_flight_w.fetch_sub(1, Ordering::SeqCst);
+            ok_result(&n.to_string())
+        });
+        assert_eq!(results.len(), 12);
+        // Never more than the cap concurrently in flight.
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "peak concurrency {} exceeded cap 3",
+            peak.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn bounded_fan_out_short_circuits_when_cancelled() {
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ran_w = Arc::clone(&ran);
+        let results = bounded_fan_out(vec![1, 2, 3], 2, &cancel, move |_| {
+            ran_w.fetch_add(1, Ordering::SeqCst);
+            ok_result("x")
+        });
+        assert_eq!(results.len(), 3);
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.outcome, Err(AgentError::Cancelled)))
+        );
+        // The worker never ran for a pre-cancelled fan-out.
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn bounded_fan_out_captures_worker_panic_without_aborting() {
+        let results = bounded_fan_out(vec![1, 2, 3], 3, &CancelToken::never(), |n| {
+            if n == 2 {
+                panic!("boom");
+            }
+            ok_result(&n.to_string())
+        });
+        assert_eq!(results.len(), 3);
+        // The panicking task degrades to an error; its siblings still succeed.
+        let oks = results.iter().filter(|r| r.outcome.is_ok()).count();
+        assert_eq!(oks, 2);
+        assert!(
+            results
+                .iter()
+                .any(|r| matches!(&r.outcome, Err(AgentError::Tool(m)) if m.contains("panicked")))
+        );
+    }
+
+    #[test]
+    fn spawn_forwards_tagged_child_events_to_attached_sink() {
+        // The forwarding sink wired on a SubAgentSpawner-style runner must receive
+        // the child id; here we exercise the sink contract directly via a runner
+        // that emits through a captured forwarding sink.
+        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_capture = Arc::clone(&captured);
+        let sink: Arc<SubAgentEventSink> = Arc::new(move |sub_id: &str, event: &AgentEvent| {
+            if let AgentEvent::AssistantText(text) = event {
+                sink_capture
+                    .lock()
+                    .expect("capture lock")
+                    .push((sub_id.to_string(), text.clone()));
+            }
+        });
+        // Simulate two child events forwarded under one sub-agent id.
+        sink("sub-1", &AgentEvent::AssistantText("hello".into()));
+        sink("sub-1", &AgentEvent::AssistantText("world".into()));
+        let got = captured.lock().expect("lock").clone();
+        assert_eq!(
+            got,
+            vec![
+                ("sub-1".to_string(), "hello".to_string()),
+                ("sub-1".to_string(), "world".to_string()),
+            ]
+        );
     }
 }

@@ -57,6 +57,11 @@ pub(crate) struct SessionRecord {
     /// Working-memory checkpoint restored into resumed sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checkpoint: Option<String>,
+    /// Context-overflow truncations performed so far, carried across a resume so
+    /// the orchestrator's counter continues. Additive: older transcripts default
+    /// to 0.
+    #[serde(default)]
+    pub(crate) truncations: u32,
     /// The streamed transcript, in order.
     #[serde(default)]
     pub(crate) events: Vec<SessionEvent>,
@@ -124,6 +129,7 @@ impl SessionRecord {
             task: task.to_string(),
             history: Vec::new(),
             checkpoint: None,
+            truncations: 0,
             events: Vec::new(),
             outcome: None,
         }
@@ -534,6 +540,7 @@ mod tests {
             task: "do the thing".into(),
             history: Vec::new(),
             checkpoint: None,
+            truncations: 0,
             events: vec![
                 SessionEvent::TurnStarted { turn: 1 },
                 SessionEvent::AssistantText {

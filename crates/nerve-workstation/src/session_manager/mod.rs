@@ -57,6 +57,9 @@ struct SessionConfig {
     temperature: Option<f32>,
     reasoning_effort: Option<String>,
     tool_filter: Option<Vec<String>>,
+    /// Context-overflow truncations restored from a resumed session, threaded
+    /// into the orchestrator via `ResumeState`. `0` for a fresh session.
+    resume_truncations: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +126,8 @@ impl SessionManager {
                     temperature,
                     reasoning_effort,
                     tool_filter,
+                    // Filled from the persisted record on resume (see `start`).
+                    resume_truncations: 0,
                 },
                 resume,
             ),
@@ -149,7 +154,11 @@ impl SessionManager {
         }
     }
 
-    fn start(&self, config: SessionConfig, resume: Option<String>) -> Result<Value, RuntimeError> {
+    fn start(
+        &self,
+        mut config: SessionConfig,
+        resume: Option<String>,
+    ) -> Result<Value, RuntimeError> {
         let (id, history, record, checkpoint) = match resume {
             Some(id) => self.resume_record(&id)?,
             None => {
@@ -158,6 +167,9 @@ impl SessionManager {
                 (record.id.clone(), Vec::new(), record, checkpoint)
             }
         };
+        // Carry the persisted overflow-truncation counter into resumed turns, so
+        // the orchestrator continues counting rather than restarting at 0 (#3).
+        config.resume_truncations = record.truncations;
         let session = LiveSession {
             id: id.clone(),
             config,
@@ -479,6 +491,10 @@ fn session_run_config(
         // Daemon session turns refuse exec by trust context, not just by flag.
         allow_exec: false,
         exec_launcher: crate::sandbox::refuse_launcher(),
+        // Carry the resumed truncation counter into the orchestrator's ResumeState.
+        resume_truncations: config.resume_truncations,
+        // Session turns don't impose a cost budget guard (opt-in elsewhere).
+        cost_budget_usd: None,
     }
 }
 
@@ -513,6 +529,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             tool_filter: None,
+            resume_truncations: 0,
         };
         let run = session_run_config(&config, ResolvedAgent::default(), "do work");
         assert!(!run.allow_exec, "session exec capability must be off");
@@ -570,6 +587,104 @@ mod tests {
         panic!("approval request not emitted")
     }
 
+    fn test_manager(store: SessionStore) -> SessionManager {
+        use crate::workspace::{args_with, registry};
+        let runtime =
+            tools::runtime(registry(&args_with(Vec::new(), Vec::new())).expect("registry"));
+        SessionManager::new(
+            Arc::new(runtime),
+            ProviderRegistry::default(),
+            Policy::default(),
+            Some(store),
+            Arc::new(|_event| {}),
+        )
+    }
+
+    #[test]
+    fn resume_seeds_prior_transcript_without_rerunning_tools() {
+        // Persist a session whose transcript already contains a tool call and its
+        // result, plus a non-zero truncation counter.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let mut record = SessionRecord::begin("claude", "m1", "investigate");
+        record.set_history(vec![
+            Message::user("investigate"),
+            Message::assistant("calling a tool"),
+            Message::tool("call-1", "read_file", "FILE CONTENTS"),
+            Message::assistant("done analyzing"),
+        ]);
+        record.truncations = 2;
+        store.write(&record).expect("persist record");
+        let resumed_id = record.id.clone();
+
+        // Resume it through the manager.
+        let manager = test_manager(SessionStore::new(dir.path().to_path_buf()));
+        let config = SessionConfig {
+            workspace: None,
+            provider: "claude".into(),
+            model: "m1".into(),
+            system_prompt: None,
+            agent: None,
+            max_turns: None,
+            temperature: None,
+            reasoning_effort: None,
+            tool_filter: None,
+            resume_truncations: 0,
+        };
+        let started = manager
+            .start(config, Some(resumed_id.clone()))
+            .expect("resume start");
+        assert_eq!(started["session_id"], json!(resumed_id));
+
+        // The live session's history is the prior transcript verbatim — including
+        // the already-executed tool RESULT, so the next turn's `Orchestrator::resume`
+        // sees it as context and the model does not re-issue that tool call.
+        let sessions = crate::sync::lock_recover(&manager.sessions);
+        let live = sessions.get(&resumed_id).expect("live session");
+        assert_eq!(live.history.len(), 4);
+        let tool_msg = &live.history[2];
+        assert_eq!(tool_msg.name.as_deref(), Some("read_file"));
+        assert_eq!(tool_msg.content, "FILE CONTENTS");
+        assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call-1"));
+        // The persisted truncation counter carried into the resumed config, so the
+        // orchestrator's `ResumeState` continues counting rather than resetting.
+        assert_eq!(live.config.resume_truncations, 2);
+
+        // The run config built for the next turn threads that counter through.
+        let run_config = session_run_config(&live.config, ResolvedAgent::default(), "next");
+        assert_eq!(run_config.resume_truncations, 2);
+    }
+
+    #[test]
+    fn resume_without_store_is_rejected() {
+        use crate::workspace::{args_with, registry};
+        let runtime =
+            tools::runtime(registry(&args_with(Vec::new(), Vec::new())).expect("registry"));
+        let manager = SessionManager::new(
+            Arc::new(runtime),
+            ProviderRegistry::default(),
+            Policy::default(),
+            None,
+            Arc::new(|_event| {}),
+        );
+        let config = SessionConfig {
+            workspace: None,
+            provider: "claude".into(),
+            model: "m1".into(),
+            system_prompt: None,
+            agent: None,
+            max_turns: None,
+            temperature: None,
+            reasoning_effort: None,
+            tool_filter: None,
+            resume_truncations: 0,
+        };
+        let err = manager
+            .start(config, Some("ghost".into()))
+            .expect_err("resume without store must fail");
+        assert!(err.to_string().contains("no session store"));
+    }
+
     #[test]
     fn retarget_switches_model_and_keeps_history() {
         let mut session = LiveSession {
@@ -584,6 +699,7 @@ mod tests {
                 temperature: None,
                 reasoning_effort: None,
                 tool_filter: None,
+                resume_truncations: 0,
             },
             history: vec![Message::user("hi")],
             record: SessionRecord::begin("claude", "m1", ""),

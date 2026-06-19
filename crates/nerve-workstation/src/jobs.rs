@@ -226,18 +226,18 @@ impl JobManager {
             None,
             None,
         ));
-        // Executor branching — each command is claimed by exactly one executor:
+        // Executor routing — every command is claimed by exactly one executor:
         // the agent.run job, the session manager, the auth manager, or the core
-        // Runtime hub (the `else`). The `command_executor_partition` tests assert
-        // this partition stays total and disjoint as commands are added (§10).
-        let outcome = if is_agent_run(&command) {
-            self.run_agent_command(&job_id, command, &token)
-        } else if is_session_command(&command) {
-            self.sessions.handle_command(command, &token)
-        } else if is_auth_command(&command) {
-            self.auth.handle_command(command, &token)
-        } else {
-            self.runtime.handle_command_cancellable(command, &token)
+        // Runtime hub. `executor_for` is an *exhaustive* match on `RuntimeCommand`
+        // (§10 hard gate): a new variant fails to COMPILE until it is mapped here,
+        // so a command can never silently fall through to the hub. The
+        // `command_executor_partition` test then asserts the mapping is total over
+        // `RUNTIME_COMMAND_NAMES`.
+        let outcome = match executor_for(&command) {
+            Executor::AgentRun => self.run_agent_command(&job_id, command, &token),
+            Executor::Session => self.sessions.handle_command(command, &token),
+            Executor::Auth => self.auth.handle_command(command, &token),
+            Executor::CoreHub => self.runtime.handle_command_cancellable(command, &token),
         };
         let event = {
             let mut store = crate::sync::lock_recover(&self.jobs);
@@ -292,6 +292,10 @@ impl JobManager {
             // Daemon-served runs refuse exec by trust context, not just by flag.
             allow_exec: false,
             exec_launcher: crate::sandbox::refuse_launcher(),
+            // One-shot agent.run jobs start fresh (resume is the session layer).
+            resume_truncations: 0,
+            // Cost budget guard is opt-in; off for daemon agent.run jobs.
+            cost_budget_usd: None,
         };
         let emit = Arc::clone(&self.emit);
         let job_id = job_id.to_string();
@@ -429,32 +433,46 @@ fn is_valid_job_id_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
 }
 
-fn is_agent_run(command: &RuntimeCommand) -> bool {
-    matches!(command, RuntimeCommand::AgentRun { .. })
+/// The single executor that owns a [`RuntimeCommand`]. The `run_job` dispatch and
+/// the §10 totality test both route through [`executor_for`], so this enum is the
+/// one place the command→executor partition is defined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Executor {
+    /// The composition-root `agent.run` job (LLM orchestration).
+    AgentRun,
+    /// The host `SessionManager` (`session.*` family).
+    Session,
+    /// The host `AuthManager` (`auth.*` family).
+    Auth,
+    /// The core `Runtime` hub — nerve-core dispatch (`ping` / `tool.*`).
+    CoreHub,
 }
 
-fn is_session_command(command: &RuntimeCommand) -> bool {
-    matches!(
-        command,
+/// Map every protocol command to its single owning executor.
+///
+/// This is an **exhaustive** match on [`RuntimeCommand`] on purpose: it is the §10
+/// hard gate. Adding a new variant breaks this match at COMPILE time, forcing an
+/// explicit executor decision rather than letting the command fall through to the
+/// core hub by default. Do not add a wildcard arm.
+fn executor_for(command: &RuntimeCommand) -> Executor {
+    match command {
+        RuntimeCommand::AgentRun { .. } => Executor::AgentRun,
         RuntimeCommand::SessionStart { .. }
-            | RuntimeCommand::SessionMessage { .. }
-            | RuntimeCommand::SessionInterrupt { .. }
-            | RuntimeCommand::SessionRespond { .. }
-            | RuntimeCommand::SessionGet { .. }
-            | RuntimeCommand::SessionList
-            | RuntimeCommand::SessionClose { .. }
-            | RuntimeCommand::SessionSetModel { .. }
-    )
-}
-
-fn is_auth_command(command: &RuntimeCommand) -> bool {
-    matches!(
-        command,
+        | RuntimeCommand::SessionMessage { .. }
+        | RuntimeCommand::SessionInterrupt { .. }
+        | RuntimeCommand::SessionRespond { .. }
+        | RuntimeCommand::SessionGet { .. }
+        | RuntimeCommand::SessionList
+        | RuntimeCommand::SessionClose { .. }
+        | RuntimeCommand::SessionSetModel { .. } => Executor::Session,
         RuntimeCommand::AuthStart { .. }
-            | RuntimeCommand::AuthComplete { .. }
-            | RuntimeCommand::AuthStatus { .. }
-            | RuntimeCommand::AuthLogout { .. }
-    )
+        | RuntimeCommand::AuthComplete { .. }
+        | RuntimeCommand::AuthStatus { .. }
+        | RuntimeCommand::AuthLogout { .. } => Executor::Auth,
+        RuntimeCommand::Ping | RuntimeCommand::ToolList | RuntimeCommand::ToolCall { .. } => {
+            Executor::CoreHub
+        }
+    }
 }
 
 fn map_agent_event(job_id: &str, event: AgentEvent) -> Option<RuntimeEvent> {
@@ -488,26 +506,15 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod command_executor_partition {
     //! Governance test (architecture north star §10): the command-executor
-    //! *totality* property. `run_job` routes every [`RuntimeCommand`] to exactly
-    //! one executor — the `agent.run` job, the session manager, the auth manager,
-    //! or the core [`Runtime`](tools::NerveRuntime) hub (its `else` arm). This
-    //! asserts that partition is **total and disjoint** over the authoritative
-    //! `RUNTIME_COMMAND_NAMES`, so a newly added command can neither silently fall
-    //! through to the hub (zero claimants) nor be double-claimed (two). The
-    //! predicates below are the exact branch conditions used by `run_job`.
+    //! *totality* property, now backed by a **compile-time** hard gate.
+    //! [`executor_for`] is an exhaustive match on [`RuntimeCommand`], so a new
+    //! variant cannot compile until it is mapped to one [`Executor`] — there is no
+    //! `else`/wildcard for it to fall through. These tests close the loop at
+    //! run time: every name in the authoritative `RUNTIME_COMMAND_NAMES` maps to
+    //! exactly one executor, so the wire vocabulary and the dispatch stay aligned
+    //! (e.g. a `kind` rename that drifts from the constant is caught).
     use super::*;
     use std::collections::BTreeSet;
-
-    /// Commands the core `Runtime` hub answers itself (nerve-core dispatch) —
-    /// `run_job`'s `else` arm, written out **independently** rather than as the
-    /// complement of the host predicates, so an unclassified new command is
-    /// claimed by zero executors (and fails) instead of defaulting to the hub.
-    fn core_hub_handles(command: &RuntimeCommand) -> bool {
-        matches!(
-            command,
-            RuntimeCommand::Ping | RuntimeCommand::ToolList | RuntimeCommand::ToolCall { .. }
-        )
-    }
 
     /// Build a minimal representative value for a protocol command name by the
     /// real `kind`-tagged deserialization path (so a `kind` rename that drifts
@@ -540,7 +547,13 @@ mod command_executor_partition {
     }
 
     #[test]
-    fn every_runtime_command_has_exactly_one_executor() {
+    fn every_runtime_command_maps_to_one_executor() {
+        // `executor_for` is exhaustive (total) by construction — it would not
+        // compile otherwise. This asserts the *name* table agrees: each protocol
+        // name builds a command whose kind round-trips and resolves to exactly one
+        // executor. A name added without a representative panics in `representative`
+        // (and a kind drift is caught by the `name()` equality below).
+        let mut seen_per_executor: HashMap<Executor, Vec<&str>> = HashMap::new();
         for &name in nerve_runtime::RUNTIME_COMMAND_NAMES {
             let command = representative(name);
             assert_eq!(
@@ -548,25 +561,50 @@ mod command_executor_partition {
                 name,
                 "representative for `{name}` built the wrong command kind"
             );
-            let claimants = [
-                ("agent.run job", is_agent_run(&command)),
-                ("session manager", is_session_command(&command)),
-                ("auth manager", is_auth_command(&command)),
-                ("core Runtime hub", core_hub_handles(&command)),
-            ];
-            let claimed: Vec<&str> = claimants
-                .iter()
-                .filter(|(_, hit)| *hit)
-                .map(|(who, _)| *who)
-                .collect();
-            assert_eq!(
-                claimed.len(),
-                1,
-                "command `{name}` must be claimed by exactly one executor, got {claimed:?}; \
-                 wire a new variant into `run_job` (is_agent_run / is_session_command / \
-                 is_auth_command) or the core hub — never leave it to fall through the `else`"
+            // The match is exhaustive, so `executor_for` always returns exactly one
+            // executor — no command can be unclaimed or double-claimed.
+            let executor = executor_for(&command);
+            seen_per_executor.entry(executor).or_default().push(name);
+        }
+        // Every executor must own at least one command (none is dead), and the
+        // union of owned names must cover the whole vocabulary exactly once.
+        let total: usize = seen_per_executor.values().map(Vec::len).sum();
+        assert_eq!(
+            total,
+            nerve_runtime::RUNTIME_COMMAND_NAMES.len(),
+            "executor map did not cover every command exactly once: {seen_per_executor:?}"
+        );
+        for executor in [
+            Executor::AgentRun,
+            Executor::Session,
+            Executor::Auth,
+            Executor::CoreHub,
+        ] {
+            assert!(
+                seen_per_executor.contains_key(&executor),
+                "executor {executor:?} owns no command — dead executor arm in `run_job`"
             );
         }
+    }
+
+    #[test]
+    fn executor_for_routes_each_family_to_its_owner() {
+        // Spot-check the routing is by *family*, not incidental, so a misfiled
+        // variant (e.g. an auth command routed to the session manager) is caught.
+        assert_eq!(executor_for(&representative("ping")), Executor::CoreHub);
+        assert_eq!(
+            executor_for(&representative("tool.call")),
+            Executor::CoreHub
+        );
+        assert_eq!(
+            executor_for(&representative("agent.run")),
+            Executor::AgentRun
+        );
+        assert_eq!(
+            executor_for(&representative("session.start")),
+            Executor::Session
+        );
+        assert_eq!(executor_for(&representative("auth.start")), Executor::Auth);
     }
 
     #[test]

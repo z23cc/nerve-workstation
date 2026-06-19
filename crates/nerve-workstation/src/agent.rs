@@ -299,6 +299,10 @@ fn run_task(args: AgentRunArgs) -> Result<()> {
         allow_exec: args.allow_exec,
         // Trusted local CLI run: best-effort process containment.
         exec_launcher: crate::sandbox::process_launcher(),
+        // CLI runs start fresh; the session layer is the resume path.
+        resume_truncations: 0,
+        // Cost budget guard is opt-in; off for the default CLI run.
+        cost_budget_usd: None,
     };
     // P5: persist this run's transcript under the project's `.nerve/sessions`
     // (falling back to the global config home). A resolution failure only
@@ -373,6 +377,14 @@ pub(crate) struct AgentRunConfig {
     /// remote paths inject a refusing launcher, so a served run cannot execute
     /// even if the capability flag were set.
     pub(crate) exec_launcher: Arc<dyn crate::sandbox::SandboxLauncher>,
+    /// Context-overflow truncations carried over from a resumed session, restored
+    /// into the orchestrator via `ResumeState` so the counter continues across
+    /// turns. `0` for a fresh run (#3 session resume).
+    pub(crate) resume_truncations: u32,
+    /// Opt-in per-run cost ceiling in USD. When set, a [`crate::cost::CostTelemetryHook`]
+    /// observes usage via the Hook seam and cancels the run once the estimate
+    /// crosses this budget. `None` leaves cost telemetry off (#5).
+    pub(crate) cost_budget_usd: Option<f64>,
 }
 
 /// Build the toolbox + provider and drive the orchestrator. The single execution
@@ -391,13 +403,22 @@ pub(crate) fn run_agent(
     let model = config.model.clone();
     let task = config.task.clone();
     let checkpoint = Arc::new(Mutex::new(Checkpoint::new()));
+    // Forwarding sink for spawned sub-agents: child events are tagged with the
+    // child id and buffered (a `Send + Sync` queue, since fan-out may run children
+    // on worker threads). The parent drains the buffer into its own `sink` after
+    // the run so the child's progress surfaces instead of being discarded (#11).
+    let sub_events: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let forward = Arc::clone(&sub_events);
     let spawner = SubAgentSpawner::new(
         runtime,
         registry.clone(),
         gate,
         DEFAULT_MAX_DEPTH,
         Arc::clone(&checkpoint),
-    );
+    )
+    .with_event_sink(Arc::new(move |sub_id: &str, event: &AgentEvent| {
+        crate::sync::lock_recover(&forward).push(tag_sub_agent_event(sub_id, event));
+    }));
     let mut partial_events = Vec::new();
     let result = {
         let mut recording_sink = |event: AgentEvent| {
@@ -406,6 +427,12 @@ pub(crate) fn run_agent(
         };
         spawner.run_at_depth(0, config, Vec::new(), cancel, &mut recording_sink)
     };
+    // Surface any buffered sub-agent events through the parent sink. They arrive
+    // after the spawning tool call returns (the spawn is synchronous), so this
+    // preserves them rather than dropping them on the floor.
+    for event in crate::sync::lock_recover(&sub_events).drain(..) {
+        sink(event);
+    }
     match result {
         Ok(output) => {
             if let Some(store) = store {
@@ -418,6 +445,38 @@ pub(crate) fn run_agent(
                 persist_partial_record(store, &partial_events, &provider, &model, &task);
             }
             Err(err)
+        }
+    }
+}
+
+/// Re-tag a sub-agent's event for the parent's stream so it is attributable to
+/// the child (`[sub-N] …`). Textual/structural progress becomes a prefixed
+/// [`AgentEvent::AssistantText`] line; token [`AgentEvent::Usage`] passes through
+/// unchanged so the parent's aggregate accounting still includes child usage.
+fn tag_sub_agent_event(sub_id: &str, event: &AgentEvent) -> AgentEvent {
+    match event {
+        AgentEvent::Usage { .. } => event.clone(),
+        AgentEvent::AssistantText(text) => AgentEvent::AssistantText(format!("[{sub_id}] {text}")),
+        AgentEvent::Reasoning(text) => {
+            AgentEvent::AssistantText(format!("[{sub_id}] (reasoning) {text}"))
+        }
+        AgentEvent::ToolStarted { name, .. } => {
+            AgentEvent::AssistantText(format!("[{sub_id}] tool: {name}"))
+        }
+        AgentEvent::ToolFinished { name, ok, .. } => {
+            AgentEvent::AssistantText(format!("[{sub_id}] tool {name} -> ok={ok}"))
+        }
+        AgentEvent::Done { reason } => {
+            AgentEvent::AssistantText(format!("[{sub_id}] done: {reason}"))
+        }
+        AgentEvent::TurnStarted(turn) => {
+            AgentEvent::AssistantText(format!("[{sub_id}] turn {turn}"))
+        }
+        AgentEvent::Interrupted(reason) => {
+            AgentEvent::AssistantText(format!("[{sub_id}] interrupted: {reason}"))
+        }
+        AgentEvent::ToolCallDelta { name, .. } => {
+            AgentEvent::AssistantText(format!("[{sub_id}] tool-delta: {name}"))
         }
     }
 }
@@ -529,3 +588,46 @@ pub(crate) fn install_interrupt_handler(cancel: &CancelToken) {
 /// On non-Unix platforms SIGINT keeps its default (terminate) behavior.
 #[cfg(not(unix))]
 pub(crate) fn install_interrupt_handler(_cancel: &CancelToken) {}
+
+#[cfg(test)]
+mod tests {
+    use super::tag_sub_agent_event;
+    use nerve_agent::AgentEvent;
+
+    #[test]
+    fn tagging_prefixes_textual_events_with_sub_id() {
+        let tagged = tag_sub_agent_event("sub-3", &AgentEvent::AssistantText("hi".into()));
+        assert!(matches!(tagged, AgentEvent::AssistantText(t) if t == "[sub-3] hi"));
+        let tool = tag_sub_agent_event(
+            "sub-3",
+            &AgentEvent::ToolStarted {
+                name: "read_file".into(),
+                args: serde_json::json!({}),
+            },
+        );
+        assert!(matches!(tool, AgentEvent::AssistantText(t) if t == "[sub-3] tool: read_file"));
+    }
+
+    #[test]
+    fn tagging_passes_usage_through_unchanged() {
+        // Usage must survive untagged so the parent's aggregate accounting still
+        // sums child token usage.
+        let usage = AgentEvent::Usage {
+            input_tokens: 5,
+            output_tokens: 7,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        match tag_sub_agent_event("sub-1", &usage) {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                assert_eq!(input_tokens, 5);
+                assert_eq!(output_tokens, 7);
+            }
+            other => panic!("usage must pass through as Usage, got {other:?}"),
+        }
+    }
+}

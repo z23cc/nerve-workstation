@@ -297,7 +297,7 @@ fn job_cancel_requests_token_and_emits_cancelled() {
             event_output
                 .lock()
                 .expect("output lock")
-                .push(runtime_event_notification(event));
+                .push(runtime_event_notification(0, event));
             if block {
                 progress_tx.send(()).expect("progress send");
                 release_rx

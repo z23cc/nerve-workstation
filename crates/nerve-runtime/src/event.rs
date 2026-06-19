@@ -267,4 +267,30 @@ impl RuntimeEvent {
             job_id: job_id.into(),
         }
     }
+
+    /// The session this event belongs to, if it is session-scoped. Job- and
+    /// auth-scoped events return `None`. Transports use this to fan a frame out
+    /// only to subscribers watching that session (a session subscriber sees its
+    /// own session-scoped events plus all unscoped ones). Accessor only — the
+    /// wire shape (the `type`-tagged enum) is unchanged.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::SessionStarted { session_id }
+            | Self::TurnStarted { session_id }
+            | Self::SessionIdle { session_id }
+            | Self::SessionClosed { session_id }
+            | Self::SessionAgent { session_id, .. }
+            | Self::ApprovalRequested { session_id, .. } => Some(session_id.as_str()),
+            Self::JobStarted { .. }
+            | Self::JobProgress { .. }
+            | Self::JobCancelRequested { .. }
+            | Self::JobCompleted { .. }
+            | Self::JobFailed { .. }
+            | Self::JobCancelled { .. }
+            | Self::Agent { .. }
+            | Self::ToolCallDelta { .. }
+            | Self::Auth { .. } => None,
+        }
+    }
 }

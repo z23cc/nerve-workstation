@@ -16,6 +16,7 @@ use nerve_runtime::{
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) struct RuntimeDaemonRouter {
     jobs: Arc<JobManager>,
@@ -29,13 +30,18 @@ impl RuntimeDaemonRouter {
         session_store: Option<SessionStore>,
         emit_notification: impl Fn(Value) + Send + Sync + 'static,
     ) -> Self {
+        // Monotonic per-stream sequence assigned at emit time, so SSE clients can
+        // order frames and request bounded replay via `Last-Event-ID`. Starts at
+        // 1; `0` is reserved as "before any event" for `last_seq=0` full replay.
+        let event_seq = AtomicU64::new(1);
         let jobs = Arc::new(JobManager::new(
             runtime,
             registry,
             policy,
             session_store,
             move |event| {
-                emit_notification(runtime_event_notification(event));
+                let seq = event_seq.fetch_add(1, Ordering::Relaxed);
+                emit_notification(runtime_event_notification(seq, event));
             },
         ));
         Self { jobs }
@@ -182,11 +188,12 @@ fn emit_error(
     Ok(())
 }
 
-pub(super) fn runtime_event_notification(event: RuntimeEvent) -> Value {
-    // `event_seq` defaults to 0 here; assigning a real monotonic per-stream
-    // sequence at emit time is a later wave. The carrier flattens the event, so
-    // `params` stays backward compatible with clients reading the bare event.
-    let params = RuntimeEventNotification::new(0, event);
+pub(super) fn runtime_event_notification(event_seq: u64, event: RuntimeEvent) -> Value {
+    // `event_seq` is the monotonic per-stream sequence assigned at emit time (see
+    // `RuntimeDaemonRouter::new`). The carrier flattens the event, so `params`
+    // stays backward compatible with clients reading the bare event; SSE clients
+    // additionally use `event_seq` for ordering and `Last-Event-ID` replay.
+    let params = RuntimeEventNotification::new(event_seq, event);
     json!({ "jsonrpc": "2.0", "method": RUNTIME_EVENT_METHOD, "params": params })
 }
 
