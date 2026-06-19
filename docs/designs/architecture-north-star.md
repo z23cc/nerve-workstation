@@ -1,7 +1,7 @@
 # Architecture North Star
 
 Status: **governing** — read before any structural change. Referenced as a binding rule from `CLAUDE.md`.
-Date: 2026-06-18
+Date: 2026-06-18 · reconciled to implementation 2026-06-19
 
 This is the long-term architectural contract for Nerve Workstation. It exists so that every
 incremental change is **locally optimal _and_ globally aligned**: each feature plugs into a declared
@@ -24,10 +24,21 @@ seam instead of bolting on a new bespoke entry point. When in doubt, the seam wi
 > **Every new capability MUST enter through a declared seam (port / registry / protocol). Never open
 > a bespoke entry point.**
 
-Cautionary tale: `nerve agent run` was added as a synchronous CLI path that bypassed
-`RuntimeCommand` / job / event. It worked locally but created a third, off-protocol "face" and broke
-the protocol-authority invariant (§3.3). **A capability without a seam is guaranteed debt.** It is on
-the roadmap (P0) to be folded back in as a `RuntimeCommand`.
+Cautionary tale (resolved as designed — reconciled 2026-06-19): `nerve agent run` was *originally* a
+synchronous CLI path that bypassed `RuntimeCommand` / job / event — a third, off-protocol "face" that
+broke the protocol-authority invariant (§3.3). P0 folded the agent into the protocol: `agent.run` is
+now first-class vocabulary (`RuntimeCommand::AgentRun`), the daemon executes it as a cancellable job
+emitting structured agent events, and **both** the daemon and the CLI converge on the single host
+executor `agent::run_agent` — so all tool execution in both faces flows through `Runtime` via
+`RuntimeToolBox` (§3.2 holds). The CLI is therefore a **sanctioned local, synchronous, interactive
+client** of that shared executor, not an off-protocol face. It deliberately does *not* round-trip a
+`RuntimeCommand`: the protocol type is a **lossy projection** of `AgentRunConfig` — it must never
+carry `api_key` (§3.4 transport-neutral; §3.7 broker topology) and does not carry the CLI-only
+`distill_memory` / `verify_completion` opt-ins — so building the config directly from CLI flags is
+correct, not debt. The lesson stands — **a capability without a seam is guaranteed debt** — but this
+capability now has its seam (`RuntimeCommand::AgentRun` + the shared `run_agent` executor). The
+remaining convergence — turning the interactive CLI into a true *transport* client with protocol
+approval round-trips (`session.respond`) — is Session-layer / P6 work, not in-process command routing.
 
 ## 3. Invariants (do not break)
 
@@ -113,22 +124,23 @@ marries them via the `ToolBox` port (`RuntimeToolBox` in `agent.rs`).
 
 ## 5. Seam scorecard
 
-Most plugin seams **already exist as Rust ports** — the work is to promote them to first-class,
-registry/config-driven extension points and to add the missing layers (marked ✗).
+Most plugin seams now **exist *and* are wired** (✅ below); the residual work is promoting a few to
+first-class registry/config APIs and building the orthogonal containment half of P4. (Reconciled to
+code 2026-06-19 — the layers the original draft marked ✗ have since landed.)
 
-| Seam (port) | Defined in | Today | Gap to "plugin-grade" |
+| Seam (port) | Defined in | Today | Remaining work |
 |---|---|---|---|
 | `CatalogProvider` | `nerve-core/port.rs` | Fs / Memory | compile-time; fine (could add Git / remote overlay) |
-| `RuntimeToolAdapter` | `nerve-runtime` | xAI only | **add registry + an MCP-client adapter** (highest leverage) |
-| `LlmProvider` | `nerve-agent/provider` | 3 hard-coded | add registry + **config-driven** (OpenAI-compatible = config only) |
+| `RuntimeToolAdapter` | `nerve-runtime` | ✅ xAI (first-party) **+ `McpClientToolAdapter`** (`mcp/adapter.rs`, consumes stdio MCP servers); attached via `mcp::attach` in **both** CLI and daemon; `Runtime` dedups specs | config via `--mcp-config`; only a public registry API is left |
+| `LlmProvider` | `nerve-agent/provider` | ✅ 3 built-in **+ config-driven** (`ProviderRegistry` + `--provider-config`; `ProviderWire` for the OpenAI-compatible long tail, no code) | promote to a named registry; otherwise done |
 | `ToolBox` | `nerve-agent/provider` | `RuntimeToolBox` | fine (agent↔tools seam is wired) |
 | `AuthStrategy` | `nerve-agent/auth` | 3 providers, staged (`start`/`complete`/`refresh`), driven over `auth.*` protocol | client owns callback capture (§3.7); could be config-driven |
-| Session / Conversation | — | ✗ none | **missing protocol layer** (super-app prerequisite) |
-| Skill / AgentDef | — | `AgentDef` exists, no loader | ✗ **capabilities-as-data** (no recompile) |
-| Policy / Permission | — | ✗ none | ✗ **prerequisite for safe plugins** |
-| Hooks | — | orchestrator has lifecycle shape | ✗ interception points |
-| Persistence | — | jobs are in-memory | ✗ conversations / credentials / plugin config |
-| Agent memory (`MemoryStore`) | `nerve-workstation` | working-memory checkpoint shipped (`Hook::on_request`); long-term file-first proposed | promote file→SQLite on measured triggers; episodic = P5; recall reuses `semantic` (not a 2nd vector stack) |
+| Session / Conversation | `nerve-runtime` + `session_manager/` | ✅ `RuntimeCommand::Session*` + `SessionManager` (multi-turn, interrupt, resume, set-model) + `ProtocolApprover` approval round-trip; run as daemon jobs | GUI multi-turn surface (S3); CLI-as-session-client (§2) |
+| Skill / AgentDef | `capabilities.rs` | ✅ `Capabilities::discover` loads agent defs **+ skills** (project > global > built-in; `BUILTIN_AGENTS` / `BUILTIN_SKILLS`) | workflow defs; a versioned on-disk schema |
+| Policy / Permission | `policy.rs` | ✅ `PolicyToolBox` outermost gate (invariant 9); `policy.json` global-authoritative + project tighten-only; CLI-interactive / daemon-deny / session-protocol approvers | the orthogonal `SandboxLauncher` containment half (exec) |
+| Hooks | `hooks.rs` + `nerve-agent::Hook` | ✅ wired via `Orchestrator::with_hooks` — `on_start` (environment + memory recall) and request-time checkpoint capture | further points (response/end) are additive when needed |
+| Persistence | `session.rs` | ✅ `SessionStore` versioned transcripts (`schema_version` + `migrate_to_current` scaffold) under `.nerve/sessions`; resume via the session layer; credentials persisted by `nerve-agent::auth` | live daemon **jobs** stay in-memory by design; SQLite only on a measured trigger |
+| Agent memory (`MemoryStore`) | `nerve-workstation` (`memory.rs`) | ✅ working-memory checkpoint (`Hook::on_request`) **and** long-term file-first (`FileMemoryStore` over `.nerve/memory.md`, `remember` tool, `on_start` recall, opt-in distillation) | promote file→SQLite on measured triggers; episodic history; recall reuses `semantic` (not a 2nd vector stack) |
 
 ## 6. Plugin architecture — layered by audience
 
@@ -152,6 +164,9 @@ Do not build one plugin system; layer by what is being extended, each with the r
 > Key insight: the only genuinely *new* mechanisms needed are (1) MCP-client, (2) skill/agent-def
 > loader, (3) the session layer, (4) the permission engine, (5) persistence. Everything else is
 > promoting existing ports to registries/config.
+>
+> **Update (2026-06-19): (1)–(5) have since shipped** (see §5 / §8). What remains is promoting a few
+> ports to first-class registry/config APIs and the orthogonal exec-sandbox containment half of P4.
 
 ## 7. Stable contracts to lock (so future work is additive, not breaking)
 
@@ -166,22 +181,34 @@ Do not build one plugin system; layer by what is being extended, each with the r
 8. **Extract a thin `nerve-protocol` crate** when third-party Rust plugins/clients appear, so they
    depend on protocol types only, not all of `nerve-runtime`.
 
-## 8. Roadmap (each step locally + globally optimal)
+## 8. Roadmap (status — reconciled to code 2026-06-19)
 
-- **P0 — Session layer (folds in the off-protocol agent).** Add a session/agent command family to
-  `nerve-runtime` (as data) + structured agent events; run the orchestrator as a daemon job. Restores
-  invariant §3, unlocks GUI/TUI driving the agent. **Prerequisite for everything.**
-- **P1 — MCP client.** Tools-as-plugins via an `McpClientToolAdapter` (reuses `RuntimeToolAdapter`).
-  Highest ROI, near-zero new architecture.
-- **P2 — Provider registry + config-driven providers.**
-- **P3 — Skills + Agent/Workflow definitions** (capabilities-as-data, with a loader).
-- **P4 — Permission / policy engine** (prerequisite for safely enabling third-party plugins).
-- **P5 — Persistence + migrations** (session resume, multi-session, plugin config).
-- **P6 — Hooks + GUI (Tauri) / TUI / mobile** (daemon WS transport reuses the transport-neutral router).
-- **Auth broker (pairs with P6 mobile/remote).** Share tokens to remote/mobile clients — log in once
-  on a trusted node; the refresh token never leaves the broker (`AuthManager` is already the holder).
-  This, **not** a daemon loopback, is the mobile zero-paste answer (§3.7); device-code flow is the
-  secondary fallback.
+- **P0 — Session layer (folds in the off-protocol agent). ✅ Done.** `RuntimeCommand::AgentRun` + the
+  `Session*` command family are protocol vocabulary; the daemon runs the orchestrator as a cancellable
+  job emitting structured agent events; `SessionManager` adds multi-turn, interrupt, resume, and
+  in-place set-model with a `ProtocolApprover` approval round-trip. `nerve agent run` shares the one
+  host executor `agent::run_agent` (see §2). Invariant §3 restored; GUI/TUI can drive the agent.
+- **P1 — MCP client. ✅ Done.** `McpClientToolAdapter: RuntimeToolAdapter` consumes external stdio MCP
+  servers (`--mcp-config`); attached via `mcp::attach` in both faces. Near-zero new architecture.
+- **P2 — Provider registry + config-driven providers. ✅ Done (a named registry API is the only
+  polish left).** `ProviderRegistry` resolves built-ins + `--provider-config` entries; `ProviderWire`
+  covers the OpenAI-compatible long tail with no code.
+- **P3 — Skills + Agent/Workflow definitions. ✅ Agent defs + skills done; workflow defs pending.**
+  `Capabilities::discover` loads agent defs and skills (project > global > built-in precedence).
+- **P4 — Permission / policy engine. ✅ Done (authorization); containment pending.** `PolicyToolBox`
+  is the outermost gate (invariant 9). The orthogonal `SandboxLauncher` half — *what* a spawned
+  process may touch — is not yet built (see `docs/designs/agent-exec-sandbox.md`).
+- **P5 — Persistence + migrations. ✅ Done for transcripts/sessions.** Versioned `SessionRecord`
+  (`schema_version` + a `migrate_to_current` scaffold) under `.nerve/sessions`; resume + a
+  multi-session live registry; credentials persisted by `nerve-agent::auth`. Live daemon jobs stay
+  in-memory by design.
+- **P6 — Hooks + GUI (Tauri) / TUI / mobile. ◑ Partial.** Hooks wired (`Orchestrator::with_hooks`);
+  the `packages/tui` client plus daemon stdio and HTTP/SSE transports are live; a minimal
+  `daemon/gui.html` exists. Native Tauri GUI and mobile remain.
+- **Auth broker (pairs with P6 mobile/remote). ✗ Not started.** Share tokens to remote/mobile clients
+  — log in once on a trusted node; the refresh token never leaves the broker (`AuthManager` is already
+  the holder). This, **not** a daemon loopback, is the mobile zero-paste answer (§3.7); device-code
+  flow is the secondary fallback.
 
 ## 9. Risks & anti-goals
 
@@ -198,8 +225,16 @@ Do not build one plugin system; layer by what is being extended, each with the r
 
 - **Enforced by CI today:** protocol drift (`protocol:check` + `generated_protocol_rust_artifacts_are_current`),
   determinism (golden snapshots), file/function size, `clippy -D warnings`, fmt.
-- **To add:** a test/lint that fails if a host executes work outside `Runtime` (closes the
-  "convention-only" gap that let `agent run` slip the protocol).
+- **To add — command-executor exhaustiveness (the writable form of the old "nothing outside
+  `Runtime`" idea).** A literal "every command flows through `Runtime::handle_command`" test is
+  *unwritable*: `agent.run` / `session.*` / `auth.*` are domain-bearing and are **refused** by the
+  core hub by design (it may depend only on `nerve-core`, never `nerve-agent`), so the host intercepts
+  them upstream. The guard that actually closes the gap is a totality test — for every name in
+  `RUNTIME_COMMAND_NAMES`, exactly one executor claims it: the core hub (`ping` / `tool.list` /
+  `tool.call`) or a host interceptor (`is_agent_run` / `is_session_command` / `is_auth_command`) — so a
+  newly-added variant cannot silently fall through `run_job`'s `else` into a hub that refuses it.
+  (Tool execution is already structurally funneled through `Runtime`: the orchestrator sees only
+  `&dyn ToolBox`, and the composition root only ever builds `RuntimeToolBox` over `NerveRuntime`.)
 - **Per seam:** a registry + contract tests (adapter name dedup, spec shape, provider config
   validation).
 - **Record contract evolution** alongside `docs/parity/` (the differential ledger style).

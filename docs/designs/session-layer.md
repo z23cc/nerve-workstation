@@ -62,6 +62,13 @@ session commands (like `agent.run`); the **workstation intercepts** them. Add to
 - Optional CLI: `nerve agent chat` (local interactive multi-turn) — nice-to-have.
 - GUI: upgrade `daemon/gui.html` to a multi-turn chat with approval prompts (S3).
 
+> Interactive-CLI convergence (the right end-state for `nerve agent run` / `nerve agent chat`): make
+> the CLI a **true transport client** of `session.*` — render the event stream, approve gated tools
+> via the `session.respond` round-trip — **not** an in-process `RuntimeCommand` round-trip. Today the
+> CLI is a *sanctioned local* client of the shared `agent::run_agent` executor (north-star §2); the
+> protocol-client form is exactly this Session layer, so the convergence lands here, not as bespoke
+> CLI→hub command routing.
+
 ## Phasing
 
 - **S1** — protocol vocabulary (data) + codegen.
