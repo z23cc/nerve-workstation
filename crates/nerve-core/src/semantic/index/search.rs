@@ -114,12 +114,7 @@ pub(super) fn search_fallback(
             "dense semantic index warming; semantic-only mode has no fallback results".to_string()
         },
     });
-    if let Some(error) = index
-        .last_build_error
-        .lock()
-        .expect("semantic build error lock")
-        .clone()
-    {
+    if let Some(error) = crate::sync::lock_recover(&index.last_build_error).clone() {
         diagnostics.push(Diagnostic {
             path: None,
             message: format!("dense semantic index build failed: {error}"),

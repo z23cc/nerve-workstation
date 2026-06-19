@@ -18,7 +18,7 @@ impl FastembedEmbeddingBackend {
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, NerveError> {
-        let mut guard = self.inner.lock().expect("fastembed embedding lock");
+        let mut guard = crate::sync::lock_recover(&self.inner);
         if guard.is_none() {
             let options = TextInitOptions::new(self.model.clone())
                 .with_cache_dir(self.cache_dir.clone())
@@ -70,7 +70,7 @@ impl FastembedRerankerBackend {
 
 impl RerankerBackend for FastembedRerankerBackend {
     fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<f32>, NerveError> {
-        let mut guard = self.inner.lock().expect("fastembed reranker lock");
+        let mut guard = crate::sync::lock_recover(&self.inner);
         if guard.is_none() {
             let options = RerankInitOptions::new(self.model.clone())
                 .with_cache_dir(self.cache_dir.clone())

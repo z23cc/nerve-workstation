@@ -22,6 +22,7 @@ mod server;
 mod session;
 mod session_manager;
 mod subagent;
+mod sync;
 mod tools;
 mod workspace;
 mod xai;

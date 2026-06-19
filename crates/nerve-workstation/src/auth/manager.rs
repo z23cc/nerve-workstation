@@ -79,7 +79,7 @@ impl AuthManager {
         }
         let login_id = format!("login-{}", auth::oauth::random_urlsafe(18));
         let created_at_ms = now_ms();
-        self.pending.lock().expect("auth pending lock").insert(
+        crate::sync::lock_recover(&self.pending).insert(
             login_id.clone(),
             PendingLogin {
                 start: start.clone(),
@@ -106,10 +106,7 @@ impl AuthManager {
         let input = callback_url.or(code).ok_or_else(|| {
             RuntimeError::adapter("auth.complete requires `code` or `callback_url`")
         })?;
-        let pending = self
-            .pending
-            .lock()
-            .expect("auth pending lock")
+        let pending = crate::sync::lock_recover(&self.pending)
             .get(login_id)
             .cloned()
             .ok_or_else(|| RuntimeError::adapter(format!("unknown auth login_id: {login_id}")))?;
@@ -129,10 +126,7 @@ impl AuthManager {
             self.emit_auth(provider, AuthEventKind::LoginFailed);
             return Err(agent_runtime_error(error));
         }
-        self.pending
-            .lock()
-            .expect("auth pending lock")
-            .remove(login_id);
+        crate::sync::lock_recover(&self.pending).remove(login_id);
         self.emit_auth(provider, AuthEventKind::LoginCompleted);
         Ok(json!({
             "login_id": login_id,
@@ -155,9 +149,7 @@ impl AuthManager {
     fn logout(&self, provider: &str) -> Result<Value, RuntimeError> {
         let provider = parse_provider(provider)?;
         auth::delete_credential(provider).map_err(agent_runtime_error)?;
-        self.pending
-            .lock()
-            .expect("auth pending lock")
+        crate::sync::lock_recover(&self.pending)
             .retain(|_, pending| pending.start.provider != provider);
         Ok(json!({
             "provider": provider.as_str(),
@@ -166,9 +158,7 @@ impl AuthManager {
     }
 
     fn sweep_pending(&self, now_ms: u64) {
-        self.pending
-            .lock()
-            .expect("auth pending lock")
+        crate::sync::lock_recover(&self.pending)
             .retain(|_, pending| pending_is_fresh(pending.created_at_ms, now_ms));
     }
 
@@ -176,14 +166,11 @@ impl AuthManager {
         let pending = Arc::clone(&self.pending);
         thread::spawn(move || {
             thread::sleep(PENDING_LOGIN_TTL + Duration::from_secs(1));
-            pending
-                .lock()
-                .expect("auth pending lock")
-                .retain(|id, pending| {
-                    id != &login_id
-                        || pending.created_at_ms != created_at_ms
-                        || pending_is_fresh(pending.created_at_ms, now_ms())
-                });
+            crate::sync::lock_recover(&pending).retain(|id, pending| {
+                id != &login_id
+                    || pending.created_at_ms != created_at_ms
+                    || pending_is_fresh(pending.created_at_ms, now_ms())
+            });
         });
     }
 

@@ -140,7 +140,7 @@ impl JobManager {
         let token = CancelToken::new();
         let record = JobRecord::new(job_id.clone(), created_seq, &command, token.clone());
         let snapshot = {
-            let mut store = self.jobs.lock().expect("job store lock");
+            let mut store = crate::sync::lock_recover(&self.jobs);
             if store.records.contains_key(&job_id) {
                 return Err(JobError::DuplicateJobId(job_id));
             }
@@ -159,7 +159,7 @@ impl JobManager {
         &self,
         request: RuntimeJobGetRequest,
     ) -> Result<RuntimeJobSnapshot, JobError> {
-        let store = self.jobs.lock().expect("job store lock");
+        let store = crate::sync::lock_recover(&self.jobs);
         let record = store
             .records
             .get(&request.job_id)
@@ -169,7 +169,7 @@ impl JobManager {
 
     pub(crate) fn list(&self, request: RuntimeJobListRequest) -> Vec<RuntimeJobSnapshot> {
         let limit = request.limit.min(MAX_LIST_LIMIT);
-        let store = self.jobs.lock().expect("job store lock");
+        let store = crate::sync::lock_recover(&self.jobs);
         let mut records: Vec<_> = store
             .records
             .values()
@@ -186,7 +186,7 @@ impl JobManager {
     pub(crate) fn cancel(&self, job_id: &str) -> Result<(bool, RuntimeJobSnapshot), JobError> {
         let mut should_emit = false;
         let (requested, snapshot) = {
-            let mut store = self.jobs.lock().expect("job store lock");
+            let mut store = crate::sync::lock_recover(&self.jobs);
             let record = store
                 .records
                 .get_mut(job_id)
@@ -236,7 +236,7 @@ impl JobManager {
             self.runtime.handle_command_cancellable(command, &token)
         };
         let event = {
-            let mut store = self.jobs.lock().expect("job store lock");
+            let mut store = crate::sync::lock_recover(&self.jobs);
             let Some(record) = store.records.get_mut(&job_id) else {
                 return;
             };

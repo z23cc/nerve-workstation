@@ -64,12 +64,9 @@ impl SemanticIndex {
 
     pub fn invalidate(&self) {
         self.generation.fetch_add(1, AtomicOrdering::SeqCst);
-        *self.built.write().expect("semantic index lock") = None;
-        *self.building.lock().expect("semantic building lock") = None;
-        *self
-            .last_build_error
-            .lock()
-            .expect("semantic build error lock") = None;
+        *crate::sync::write_recover(&self.built) = None;
+        *crate::sync::lock_recover(&self.building) = None;
+        *crate::sync::lock_recover(&self.last_build_error) = None;
     }
 
     pub fn warm<P: CatalogProvider + Sync>(
@@ -134,7 +131,7 @@ impl SemanticIndex {
         cancel.check_cancelled()?;
         if self.config.persistence.is_some() {
             let state = SnapshotFileState::from_snapshot(&provider, &snapshot, &self.config.scope)?;
-            if let Some(cached) = self.built.read().expect("semantic index lock").as_ref()
+            if let Some(cached) = crate::sync::read_recover(&self.built).as_ref()
                 && cached.manifest_fingerprint == state.fingerprint
             {
                 return self.search_built(
@@ -155,7 +152,7 @@ impl SemanticIndex {
         }
 
         let chunk_build = self.build_scoped_chunks(&provider, &snapshot, cancel)?;
-        if let Some(cached) = self.built.read().expect("semantic index lock").as_ref()
+        if let Some(cached) = crate::sync::read_recover(&self.built).as_ref()
             && cached.manifest_fingerprint == chunk_build.manifest.fingerprint
         {
             return self.search_built(
@@ -182,13 +179,7 @@ impl SemanticIndex {
         cancel: &CancelToken,
     ) -> Result<Option<SemanticSearchResponse>, NerveError> {
         cancel.check_cancelled()?;
-        let Some(cached) = self
-            .built
-            .read()
-            .expect("semantic index lock")
-            .as_ref()
-            .cloned()
-        else {
+        let Some(cached) = crate::sync::read_recover(&self.built).as_ref().cloned() else {
             return Ok(None);
         };
         let is_current = if self.config.persistence.is_some() {
@@ -244,7 +235,7 @@ impl SemanticIndex {
         let fingerprint = input.fingerprint().to_string();
         let generation = self.generation.load(AtomicOrdering::SeqCst);
         {
-            let mut building = self.building.lock().expect("semantic building lock");
+            let mut building = crate::sync::lock_recover(&self.building);
             if building.as_ref().is_some_and(|current| {
                 current.fingerprint == fingerprint && current.generation == generation
             }) {
@@ -271,7 +262,7 @@ impl SemanticIndex {
                     index.build_from_chunks(chunk_build, &cancel)
                 }
             };
-            let mut building = index.building.lock().expect("semantic building lock");
+            let mut building = crate::sync::lock_recover(&index.building);
             let still_current = index.generation.load(AtomicOrdering::SeqCst) == generation
                 && building.as_ref().is_some_and(|current| {
                     current.fingerprint == fingerprint && current.generation == generation
@@ -279,17 +270,11 @@ impl SemanticIndex {
             if still_current {
                 match result {
                     Ok(built) => {
-                        *index.built.write().expect("semantic index lock") = Some(Arc::new(built));
-                        *index
-                            .last_build_error
-                            .lock()
-                            .expect("semantic build error lock") = None;
+                        *crate::sync::write_recover(&index.built) = Some(Arc::new(built));
+                        *crate::sync::lock_recover(&index.last_build_error) = None;
                     }
                     Err(err) => {
-                        *index
-                            .last_build_error
-                            .lock()
-                            .expect("semantic build error lock") = Some(err.to_string());
+                        *crate::sync::lock_recover(&index.last_build_error) = Some(err.to_string());
                     }
                 }
                 *building = None;
@@ -327,38 +312,38 @@ impl SemanticIndex {
     ) -> Result<Arc<BuiltSemanticIndex>, NerveError> {
         if self.config.persistence.is_some() {
             let state = SnapshotFileState::from_snapshot(provider, snapshot, &self.config.scope)?;
-            if let Some(cached) = self.built.read().expect("semantic index lock").as_ref()
+            if let Some(cached) = crate::sync::read_recover(&self.built).as_ref()
                 && cached.manifest_fingerprint == state.fingerprint
             {
                 return Ok(Arc::clone(cached));
             }
-            let _guard = self.build_lock.lock().expect("semantic build lock");
-            if let Some(cached) = self.built.read().expect("semantic index lock").as_ref()
+            let _guard = crate::sync::lock_recover(&self.build_lock);
+            if let Some(cached) = crate::sync::read_recover(&self.built).as_ref()
                 && cached.manifest_fingerprint == state.fingerprint
             {
                 return Ok(Arc::clone(cached));
             }
             let built =
                 Arc::new(self.build_with_persistence(provider, snapshot, &state, cancel, None)?);
-            *self.built.write().expect("semantic index lock") = Some(Arc::clone(&built));
+            *crate::sync::write_recover(&self.built) = Some(Arc::clone(&built));
             return Ok(built);
         }
 
         let chunk_build = self.build_scoped_chunks(provider, snapshot, cancel)?;
-        if let Some(cached) = self.built.read().expect("semantic index lock").as_ref()
+        if let Some(cached) = crate::sync::read_recover(&self.built).as_ref()
             && cached.manifest_fingerprint == chunk_build.manifest.fingerprint
         {
             return Ok(Arc::clone(cached));
         }
 
-        let _guard = self.build_lock.lock().expect("semantic build lock");
-        if let Some(cached) = self.built.read().expect("semantic index lock").as_ref()
+        let _guard = crate::sync::lock_recover(&self.build_lock);
+        if let Some(cached) = crate::sync::read_recover(&self.built).as_ref()
             && cached.manifest_fingerprint == chunk_build.manifest.fingerprint
         {
             return Ok(Arc::clone(cached));
         }
         let built = Arc::new(self.build_from_chunks(chunk_build, cancel)?);
-        *self.built.write().expect("semantic index lock") = Some(Arc::clone(&built));
+        *crate::sync::write_recover(&self.built) = Some(Arc::clone(&built));
         Ok(built)
     }
 

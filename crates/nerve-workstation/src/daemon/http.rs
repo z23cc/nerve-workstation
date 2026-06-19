@@ -202,27 +202,19 @@ impl SseHub {
     fn subscribe(&self) -> (u64, Receiver<Arc<str>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        self.subscribers
-            .lock()
-            .expect("sse hub lock")
-            .push(Subscriber { id, sender });
+        crate::sync::lock_recover(&self.subscribers).push(Subscriber { id, sender });
         (id, receiver)
     }
 
     fn unsubscribe(&self, id: u64) {
-        self.subscribers
-            .lock()
-            .expect("sse hub lock")
-            .retain(|subscriber| subscriber.id != id);
+        crate::sync::lock_recover(&self.subscribers).retain(|subscriber| subscriber.id != id);
     }
 
     /// Fan a runtime notification out to all live subscribers, dropping any
     /// whose receiver has hung up.
     fn broadcast(&self, value: Value) {
         let frame: Arc<str> = Arc::from(value.to_string());
-        self.subscribers
-            .lock()
-            .expect("sse hub lock")
+        crate::sync::lock_recover(&self.subscribers)
             .retain(|subscriber| subscriber.sender.send(Arc::clone(&frame)).is_ok());
     }
 

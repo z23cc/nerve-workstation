@@ -14,18 +14,10 @@ pub(super) fn refresh_snapshot_from_map(
         })
         .collect();
     entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    let generation = provider
-        .state
-        .snapshot
-        .read()
-        .expect("memory snapshot lock")
+    let generation = crate::sync::read_recover(&provider.state.snapshot)
         .generation
         .saturating_add(1);
-    *provider
-        .state
-        .snapshot
-        .write()
-        .expect("memory snapshot lock") = Arc::new(CatalogSnapshot {
+    *crate::sync::write_recover(&provider.state.snapshot) = Arc::new(CatalogSnapshot {
         generation,
         roots: vec![RootRef {
             id: provider.root_id.clone(),

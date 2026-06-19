@@ -137,11 +137,7 @@ impl MemoryCatalogProvider {
 
         entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
         let snapshot = CatalogSnapshot {
-            generation: self
-                .state
-                .snapshot
-                .read()
-                .expect("memory snapshot lock")
+            generation: crate::sync::read_recover(&self.state.snapshot)
                 .generation
                 .saturating_add(1),
             roots: vec![RootRef {
@@ -152,29 +148,19 @@ impl MemoryCatalogProvider {
             diagnostics: Vec::new(),
         };
 
-        *self.state.files.write().expect("memory files lock") = map;
-        *self.state.codemap.write().expect("memory codemap lock") = HashMap::new();
+        *crate::sync::write_recover(&self.state.files) = map;
+        *crate::sync::write_recover(&self.state.codemap) = HashMap::new();
         #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        if let Some(index) = self
-            .state
-            .semantic_index
-            .read()
-            .expect("memory semantic index lock")
-            .as_ref()
-        {
+        if let Some(index) = crate::sync::read_recover(&self.state.semantic_index).as_ref() {
             index.invalidate();
         }
-        *self.state.snapshot.write().expect("memory snapshot lock") = Arc::new(snapshot);
+        *crate::sync::write_recover(&self.state.snapshot) = Arc::new(snapshot);
         Ok(())
     }
 
     #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
     pub fn set_semantic_index(&self, index: Option<Arc<SemanticIndex>>) {
-        *self
-            .state
-            .semantic_index
-            .write()
-            .expect("memory semantic index lock") = index;
+        *crate::sync::write_recover(&self.state.semantic_index) = index;
     }
 
     #[must_use]
@@ -185,13 +171,11 @@ impl MemoryCatalogProvider {
 
 impl CatalogProvider for MemoryCatalogProvider {
     fn snapshot(&self) -> Result<CatalogSnapshot, NerveError> {
-        Ok((**self.state.snapshot.read().expect("memory snapshot lock")).clone())
+        Ok((**crate::sync::read_recover(&self.state.snapshot)).clone())
     }
 
     fn snapshot_arc(&self) -> Result<Arc<CatalogSnapshot>, NerveError> {
-        Ok(Arc::clone(
-            &self.state.snapshot.read().expect("memory snapshot lock"),
-        ))
+        Ok(Arc::clone(&crate::sync::read_recover(&self.state.snapshot)))
     }
 
     fn snapshot_arc_cancellable(
@@ -205,41 +189,24 @@ impl CatalogProvider for MemoryCatalogProvider {
     }
 
     fn invalidate(&self) {
-        self.state
-            .codemap
-            .write()
-            .expect("memory codemap lock")
-            .clear();
+        crate::sync::write_recover(&self.state.codemap).clear();
         #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        if let Some(index) = self
-            .state
-            .semantic_index
-            .read()
-            .expect("memory semantic index lock")
-            .as_ref()
-        {
+        if let Some(index) = crate::sync::read_recover(&self.state.semantic_index).as_ref() {
             index.invalidate();
         }
     }
 
     fn selection(&self) -> Selection {
-        self.state
-            .selection
-            .read()
-            .expect("memory selection lock")
-            .clone()
+        crate::sync::read_recover(&self.state.selection).clone()
     }
 
     fn set_selection(&self, selection: Selection) {
-        *self.state.selection.write().expect("memory selection lock") = selection;
+        *crate::sync::write_recover(&self.state.selection) = selection;
     }
 
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, NerveError> {
         let normalized = normalize_host_path(path)?;
-        self.state
-            .files
-            .read()
-            .expect("memory files lock")
+        crate::sync::read_recover(&self.state.files)
             .get(&normalized)
             .map(|bytes| bytes.as_ref().clone())
             .ok_or_else(|| NerveError::OutsideRoots(path.to_path_buf()))
@@ -285,7 +252,7 @@ impl CatalogProvider for MemoryCatalogProvider {
         changes: &[crate::edit::FileChange],
         _atomic: bool,
     ) -> Result<(), NerveError> {
-        let mut guard = self.state.files.write().expect("memory files lock");
+        let mut guard = crate::sync::write_recover(&self.state.files);
         let mut next = guard.clone();
         for change in changes {
             memory_batch::apply_change(&mut next, change)?;
@@ -303,13 +270,7 @@ impl CatalogProvider for MemoryCatalogProvider {
         rel_path: &str,
     ) -> Result<CodeSymbolsResult, NerveError> {
         let normalized = normalize_host_path(path)?;
-        if let Some(cached) = self
-            .state
-            .codemap
-            .read()
-            .expect("memory codemap lock")
-            .get(&normalized)
-        {
+        if let Some(cached) = crate::sync::read_recover(&self.state.codemap).get(&normalized) {
             return Ok((**cached).clone());
         }
 
@@ -317,21 +278,14 @@ impl CatalogProvider for MemoryCatalogProvider {
         let source = String::from_utf8_lossy(&bytes);
         let parsed: CodeSymbolsResult =
             symbols_for_path(&source, rel_path).map(|maybe| maybe.map(Arc::new));
-        self.state
-            .codemap
-            .write()
-            .expect("memory codemap lock")
+        crate::sync::write_recover(&self.state.codemap)
             .insert(normalized, Arc::new(parsed.clone()));
         Ok(parsed)
     }
 
     #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
     fn semantic_index(&self) -> Option<Arc<SemanticIndex>> {
-        self.state
-            .semantic_index
-            .read()
-            .expect("memory semantic index lock")
-            .clone()
+        crate::sync::read_recover(&self.state.semantic_index).clone()
     }
 
     fn display_path(&self, path: &Path) -> String {

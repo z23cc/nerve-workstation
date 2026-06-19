@@ -186,7 +186,7 @@ impl FsCatalogProvider {
             return Ok(snapshot);
         }
 
-        let mut guard = self.cache.snapshot.write().expect("snapshot cache lock");
+        let mut guard = crate::sync::write_recover(&self.cache.snapshot);
         if let Some(cached) = guard.as_ref()
             && cache_entry_fresh(now, cached.created_at, self.options.snapshot_cache_ttl)
         {
@@ -205,20 +205,10 @@ impl FsCatalogProvider {
     }
 
     pub fn invalidate(&self) {
-        *self.cache.snapshot.write().expect("snapshot cache lock") = None;
+        *crate::sync::write_recover(&self.cache.snapshot) = None;
         self.cache.generation.fetch_add(1, AtomicOrdering::SeqCst);
-        self.cache
-            .codemap
-            .write()
-            .expect("codemap cache lock")
-            .clear();
-        if let Some(warming) = self
-            .cache
-            .codemap_warming
-            .lock()
-            .expect("codemap warming lock")
-            .take()
-        {
+        crate::sync::write_recover(&self.cache.codemap).clear();
+        if let Some(warming) = crate::sync::lock_recover(&self.cache.codemap_warming).take() {
             warming.cancel.cancel();
         }
         #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
@@ -233,7 +223,7 @@ impl FsCatalogProvider {
     }
 
     fn cached_snapshot(&self, now: Instant) -> Option<Arc<CatalogSnapshot>> {
-        let guard = self.cache.snapshot.read().expect("snapshot cache lock");
+        let guard = crate::sync::read_recover(&self.cache.snapshot);
         guard.as_ref().and_then(|cached| {
             cache_entry_fresh(now, cached.created_at, self.options.snapshot_cache_ttl)
                 .then(|| Arc::clone(&cached.snapshot))
@@ -282,11 +272,7 @@ impl FsCatalogProvider {
         }
         let cancel = CancelToken::never();
         {
-            let mut warming = self
-                .cache
-                .codemap_warming
-                .lock()
-                .expect("codemap warming lock");
+            let mut warming = crate::sync::lock_recover(&self.cache.codemap_warming);
             // Snapshot cache TTL/invalidation can rebuild snapshots frequently. One
             // best-effort warmer per provider generation is enough because cache
             // entries are signature-checked, and stale generations are forbidden
@@ -312,7 +298,7 @@ impl FsCatalogProvider {
         std::thread::spawn(move || {
             Self::warm_codemap_for_snapshot(&cache, &policy, &snapshot, generation, &cancel);
             if let Some(cache) = cache.upgrade() {
-                let mut warming = cache.codemap_warming.lock().expect("codemap warming lock");
+                let mut warming = crate::sync::lock_recover(&cache.codemap_warming);
                 if warming
                     .as_ref()
                     .is_some_and(|current| current.generation == generation)
@@ -357,10 +343,7 @@ impl FsCatalogProvider {
         expected_generation: Option<u64>,
     ) -> Result<CodeSymbolsResult, NerveError> {
         let signature = Self::file_signature(allowed)?;
-        if let Some(cached) = cache
-            .codemap
-            .read()
-            .expect("codemap cache lock")
+        if let Some(cached) = crate::sync::read_recover(&cache.codemap)
             .get(allowed)
             .filter(|cached| cached.signature == signature)
         {
@@ -377,7 +360,7 @@ impl FsCatalogProvider {
             })
         };
         if generation_current(expected_generation) {
-            let mut codemap = cache.codemap.write().expect("codemap cache lock");
+            let mut codemap = crate::sync::write_recover(&cache.codemap);
             if generation_current(expected_generation) {
                 codemap.insert(
                     allowed.to_path_buf(),
@@ -431,11 +414,11 @@ impl CatalogProvider for FsCatalogProvider {
     }
 
     fn selection(&self) -> Selection {
-        self.cache.selection.read().expect("selection lock").clone()
+        crate::sync::read_recover(&self.cache.selection).clone()
     }
 
     fn set_selection(&self, selection: Selection) {
-        *self.cache.selection.write().expect("selection lock") = selection;
+        *crate::sync::write_recover(&self.cache.selection) = selection;
     }
 
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, NerveError> {

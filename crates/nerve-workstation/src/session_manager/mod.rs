@@ -167,10 +167,7 @@ impl SessionManager {
             status: SessionStatus::Idle,
             current_cancel: None,
         };
-        self.sessions
-            .lock()
-            .expect("session lock")
-            .insert(id.clone(), session);
+        crate::sync::lock_recover(&self.sessions).insert(id.clone(), session);
         self.emit(RuntimeEvent::session_started(id.clone()));
         Ok(json!({ "session_id": id }))
     }
@@ -206,7 +203,7 @@ impl SessionManager {
         text: &str,
         token: &CancelToken,
     ) -> Result<(SessionConfig, Vec<Message>, SessionCheckpoint), RuntimeError> {
-        let mut sessions = self.sessions.lock().expect("session lock");
+        let mut sessions = crate::sync::lock_recover(&self.sessions);
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;
@@ -299,7 +296,7 @@ impl SessionManager {
         result: Result<TurnResult, RuntimeError>,
         token: &CancelToken,
     ) -> Result<Value, RuntimeError> {
-        let mut sessions = self.sessions.lock().expect("session lock");
+        let mut sessions = crate::sync::lock_recover(&self.sessions);
         let Some(session) = sessions.get_mut(session_id) else {
             return Err(RuntimeError::adapter(format!(
                 "unknown session: {session_id}"
@@ -344,7 +341,7 @@ impl SessionManager {
     }
 
     fn interrupt(&self, session_id: &str) -> Result<Value, RuntimeError> {
-        let sessions = self.sessions.lock().expect("session lock");
+        let sessions = crate::sync::lock_recover(&self.sessions);
         let session = sessions
             .get(session_id)
             .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;
@@ -356,7 +353,7 @@ impl SessionManager {
     }
 
     fn get(&self, session_id: &str) -> Result<Value, RuntimeError> {
-        let sessions = self.sessions.lock().expect("session lock");
+        let sessions = crate::sync::lock_recover(&self.sessions);
         let session = sessions
             .get(session_id)
             .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;
@@ -364,10 +361,7 @@ impl SessionManager {
     }
 
     fn list(&self) -> Vec<Value> {
-        let mut sessions: Vec<_> = self
-            .sessions
-            .lock()
-            .expect("session lock")
+        let mut sessions: Vec<_> = crate::sync::lock_recover(&self.sessions)
             .values()
             .map(LiveSession::snapshot)
             .collect();
@@ -377,7 +371,7 @@ impl SessionManager {
 
     fn close(&self, session_id: &str) -> Result<Value, RuntimeError> {
         let removed = {
-            let mut sessions = self.sessions.lock().expect("session lock");
+            let mut sessions = crate::sync::lock_recover(&self.sessions);
             let Some(mut session) = sessions.remove(session_id) else {
                 return Err(RuntimeError::adapter(format!(
                     "unknown session: {session_id}"
@@ -401,7 +395,7 @@ impl SessionManager {
         provider: Option<String>,
         model: String,
     ) -> Result<Value, RuntimeError> {
-        let mut sessions = self.sessions.lock().expect("session lock");
+        let mut sessions = crate::sync::lock_recover(&self.sessions);
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| RuntimeError::adapter(format!("unknown session: {session_id}")))?;

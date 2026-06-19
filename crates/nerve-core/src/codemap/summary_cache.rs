@@ -64,7 +64,7 @@ pub(super) fn get_or_insert_with(
 }
 
 fn cached_result(key: &SummaryCacheKey, source: &str) -> Option<SummaryResult> {
-    let mut cache = cache().lock().expect("summary cache lock");
+    let mut cache = crate::sync::lock_recover(cache());
     let value = cache.entries.get(key).map(|entry| entry.value.clone())?;
     touch_key(&mut cache.order, key.clone());
     Some(value.to_result(source))
@@ -77,7 +77,7 @@ fn store_result(key: SummaryCacheKey, result: &SummaryResult) {
         return;
     }
 
-    let mut cache = cache().lock().expect("summary cache lock");
+    let mut cache = crate::sync::lock_recover(cache());
     if let Some(previous) = cache.entries.insert(
         key.clone(),
         SummaryCacheEntry {

@@ -45,10 +45,7 @@ impl ApprovalHub {
             session_id: session_id.to_string(),
             request_id: request_id.clone(),
         };
-        self.pending
-            .lock()
-            .expect("approval lock")
-            .insert(key, sender);
+        crate::sync::lock_recover(&self.pending).insert(key, sender);
         (self.emit)(RuntimeEvent::approval_requested(
             session_id.to_string(),
             request_id.clone(),
@@ -65,13 +62,10 @@ impl ApprovalHub {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break SessionApprovalDecision::Deny,
             }
         };
-        self.pending
-            .lock()
-            .expect("approval lock")
-            .remove(&ApprovalKey {
-                session_id: session_id.to_string(),
-                request_id,
-            });
+        crate::sync::lock_recover(&self.pending).remove(&ApprovalKey {
+            session_id: session_id.to_string(),
+            request_id,
+        });
         decision == SessionApprovalDecision::Allow
     }
 
@@ -85,9 +79,7 @@ impl ApprovalHub {
             session_id: session_id.to_string(),
             request_id: request_id.to_string(),
         };
-        self.pending
-            .lock()
-            .expect("approval lock")
+        crate::sync::lock_recover(&self.pending)
             .remove(&key)
             .is_some_and(|sender| sender.send(decision).is_ok())
     }
