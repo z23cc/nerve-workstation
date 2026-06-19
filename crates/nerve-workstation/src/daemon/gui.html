@@ -398,6 +398,28 @@
     return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
   }
 
+  // ---- daemon auth token ------------------------------------------------
+  // The daemon gates /rpc and /events with a per-run bearer token. On a
+  // loopback bind it injects the token below (zero-config local UI); on a
+  // remote bind it is supplied via the URL fragment (#token=...), which the
+  // browser never sends to the server.
+  const DAEMON_TOKEN = (function () {
+    const injected = "__NERVE_DAEMON_TOKEN__";
+    if (injected.indexOf("NERVE_DAEMON_TOKEN") === -1) return injected;
+    const m = /[#&]token=([^&]+)/.exec(window.location.hash || "");
+    return m ? decodeURIComponent(m[1]) : "";
+  })();
+  function authHeaders(base) {
+    const h = Object.assign({}, base);
+    if (DAEMON_TOKEN) h["Authorization"] = "Bearer " + DAEMON_TOKEN;
+    return h;
+  }
+  function eventsUrl() {
+    return DAEMON_TOKEN
+      ? "/events?token=" + encodeURIComponent(DAEMON_TOKEN)
+      : "/events";
+  }
+
   // ---- JSON-RPC over POST /rpc -----------------------------------------
   let rpcId = 0;
   async function rpc(method, params) {
@@ -405,7 +427,7 @@
     if (params !== undefined) payload.params = params;
     const res = await fetch("/rpc", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -970,7 +992,7 @@
 
   function connectEvents() {
     let es;
-    try { es = new EventSource("/events"); }
+    try { es = new EventSource(eventsUrl()); }
     catch (e) { setStatus("err", "events unavailable"); return; }
     es.onopen = () => setStatus("ok", "connected");
     es.onerror = () => setStatus("warn", "reconnecting…");
