@@ -1,0 +1,28 @@
+---
+source: crates/nerve-core/tests/golden_navigate_ast.rs
+expression: response
+---
+{
+  "content": [
+    {
+      "text": "callers (incoming):\n  main.rs:1 compute pub fn compute(x: i32) -> i32 {\n",
+      "type": "text"
+    }
+  ],
+  "structuredContent": {
+    "incoming": [
+      {
+        "display_path": "main.rs",
+        "kind": "function",
+        "language": "rust",
+        "line": 1,
+        "path": "main.rs",
+        "symbol": "compute",
+        "text": "pub fn compute(x: i32) -> i32 {"
+      }
+    ],
+    "note": "syntax-level name match across the catalog; not a scope/type resolver, so results may include unrelated same-name symbols and miss aliases or re-exports",
+    "outgoing": [],
+    "symbol": "helper"
+  }
+}

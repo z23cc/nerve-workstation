@@ -1,0 +1,59 @@
+---
+source: crates/nerve-core/tests/golden_navigate_ast.rs
+expression: "json!({ \"query_mode\": query_result, \"pattern_mode\": pattern_result, })"
+---
+{
+  "pattern_mode": {
+    "content": [
+      {
+        "text": "sample.rs:2  foo(1)\n",
+        "type": "text"
+      }
+    ],
+    "structuredContent": {
+      "files_scanned": 1,
+      "matches": [
+        {
+          "captures": {
+            "ARG": "1",
+            "match": "foo(1)"
+          },
+          "line": 2,
+          "path": "sample.rs",
+          "text": "foo(1)"
+        }
+      ]
+    }
+  },
+  "query_mode": {
+    "content": [
+      {
+        "text": "sample.rs:2  foo(1)\nsample.rs:3  bar(2)\n",
+        "type": "text"
+      }
+    ],
+    "structuredContent": {
+      "files_scanned": 1,
+      "matches": [
+        {
+          "captures": {
+            "match": "foo(1)",
+            "name": "foo"
+          },
+          "line": 2,
+          "path": "sample.rs",
+          "text": "foo(1)"
+        },
+        {
+          "captures": {
+            "match": "bar(2)",
+            "name": "bar"
+          },
+          "line": 3,
+          "path": "sample.rs",
+          "text": "bar(2)"
+        }
+      ]
+    }
+  }
+}

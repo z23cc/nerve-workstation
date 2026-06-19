@@ -1,0 +1,29 @@
+---
+source: crates/nerve-core/tests/golden_navigate_ast.rs
+expression: response
+---
+{
+  "content": [
+    {
+      "text": "shapes.rs:1 class pub struct Point\n",
+      "type": "text"
+    }
+  ],
+  "structuredContent": {
+    "definitions": [
+      {
+        "display_path": "shapes.rs",
+        "kind": "class",
+        "language": "rust",
+        "line": 1,
+        "path": "shapes.rs",
+        "signature": "pub struct Point",
+        "text": "pub struct Point {"
+      }
+    ],
+    "note": "syntax-level name match across the catalog; not a scope/type resolver, so results may include unrelated same-name symbols and miss aliases or re-exports",
+    "symbol": "Point",
+    "total": 1,
+    "truncated": false
+  }
+}

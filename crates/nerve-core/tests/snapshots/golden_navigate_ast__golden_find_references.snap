@@ -1,0 +1,41 @@
+---
+source: crates/nerve-core/tests/golden_navigate_ast.rs
+expression: response
+---
+{
+  "content": [
+    {
+      "text": "definitions:\n  shapes.rs:6 interface\nreferences:\n  shapes.rs:10 implementation\n",
+      "type": "text"
+    }
+  ],
+  "structuredContent": {
+    "definition_count": 1,
+    "definitions": [
+      {
+        "display_path": "shapes.rs",
+        "kind": "interface",
+        "language": "rust",
+        "line": 6,
+        "path": "shapes.rs",
+        "signature": "pub trait Shape",
+        "text": "pub trait Shape {"
+      }
+    ],
+    "note": "syntax-level name match across the catalog; not a scope/type resolver, so results may include unrelated same-name symbols and miss aliases or re-exports",
+    "references": [
+      {
+        "confidence": "high",
+        "display_path": "shapes.rs",
+        "kind": "implementation",
+        "language": "rust",
+        "line": 10,
+        "path": "shapes.rs",
+        "text": "impl Shape for Point {"
+      }
+    ],
+    "symbol": "Shape",
+    "total": 1,
+    "truncated": false
+  }
+}
