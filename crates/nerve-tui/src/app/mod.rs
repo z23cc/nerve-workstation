@@ -1,20 +1,24 @@
-//! The minimal ratatui shell: connect → handshake → `session.start`, then a
+//! The ratatui shell: connect → handshake → `session.start`, then a
 //! `tokio::select!` loop multiplexing keyboard input, protocol events, and a
-//! tick. Enter sends `session.message`; Ctrl-C interrupts the turn; Ctrl-D quits.
+//! tick. Keys are dispatched in [`input`]; events are folded in [`events`]; the
+//! frame is composed purely in [`render`].
 //!
-//! Deliberately minimal — T2/T3/T4 add rich rendering, an editor, slash
-//! commands, and the approval modal. The interactive LLM path needs provider
-//! credentials, so it is exercised by hand, not in CI; the protocol client and
-//! the render path are what the tests cover.
+//! The interactive LLM path needs provider credentials, so it is exercised by
+//! hand, not in CI; the protocol client, the render path, and the key/command
+//! reductions are what the tests cover. The approval modal (`Mode::Approval`)
+//! key path is stubbed here (T4 fills it on top of the dispatch + `ApprovalState`
+//! hook this wave lands).
 
 mod events;
+mod input;
+pub mod render;
 pub mod state;
 mod terminal;
 
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseEventKind};
 use futures::StreamExt;
 use nerve_runtime::{RuntimeCommand, RuntimeEvent};
 use tokio::sync::broadcast;
@@ -35,10 +39,10 @@ pub async fn run(spec: DaemonSpec, provider: String, model: String) -> Result<()
     result
 }
 
-struct Shell {
-    client: NerveClient,
+pub(crate) struct Shell {
+    pub(crate) client: NerveClient,
     events: broadcast::Receiver<RuntimeEvent>,
-    state: State,
+    pub(crate) state: State,
 }
 
 impl Shell {
@@ -53,8 +57,22 @@ impl Shell {
     /// Populate the tool count and open the session.
     async fn startup(&mut self, provider: String, model: String) {
         self.state.tools = self.client.list_tools().await.map(|t| t.len()).unwrap_or(0);
-        self.state.note("connecting…");
-        let command = RuntimeCommand::SessionStart {
+        self.state.note(format!(
+            "connected · {} tools · type a message · /help for commands",
+            self.state.tools
+        ));
+        if let Err(err) = self
+            .client
+            .start_job(Self::session_start_command(provider, model), None)
+            .await
+        {
+            self.state.note(format!("session.start failed: {err}"));
+        }
+    }
+
+    /// Build a `session.start` command for the current provider/model.
+    pub(crate) fn session_start_command(provider: String, model: String) -> RuntimeCommand {
+        RuntimeCommand::SessionStart {
             workspace: None,
             provider,
             model,
@@ -65,29 +83,38 @@ impl Shell {
             temperature: None,
             reasoning_effort: None,
             tool_filter: None,
-        };
-        if let Err(err) = self.client.start_job(command, None).await {
-            self.state.note(format!("session.start failed: {err}"));
         }
     }
 
-    /// The main multiplexed loop. Returns when the user quits (Ctrl-D).
+    /// The main multiplexed loop. Returns when the user quits.
     async fn event_loop(&mut self) -> Result<()> {
         let mut guard = TerminalGuard::enter()?;
         let mut keys = EventStream::new();
-        let mut tick = tokio::time::interval(Duration::from_millis(120));
+        let mut tick = tokio::time::interval(Duration::from_millis(90));
         self.draw(&mut guard)?;
         loop {
             let mut dirty = false;
             tokio::select! {
                 maybe_key = keys.next() => match maybe_key {
-                    Some(Ok(Event::Key(key))) => {
+                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         if self.handle_key(key).await {
                             return Ok(());
                         }
                         dirty = true;
                     }
                     Some(Ok(Event::Resize(_, _))) => dirty = true,
+                    Some(Ok(Event::Paste(text))) => {
+                        self.handle_paste(&text);
+                        dirty = true;
+                    }
+                    Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
+                        MouseEventKind::ScrollUp => { self.state.scroll += 3; dirty = true; }
+                        MouseEventKind::ScrollDown => {
+                            self.state.scroll = self.state.scroll.saturating_sub(3);
+                            dirty = true;
+                        }
+                        _ => {}
+                    },
                     Some(Err(_)) | None => return Ok(()),
                     _ => {}
                 },
@@ -96,6 +123,9 @@ impl Shell {
                 },
                 _ = tick.tick() => if self.state.running {
                     self.state.tick_spinner();
+                    if let Some(started) = self.state.turn_started_at {
+                        self.state.elapsed_ms = started.elapsed().as_millis() as u64;
+                    }
                     dirty = true;
                 },
             }
@@ -121,67 +151,10 @@ impl Shell {
         }
     }
 
-    /// Handle a key. Returns `true` if the loop should exit.
-    async fn handle_key(&mut self, key: KeyEvent) -> bool {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Char('d') if ctrl => return true,
-            KeyCode::Char('c') if ctrl => self.interrupt().await,
-            KeyCode::Enter => self.submit().await,
-            KeyCode::Backspace => {
-                self.state.input.pop();
-            }
-            KeyCode::Char(c) => self.state.input.push(c),
-            _ => {}
-        }
-        false
-    }
-
-    /// Submit the current input as a `session.message` (no-op when empty/busy).
-    async fn submit(&mut self) {
-        let text = std::mem::take(&mut self.state.input).trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        let Some(session_id) = self.state.session_id.clone() else {
-            self.state.hint = "session not ready yet".to_string();
-            return;
-        };
-        if self.state.running {
-            self.state.hint = "still working — Ctrl-C to interrupt".to_string();
-            self.state.input = text;
-            return;
-        }
-        self.state.hint.clear();
-        self.state.push_user(&text);
-        self.state.running = true;
-        self.state.end_stream();
-        let command = RuntimeCommand::SessionMessage { session_id, text };
-        if let Err(err) = self.client.start_job(command, None).await {
-            self.state.running = false;
-            self.state.note(format!("send failed: {err}"));
-        }
-    }
-
-    /// Ctrl-C: interrupt the in-flight turn (a no-op when idle).
-    async fn interrupt(&mut self) {
-        let Some(session_id) = self.state.session_id.clone() else {
-            return;
-        };
-        if !self.state.running {
-            return;
-        }
-        self.state.hint = "interrupting…".to_string();
-        let command = RuntimeCommand::SessionInterrupt { session_id };
-        if let Err(err) = self.client.start_job(command, None).await {
-            self.state.note(format!("interrupt failed: {err}"));
-        }
-    }
-
     fn draw(&mut self, guard: &mut TerminalGuard) -> Result<()> {
         guard
             .terminal
-            .draw(|frame| state::render(frame, &self.state))?;
+            .draw(|frame| render::render(frame, &self.state))?;
         Ok(())
     }
 }

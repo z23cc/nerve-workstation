@@ -15,12 +15,20 @@
 //! - [`highlight`] — the regex/state-machine syntax highlighter,
 //! - [`diff`] — unified-diff coloring (intra-line via `REVERSED`),
 //! - [`markdown`] — markdown → styled lines,
-//! - [`render`] — the `Block` → lines entry points (was `transcript.ts`).
+//! - [`render`] — the `Block` → lines entry points (was `transcript.ts`),
+//! - [`editor`] — the multiline input editor (was `editor.ts` + `app.ts` keys),
+//! - [`commands`] — slash-command parsing + palette (was `cli/commands.ts`),
+//! - [`models`] — per-model context-window + price table (was `models.ts`),
+//! - [`theme`] — the cycled accent themes (was `theme.ts`).
 
+pub mod commands;
 pub mod diff;
+pub mod editor;
 pub mod highlight;
 pub mod markdown;
+pub mod models;
 pub mod render;
+pub mod theme;
 pub mod width;
 
 use ratatui::style::{Color, Modifier, Style};

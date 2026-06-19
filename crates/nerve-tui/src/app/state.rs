@@ -1,22 +1,21 @@
-//! Pure UI state + frame rendering for the shell.
+//! Pure UI state + the streaming reduction for the shell.
 //!
-//! The render path is a pure function of [`State`] → ratatui widgets, so it is
-//! testable against a `TestBackend` with no terminal. T2 replaces the minimal
-//! transcript draw with the rich [`crate::ui`] renderer (markdown / syntax
-//! highlight / diff / framed tool cells); the streaming-coalesce reduction
-//! mirrors the TS `app.ts` (`#appendText` / `#finishTool`).
+//! The render path ([`crate::app::render`]) is a pure function of [`State`] →
+//! ratatui widgets, so it is testable against a `TestBackend` with no terminal.
+//! State carries the editor, slash-command palette, session lifecycle bookkeeping,
+//! approval posture, and the token/cost meters (T3); the streaming-coalesce
+//! reduction mirrors the TS `app.ts` (`#appendText` / `#finishTool`).
 
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Borders, Paragraph, Wrap};
+use nerve_runtime::{ApprovalMode, RiskTier};
 
+use crate::ui::editor::Editor;
+use crate::ui::models::model_info;
+use crate::ui::render::SPINNER;
 pub use crate::ui::render::ToolCall;
-use crate::ui::render::{self, RenderOptions, SPINNER};
+use crate::ui::theme::{THEMES, theme_index_by_name};
 
-/// Severity tone of a client-side notice (drives its color). Ports the TS
-/// notice `tone` union.
+/// Severity tone of a client-side notice (drives its color). Ports the TS notice
+/// `tone` union.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Info,
@@ -32,7 +31,28 @@ pub enum ToolStatus {
     Error,
 }
 
-/// One rendered transcript entry — the full block set (T2). Assistant text is
+/// Which input the shell is showing: the editor, or the approval modal. T4 fills
+/// the modal behavior; T3 carries the [`ApprovalState`] so key dispatch can
+/// short-circuit and the header/render path can branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Input,
+    Approval,
+}
+
+/// A pending approval request the modal will render (T4). Mirrors the TS
+/// `state.approval`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalState {
+    pub tool: String,
+    pub args: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub tier: RiskTier,
+    pub preview: String,
+}
+
+/// One rendered transcript entry — the full block set. Assistant text is
 /// markdown; reasoning is the dim `·`-gutter stream; a tool call carries its
 /// framed status cell; a notice carries a tone.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,23 +69,48 @@ pub enum Block {
     Notice { tone: Tone, text: String },
 }
 
-/// The whole shell state. Mutated by the event loop; rendered purely.
+/// The whole shell state. Mutated by the event loop + key handlers; rendered
+/// purely by [`crate::app::render`].
 #[derive(Debug, Clone)]
 pub struct State {
     pub provider: String,
     pub model: String,
     pub tools: usize,
     pub blocks: Vec<Block>,
-    pub input: String,
+    /// The multiline input editor (value + cursor + history).
+    pub editor: Editor,
+    /// Input vs. approval modal.
+    pub mode: Mode,
+    /// Pending approval, when `mode == Approval` (T4 renders/handles it).
+    pub approval: Option<ApprovalState>,
+    /// The session's approval posture, shown in the header and pushed on `/mode`.
+    pub approval_mode: ApprovalMode,
     /// True while a turn is in flight (drives the status line).
     pub running: bool,
-    /// One-shot status hint (e.g. "interrupting…"); cleared on next input.
+    /// One-shot status hint (e.g. "interrupting…"); cleared on next keypress.
     pub hint: String,
     pub session_id: Option<String>,
     /// Spinner frame, advanced on each tick while running.
     pub spinner: usize,
     /// Expand tool cells (show full capped output instead of a 3-line preview).
     pub expand_tools: bool,
+    /// Rows scrolled up from the bottom (0 = pinned to the tail).
+    pub scroll: usize,
+    /// Selected palette row (slash-command autocomplete).
+    pub palette_index: usize,
+    /// Accent theme index (cycled by `/theme`).
+    pub theme_index: usize,
+    /// Wall-clock at the current turn's start (for the elapsed display).
+    pub turn_started_at: Option<std::time::Instant>,
+    /// Elapsed ms of the current turn (advanced on tick).
+    pub elapsed_ms: u64,
+    /// Cumulative input/output tokens this session.
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// Tokens of the most recent turn's context (drives the context `%`).
+    pub last_context_tokens: u64,
+    /// Running cost estimate in USD.
+    pub cost_usd: f64,
     /// Index of the assistant block currently being streamed into, if any.
     assistant: Option<usize>,
     /// Index of the reasoning block currently being streamed into, if any.
@@ -80,15 +125,34 @@ impl State {
             model: model.into(),
             tools: 0,
             blocks: Vec::new(),
-            input: String::new(),
+            editor: Editor::new(),
+            mode: Mode::Input,
+            approval: None,
+            approval_mode: ApprovalMode::Yolo,
             running: false,
             hint: String::new(),
             session_id: None,
             spinner: 0,
             expand_tools: false,
+            scroll: 0,
+            palette_index: 0,
+            theme_index: theme_index_by_name(std::env::var("NERVE_TUI_THEME").ok().as_deref()),
+            turn_started_at: None,
+            elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            last_context_tokens: 0,
+            cost_usd: 0.0,
             assistant: None,
             reasoning: None,
         }
+    }
+
+    /// The current accent color (theme cycle), used by the header / prompt /
+    /// palette selection.
+    #[must_use]
+    pub fn accent(&self) -> ratatui::style::Color {
+        THEMES[self.theme_index % THEMES.len()].color
     }
 
     /// Push an info-tone notice (connection status, hints).
@@ -198,6 +262,27 @@ impl State {
         }
     }
 
+    /// Fold a `usage` agent event into the token/cost meters. Ports the TS
+    /// `usage` arm: accumulate in/out tokens, snapshot the context tokens, and
+    /// add the per-MTok cost when the model is known.
+    pub fn record_usage(&mut self, input_tokens: u64, output_tokens: u64) {
+        self.tokens_in += input_tokens;
+        self.tokens_out += output_tokens;
+        self.last_context_tokens = input_tokens;
+        if let Some(info) = model_info(&self.model) {
+            self.cost_usd += (input_tokens as f64 / 1e6) * info.input_per_mtok
+                + (output_tokens as f64 / 1e6) * info.output_per_mtok;
+        }
+    }
+
+    /// Reset the per-session meters (used by `/new`).
+    pub fn reset_meters(&mut self) {
+        self.tokens_in = 0;
+        self.tokens_out = 0;
+        self.last_context_tokens = 0;
+        self.cost_usd = 0.0;
+    }
+
     /// The most recent still-running cell for `tool`, if any.
     fn running_tool(&self, tool: &str) -> Option<&ToolCall> {
         self.blocks.iter().rev().find_map(|b| match b {
@@ -220,96 +305,9 @@ impl State {
     }
 }
 
-/// Render the whole frame. Pure w.r.t. `state`; safe to drive from a
-/// `TestBackend`. Layout: header / transcript / status / input.
-pub fn render(frame: &mut Frame, state: &State) {
-    let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-        ])
-        .split(area);
-    frame.render_widget(header(state), chunks[0]);
-    render_transcript(frame, state, chunks[1]);
-    frame.render_widget(status(state), chunks[2]);
-    frame.render_widget(input(state), chunks[3]);
-}
-
-fn header(state: &State) -> Paragraph<'_> {
-    let text = format!(
-        " Nerve  {}/{}  · {} tools",
-        state.provider, state.model, state.tools
-    );
-    Paragraph::new(text).style(Style::default().add_modifier(Modifier::REVERSED))
-}
-
-/// Draw the rich transcript: render every block to wrapped styled lines, then
-/// top-anchor when the content is shorter than the viewport and bottom-anchor
-/// (scroll to the tail) when it overflows — the TS top-anchor fix.
-fn render_transcript(frame: &mut Frame, state: &State, area: Rect) {
-    let cols = area.width as usize;
-    let opts = RenderOptions {
-        spinner: state.spinner,
-    };
-    let mut blocks = state.blocks.clone();
-    if state.expand_tools {
-        for block in &mut blocks {
-            if let Block::Tool(cell) = block {
-                cell.collapsed = false;
-            }
-        }
-    }
-    let lines: Vec<Line<'static>> = render::blocks_to_lines(&blocks, cols, opts);
-    let height = area.height as usize;
-    let scroll = lines.len().saturating_sub(height);
-    let paragraph = Paragraph::new(lines).scroll((scroll as u16, 0));
-    frame.render_widget(paragraph, area);
-}
-
-fn status(state: &State) -> Paragraph<'_> {
-    let body = if !state.hint.is_empty() {
-        state.hint.clone()
-    } else if state.running {
-        format!(
-            "{} working…  Ctrl-C interrupt",
-            SPINNER[state.spinner % SPINNER.len()]
-        )
-    } else {
-        "ready  ·  Ctrl-D quit".to_string()
-    };
-    Paragraph::new(format!(" {body}")).style(Style::default().add_modifier(Modifier::REVERSED))
-}
-
-fn input(state: &State) -> Paragraph<'_> {
-    // Fully-qualified `ratatui::widgets::Block` here: our transcript `Block` enum
-    // shadows the widget name in this module.
-    Paragraph::new(format!("❯ {}", state.input))
-        .block(ratatui::widgets::Block::default().borders(Borders::TOP))
-        .wrap(Wrap { trim: false })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    fn buffer_text(state: &State, w: u16, h: u16) -> String {
-        let backend = TestBackend::new(w, h);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| render(frame, state)).expect("draw");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect()
-    }
 
     #[test]
     fn append_assistant_coalesces_then_splits_on_end() {
@@ -370,41 +368,33 @@ mod tests {
     }
 
     #[test]
-    fn render_writes_expected_text_to_test_backend() {
-        let mut state = State::new("claude", "opus");
-        state.tools = 42;
-        state.note("connected");
-        state.push_user("hello there");
-        state.append_assistant("hi human");
-        let text = buffer_text(&state, 60, 12);
-        assert!(text.contains("Nerve"), "header missing: {text}");
-        assert!(text.contains("claude/opus"), "model missing");
-        assert!(text.contains("42 tools"), "tool count missing");
-        assert!(text.contains("connected"), "notice missing");
-        assert!(text.contains("hello there"), "user line missing");
-        assert!(text.contains("hi human"), "assistant text missing");
-        assert!(text.contains("ready"), "status missing");
+    fn record_usage_accumulates_tokens_and_cost() {
+        let mut state = State::new("claude", "claude-opus-4-8");
+        state.record_usage(1_000_000, 0);
+        // opus input is $15 / MTok.
+        assert_eq!(state.tokens_in, 1_000_000);
+        assert_eq!(state.last_context_tokens, 1_000_000);
+        assert!((state.cost_usd - 15.0).abs() < 1e-9);
+        state.record_usage(0, 1_000_000); // +$75 output
+        assert!((state.cost_usd - 90.0).abs() < 1e-9);
     }
 
     #[test]
-    fn render_draws_a_framed_tool_cell() {
-        let mut state = State::new("p", "m");
-        state.start_tool("read_file", "{}");
-        state.finish_tool_with("read_file", true, "line one\nline two", 320);
-        let text = buffer_text(&state, 60, 14);
-        assert!(text.contains("read_file"), "tool name: {text}");
-        assert!(
-            text.contains('╭') && text.contains('╯'),
-            "frame glyphs: {text}"
-        );
+    fn record_usage_unknown_model_tracks_tokens_only() {
+        let mut state = State::new("p", "totally-unknown");
+        state.record_usage(500, 200);
+        assert_eq!(state.tokens_in, 500);
+        assert_eq!(state.cost_usd, 0.0);
     }
 
     #[test]
-    fn short_transcript_is_top_anchored() {
-        let mut state = State::new("p", "m");
-        state.push_user("first line");
-        // Plenty of vertical room: the first line must appear (no scroll-off-top).
-        let text = buffer_text(&state, 40, 20);
-        assert!(text.contains("first line"));
+    fn reset_meters_clears_token_cost_state() {
+        let mut state = State::new("claude", "claude-opus-4-8");
+        state.record_usage(1000, 1000);
+        state.reset_meters();
+        assert_eq!(state.tokens_in, 0);
+        assert_eq!(state.tokens_out, 0);
+        assert_eq!(state.last_context_tokens, 0);
+        assert_eq!(state.cost_usd, 0.0);
     }
 }

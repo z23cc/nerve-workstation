@@ -6,7 +6,7 @@
 
 use nerve_runtime::{AgentEventKind, RuntimeEvent};
 
-use super::state::{State, Tone};
+use super::state::{ApprovalState, Mode, State, Tone};
 
 /// Apply one runtime event to the shell state. Returns `true` if the frame
 /// should be re-rendered. Only the subset the minimal shell understands is
@@ -15,16 +15,38 @@ pub fn apply_event(state: &mut State, event: &RuntimeEvent) -> bool {
     match event {
         RuntimeEvent::SessionStarted { session_id } => {
             state.session_id = Some(session_id.clone());
-            state.note("session ready");
             true
         }
         RuntimeEvent::TurnStarted { .. } => {
             state.running = true;
+            state.turn_started_at = Some(std::time::Instant::now());
+            state.elapsed_ms = 0;
             true
         }
         RuntimeEvent::SessionIdle { .. } => {
             state.running = false;
             state.end_stream();
+            true
+        }
+        RuntimeEvent::ApprovalRequested {
+            session_id,
+            request_id,
+            tool,
+            arguments,
+            tier,
+            preview,
+        } => {
+            // T3 stages the modal state; T4 renders/handles it. Mirrors the TS
+            // `approval_requested` arm (compact-JSON args, defaulted tier/preview).
+            state.mode = Mode::Approval;
+            state.approval = Some(ApprovalState {
+                tool: tool.clone(),
+                args: args_to_string(arguments),
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                tier: *tier,
+                preview: preview.clone(),
+            });
             true
         }
         RuntimeEvent::SessionAgent { event, .. } => apply_agent_event(state, event),
@@ -73,9 +95,17 @@ fn apply_agent_event(state: &mut State, event: &AgentEventKind) -> bool {
             state.push_notice(Tone::Warn, format!("interrupted: {reason}"));
             true
         }
-        // Usage feeds the status bar (tokens/cost), wired in T3; ignore for now.
+        // Usage feeds the status bar (tokens / context % / cost).
+        AgentEventKind::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            state.record_usage(*input_tokens, *output_tokens);
+            true
+        }
         // TurnStarted is handled at the RuntimeEvent layer.
-        AgentEventKind::Usage { .. } | AgentEventKind::TurnStarted { .. } => false,
+        AgentEventKind::TurnStarted { .. } => false,
     }
 }
 

@@ -7,6 +7,9 @@
 use std::io::{self, Stdout};
 
 use anyhow::{Context, Result};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -26,7 +29,16 @@ impl TerminalGuard {
         install_panic_hook();
         enable_raw_mode().context("enable raw mode")?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+        // Alt screen + bracketed paste (so a paste arrives whole, not key-by-key)
+        // + mouse capture (so the wheel scrolls the transcript). All are undone in
+        // `restore`, mirroring the TS client's terminal setup/teardown.
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )
+        .context("enter alternate screen")?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).context("create terminal")?;
         Ok(Self { terminal })
@@ -43,8 +55,13 @@ impl Drop for TerminalGuard {
 /// Idempotent, so the panic hook and `Drop` can both call it safely.
 pub fn restore() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    let _ = execute!(io::stdout(), crossterm::cursor::Show);
+    let _ = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
 }
 
 /// Wrap the existing panic hook so a panic restores the terminal *before* the
