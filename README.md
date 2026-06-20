@@ -80,7 +80,7 @@ nerve daemon --stdio --root /abs/path/to/project
 
 
 `nerve-runtime` is the Rust schema source of truth for the `nerve-runtime` protocol. MCP stdio is an agent-facing adapter,
-the runtime daemon stdio path is a transport adapter, and the TypeScript TUI backend
+the runtime daemon stdio path is a transport adapter, and the `nerve-tui` Rust terminal UI
 is a client of the runtime protocol.
 
 Protocol v3 is a small JSON-RPC 2.0 subset over newline-delimited JSON (NDJSON)
@@ -186,7 +186,7 @@ full hybrid (embeddings + ANN + rerank).
 
 ## Build & quality gates
 
-Frontend workspace scripts use Bun (`packageManager: bun@1.3.14`). Runtime protocol TypeScript types are generated from Rust schema.
+The runtime protocol schema is generated from the `nerve-runtime` Rust types.
 
 ```bash
 cargo build
@@ -194,14 +194,15 @@ cargo test                                    # add --features semantic for the 
 cargo clippy --all-targets -- -D warnings     # functions <=100 lines, nesting capped
 cargo fmt --check
 ./Scripts/check-file-size.sh                  # files <=600 non-test lines
-bun run protocol:check
 
-# Regenerate protocol schema/constants + TypeScript types after changing nerve-runtime protocol types
-bun run protocol:generate
+# Protocol drift check (a Rust test asserts docs/protocol/* matches the schema)
+cargo run -p nerve-runtime --bin export-runtime-protocol -- --check
 
-# Optional frontend adapter smoke check
-cargo build -p nerve-workstation --bin nerve
-bun run tui:smoke
+# Regenerate protocol schema/constants after changing nerve-runtime protocol types
+cargo run -p nerve-runtime --bin export-runtime-protocol
+
+# TUI client smoke (no-LLM round-trip against the daemon)
+cargo test -p nerve-tui
 ```
 
 Building requires a C toolchain (tree-sitter grammars compile `parser.c`).
@@ -211,8 +212,8 @@ Conventions: [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
 
 - **Layout**: `crates/nerve-core` (engine + tools), `crates/nerve-runtime`
   (transport-neutral runtime protocol + tool-adapter composition), `crates/nerve-workstation` (stdio
-  MCP adapter + CLI: `mcp serve`/`daemon`/`doctor`/`config`/`install`), `packages/tui`
-  (TypeScript frontend backend adapter/client for `nerve daemon`).
+  MCP adapter + CLI: `mcp serve`/`daemon`/`doctor`/`config`/`install`), `crates/nerve-tui`
+  (Rust terminal UI: a runtime-protocol client of `nerve daemon`, launched by `nerve chat`).
 - **Snapshot-centered**: filesystem access is behind a `CatalogProvider` port;
   the core operates on immutable `CatalogSnapshot` values. Codemap parses cache by
   `(mtime, size)`.

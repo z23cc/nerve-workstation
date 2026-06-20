@@ -37,7 +37,8 @@ Events (session-scoped; carry `session_id`):
 
 `handle_command` in core runtime returns a clear "executed by the host session manager" error for
 session commands (like `agent.run`); the **workstation intercepts** them. Add to
-`RUNTIME_COMMAND_NAMES`. Run `bun run protocol:generate`; `protocol:check` + the drift test must pass.
+`RUNTIME_COMMAND_NAMES`. Run `cargo run -p nerve-runtime --bin export-runtime-protocol`; the drift
+gate (`export-runtime-protocol -- --check`, run by `cargo test -p nerve-runtime`) must pass.
 
 ## Backend (workstation session manager) + minimal nerve-agent change
 

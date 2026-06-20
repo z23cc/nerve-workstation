@@ -1,14 +1,11 @@
 //! Frame composition: a pure [`State`] → styled lines + cursor position, plus the
 //! production [`render`] that paints them into a ratatui [`Frame`].
 //!
-//! Ports the layout of `packages/tui/src/ui/app.ts` (`renderFrame`, `headerLine`,
-//! `statusLine`, `transcriptViewport`, `inputBlock`, `paletteLines`). Where the TS
-//! emitted ANSI strings, this builds ratatui [`Line`]s of styled [`Span`]s; the
-//! row math (header / transcript / palette / status / input, top-anchored, with a
-//! flush-right token meter) matches the TS, including the multi-row input window
-//! and the bare-slash command palette. In approval mode the input rows are
-//! replaced by the bordered approval modal (`approval_lines`, ports the TS
-//! `approvalLines`) and the cursor is suppressed.
+//! The layout — header / transcript / palette / status / input — builds ratatui
+//! [`Line`]s of styled [`Span`]s. The row math is top-anchored with a flush-right
+//! token meter, the multi-row input window, and the bare-slash command palette.
+//! In approval mode the input rows are replaced by the bordered approval modal
+//! (`approval_lines`) and the cursor is suppressed.
 
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};

@@ -51,9 +51,10 @@ approval round-trips (`session.respond`) — is Session-layer / P6 work, not in-
    `nerve-core` dispatch directly.
 3. **Runtime types are the single protocol authority.** The human-facing runtime protocol vocabulary
    (`RuntimeCommand`, `RuntimeEvent`, `Runtime*Request`, method-name constants) is defined **only** in
-   `nerve-runtime`, codegen'd to TS via `bun run protocol:generate`, and drift-checked in CI
-   (`bun run protocol:check` + the `generated_protocol_rust_artifacts_are_current` test). Protocol
-   changes are **additive and versioned** — never break a published field.
+   `nerve-runtime`, exported to `docs/protocol/*` via `cargo run -p nerve-runtime --bin
+   export-runtime-protocol`, and drift-checked in CI (the `export-runtime-protocol -- --check` gate +
+   the `generated_protocol_rust_artifacts_are_current` test). Protocol changes are **additive and
+   versioned** — never break a published field.
 4. **Protocol types are transport-neutral data.** Commands/events carry plain serde/JSON
    (e.g. `tool.call` = `{name, arguments: Value}`), never references to engine/agent domain types.
    Consequently `nerve-runtime` depends **only** on `nerve-core` — never on `nerve-agent`. The
@@ -116,7 +117,7 @@ nerve-workstation   composition root (the `nerve` binary): MCP face (server.rs),
   ▲                 (daemon/, jobs.rs), CLI (cli.rs), agent wiring (agent.rs = RuntimeToolBox),
   │                 xAI tools (xai/), thin `nerve auth` alias (auth/ → nerve-agent::auth).
   │
-packages/tui (+ future GUI/mobile)   clients of the versioned runtime protocol — never the engine.
+nerve-tui (+ future GUI/mobile)   clients of the versioned runtime protocol — never the engine.
 ```
 
 `nerve-agent` and `nerve-runtime` are **siblings** (both depend only on `nerve-core`); the binary
@@ -203,7 +204,7 @@ Do not build one plugin system; layer by what is being extended, each with the r
   multi-session live registry; credentials persisted by `nerve-agent::auth`. Live daemon jobs stay
   in-memory by design.
 - **P6 — Hooks + GUI (Tauri) / TUI / mobile. ◑ Partial.** Hooks wired (`Orchestrator::with_hooks`);
-  the `packages/tui` client plus daemon stdio and HTTP/SSE transports are live; a minimal
+  the `nerve-tui` (Rust) client plus daemon stdio and HTTP/SSE transports are live; a minimal
   `daemon/gui.html` exists. Native Tauri GUI and mobile remain.
 - **Auth broker (pairs with P6 mobile/remote). ✗ Not started.** Share tokens to remote/mobile clients
   — log in once on a trusted node; the refresh token never leaves the broker (`AuthManager` is already
@@ -223,7 +224,7 @@ Do not build one plugin system; layer by what is being extended, each with the r
 
 ## 10. Governance — how the invariants stay true
 
-- **Enforced by CI today:** protocol drift (`protocol:check` + `generated_protocol_rust_artifacts_are_current`),
+- **Enforced by CI today:** protocol drift (`export-runtime-protocol -- --check` + `generated_protocol_rust_artifacts_are_current`),
   determinism (golden snapshots), file/function size, `clippy -D warnings`, fmt.
 - **To add — command-executor exhaustiveness (the writable form of the old "nothing outside
   `Runtime`" idea).** A literal "every command flows through `Runtime::handle_command`" test is

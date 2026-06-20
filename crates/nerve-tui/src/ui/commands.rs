@@ -1,6 +1,5 @@
 //! Pure slash-command helpers: parsing, the autocomplete palette, approval-mode
-//! spellings, and model-list formatting. Ports the pure surface of
-//! `packages/tui/src/cli/commands.ts`.
+//! spellings, and model-list formatting.
 
 use nerve_runtime::ApprovalMode;
 use serde_json::Value;

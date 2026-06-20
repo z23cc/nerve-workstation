@@ -29,12 +29,14 @@ cargo clippy -p nerve-core --all-targets --features semantic -- -D warnings
 cargo fmt --all --check
 ./Scripts/check-file-size.sh                            # files <= 600 non-test lines (hard gate)
 
-# Runtime protocol: Rust types in nerve-runtime are the source of truth for the TS types
-bun run protocol:generate    # regenerate docs/protocol/* + packages/tui TS after changing protocol types
-bun run protocol:check       # fail if Rust schema and generated TS have drifted (CI)
+# Runtime protocol: Rust types in nerve-runtime are the source of truth. The
+# export-runtime-protocol bin emits docs/protocol/runtime-v3.*.json; a Rust drift
+# test (cargo test -p nerve-runtime) fails if the committed schema is stale:
+cargo run -p nerve-runtime --bin export-runtime-protocol            # regenerate docs/protocol/*
+cargo run -p nerve-runtime --bin export-runtime-protocol -- --check # fail on drift (CI)
 
-bun run check                # parallel TS + Rust + protocol checks
-bun run tui:smoke            # build nerve, smoke-test the TUI backend against the daemon
+# TUI smoke: the Rust TUI client is the chat client; its smoke is a cargo test
+cargo test -p nerve-tui                                 # no-LLM round-trip against the daemon
 
 # Run the engine (note: --root is mandatory; see fail-closed below)
 cargo run -p nerve-workstation --bin nerve -- mcp serve --root /abs/path/to/project
@@ -42,7 +44,6 @@ cargo run -p nerve-workstation --bin nerve -- daemon --stdio --root /abs/path/to
 ```
 
 Building requires a C toolchain — the 11 tree-sitter grammars compile `parser.c`.
-Frontend scripts use Bun (`packageManager: bun@1.3.14`).
 
 ## Using the nerve MCP (this project's own tools)
 
@@ -85,7 +86,7 @@ Usage notes that bite if you don't know them:
 
 ## Architecture
 
-Four Rust crates form a layered seam (`nerve-core` → {`nerve-runtime`, `nerve-agent`} → `nerve-workstation`); the TS frontend is a client of the top layer, not the engine. The long-term seam/plugin model and the binding invariants live in `docs/designs/architecture-north-star.md` — read it before any structural change.
+Five Rust crates form a layered seam (`nerve-core` → {`nerve-runtime`, `nerve-agent`} → `nerve-workstation`, with `nerve-tui` a runtime-protocol client of the daemon); the TUI is a client of the protocol, not the engine. The long-term seam/plugin model and the binding invariants live in `docs/designs/architecture-north-star.md` — read it before any structural change.
 
 - **`crates/nerve-core`** — the engine, intentionally host-agnostic. All filesystem access goes
   through the `CatalogProvider` port (`port.rs`); operations run against immutable
@@ -100,8 +101,9 @@ Four Rust crates form a layered seam (`nerve-core` → {`nerve-runtime`, `nerve-
   optional capability adapters (`RuntimeToolAdapter`) plus the job/event protocol.
   **This crate's Rust types are the source of truth for the runtime protocol** (Protocol v3 —
   a JSON-RPC 2.0 subset over newline-delimited JSON). The `export-runtime-protocol` bin emits the
-  schema/constants; `packages/tui/scripts/generate-protocol.ts` derives the TS types from them.
-  Any change to protocol types must be followed by `bun run protocol:generate`.
+  schema/constants into `docs/protocol/runtime-v3.*.json`; a Rust drift test (`cargo test
+  -p nerve-runtime`) fails if the committed JSON is stale. Regenerate with
+  `cargo run -p nerve-runtime --bin export-runtime-protocol` after changing protocol types.
 
 - **`crates/nerve-agent`** — the LLM agent layer (sibling of `nerve-runtime`; depends only on
   `nerve-core`): the `LlmProvider` trait + Anthropic/OpenAI-Responses/xAI adapters, multi-provider
@@ -118,7 +120,9 @@ Four Rust crates form a layered seam (`nerve-core` → {`nerve-runtime`, `nerve-
   `nerve agent run/login`), the xAI/Grok tools (`xai/`), and the xAI-only `nerve auth` alias
   (`auth/`, a thin adapter over `nerve-agent::auth`, which now owns all provider credentials).
 
-- **`packages/tui`** — TypeScript backend/client that speaks the daemon runtime protocol.
+- **`crates/nerve-tui`** — the Rust terminal UI: a runtime-protocol client of `nerve daemon`
+  (no engine deps). Ships as the `nerve-tui` binary that `nerve chat` launches; `nerve-tui smoke`
+  is a no-LLM round-trip (`cargo test -p nerve-tui`).
 - **`crates/nerve-wasm/pkg/`** — gitignored wasm-pack output, not a source crate.
 
 ### Things that aren't obvious from a single file

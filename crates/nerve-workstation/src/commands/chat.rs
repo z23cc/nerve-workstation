@@ -1,7 +1,7 @@
-//! `nerve chat` — thin launcher for the bundled `nerve-chat` TUI client.
+//! `nerve chat` — thin launcher for the bundled `nerve-tui` client.
 //!
 //! The terminal UI is a runtime-protocol *client*, not the engine: it ships as a
-//! separate executable (`nerve-chat`, a self-contained bun build) and speaks to
+//! separate Rust executable (`nerve-tui`, the `nerve-tui` crate) and speaks to
 //! the engine only over the daemon's stdio protocol. This command resolves the
 //! provider/model (flag -> saved default -> first-run picker), then locates that
 //! binary and hands control to it — engine and client stay decoupled (north-star:
@@ -33,9 +33,10 @@ pub(crate) struct ChatArgs {
     binary: Option<PathBuf>,
 }
 
-/// Resolve provider/model (flag -> saved default -> picker), locate `nerve-chat`,
+/// Resolve provider/model (flag -> saved default -> picker), locate `nerve-tui`,
 /// and hand off to it. The engine binary is passed explicitly so the client
-/// spawns the matching daemon.
+/// spawns the matching daemon. Forwards `--binary`/`--provider`/`--model`/
+/// `--root`/`--agent` — exactly the flags `nerve-tui` accepts.
 pub(crate) fn chat(args: ChatArgs) -> Result<()> {
     let (provider, model) = crate::runconfig::resolve(args.provider, args.model, true)?;
     let binary = locate_chat_binary();
@@ -83,9 +84,9 @@ fn locate_chat_binary() -> PathBuf {
 
 fn chat_binary_name() -> &'static str {
     if cfg!(windows) {
-        "nerve-chat.exe"
+        "nerve-tui.exe"
     } else {
-        "nerve-chat"
+        "nerve-tui"
     }
 }
 
@@ -110,9 +111,8 @@ fn handoff(mut command: Command, binary: &Path) -> Result<()> {
 fn missing_binary_error(binary: &Path, err: std::io::Error) -> anyhow::Error {
     anyhow!(
         "could not launch the chat client `{}`: {err}\n\
-         `nerve-chat` ships in the macOS bottle. Build it from source with \
-         `bun build src/cli/chat.ts --compile --outfile dist/nerve-chat` in `packages/tui`, \
-         or point NERVE_CHAT_BIN at the binary.",
+         `nerve-tui` ships in the macOS bottle. Build it from source with \
+         `cargo build --release -p nerve-tui`, or point NERVE_CHAT_BIN at the binary.",
         binary.display()
     )
 }

@@ -1,7 +1,6 @@
 //! `nerve-tui smoke` — a no-LLM round-trip against `nerve daemon --stdio`.
 //!
-//! Mirrors `bun run tui:smoke` (`packages/tui/src/cli/smoke.ts`): connect +
-//! handshake, start a `ping` job, await its terminal event, then assert the job
+//! Connect + handshake, start a `ping` job, await its terminal event, then assert the job
 //! completed with `{ "status": "ok" }`. Used both as a CLI subcommand and by the
 //! integration test.
 

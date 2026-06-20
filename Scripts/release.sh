@@ -86,7 +86,9 @@ EOF
   depends_on "rust" => :build
 
   def install
+    # Engine + the Rust terminal UI client, so `nerve chat` works out of the box.
     system "cargo", "install", "--features", "semantic", *std_cargo_args(path: "crates/nerve-workstation")
+    system "cargo", "install", *std_cargo_args(path: "crates/nerve-tui")
   end
 
   test do
@@ -96,18 +98,16 @@ end
 EOF
 }
 
-# ---- bundle the TUI client (nerve-chat) into a keg, when bun is available ----
+# ---- bundle the Rust TUI client (nerve-tui) into a keg ----
 # The terminal UI is a runtime-protocol client shipped as a SEPARATE executable
 # next to the engine, so `brew` users get `nerve chat` out of the box while the
-# engine/client boundary stays intact. Engine-only (non-fatal) when bun is absent.
+# engine/client boundary stays intact. Built in build_bottle alongside the engine.
 bundle_tui_client() {
   local srcdir="$1" keg="$2"
-  if ! command -v bun >/dev/null; then
-    echo ">> bun not found — engine-only bottle (no nerve-chat)"; return 0
-  fi
-  echo ">> bundling nerve-chat (TUI client)"
-  ( cd "$srcdir/packages/tui" && bun build src/cli/chat.ts --compile --outfile "$keg/bin/nerve-chat" >/dev/null )
-  "$keg/bin/nerve-chat" --help >/dev/null # smoke: prints usage and exits 0, else abort
+  echo ">> bundling nerve-tui (Rust TUI client)"
+  cp "$srcdir/target/release/nerve-tui" "$keg/bin/nerve-tui"
+  chmod +x "$keg/bin/nerve-tui"
+  "$keg/bin/nerve-tui" --help >/dev/null # smoke: prints usage and exits 0, else abort
 }
 
 # ---- bottle builder: build from $1 (a source dir) and package a bottle ----
@@ -116,6 +116,7 @@ build_bottle() {
   local srcdir="$1"
   echo ">> building Homebrew bottle ($BTAG)"
   ( cd "$srcdir" && cargo build --release -p nerve-workstation --features semantic )
+  ( cd "$srcdir" && cargo build --release -p nerve-tui ) # Rust TUI client (nerve chat)
   "$srcdir/target/release/$BIN" --version >/dev/null # smoke test: abort if it can't run
   local keg="$TMP/bottle/$FORMULA/$NEW"
   rm -rf "$TMP/bottle"; mkdir -p "$keg/bin" "$keg/.brew"

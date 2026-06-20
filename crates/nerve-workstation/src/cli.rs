@@ -34,7 +34,7 @@ enum CommandKind {
     Cache(CacheArgs),
     /// Register Nerve as an MCP server in Claude Code and/or Codex.
     Install(commands::install::InstallArgs),
-    /// Interactive terminal chat client (forwards to the bundled `nerve-chat`).
+    /// Interactive terminal chat client (forwards to the bundled `nerve-tui`).
     Chat(commands::chat::ChatArgs),
 }
 

@@ -1,6 +1,6 @@
 //! The runtime-protocol client: spawn `nerve daemon --stdio`, speak JSON-RPC
 //! 2.0 over NDJSON, and surface `runtime/event` notifications on a broadcast
-//! channel. The async sibling of `packages/tui/src/backend/nerveClient.ts`.
+//! channel. A `tokio` async runtime-protocol client.
 //!
 //! Concurrency model (all `tokio`):
 //! - one **reader task** owns the child's stdout, parses each line, and either

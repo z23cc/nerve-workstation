@@ -52,7 +52,7 @@ User-owned, readable, editable — same transparency principle as the memory fil
 - Wire both surfaces:
   - `nerve agent run`: `resolve(args.provider.or(def), args.model.or(def), true)`.
   - `nerve chat`: parse explicit flags (replacing the arg-passthrough), `resolve`,
-    then exec `nerve-chat --binary <engine> --provider P --model M [...]`.
+    then exec `nerve-tui --binary <engine> --provider P --model M [...]`.
     Bonus: `nerve chat --help` now shows real flags (fixes the clap-passthrough
     wart).
 - Safety: picker only on a TTY; non-interactive (daemon, CI, pipe) still fails

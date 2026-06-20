@@ -1,6 +1,6 @@
 //! Integration smoke test: spawn a real `nerve daemon --stdio` against a temp
 //! root, run the runtime/info handshake, and round-trip a `ping` job to a
-//! completed status. Mirrors `bun run tui:smoke`.
+//! completed status. The Rust TUI's smoke check, run by `cargo test -p nerve-tui`.
 //!
 //! Requires a built `nerve` binary. We locate `target/<profile>/nerve` relative
 //! to this test's own executable (so it works under `cargo test` regardless of

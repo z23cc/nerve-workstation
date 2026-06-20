@@ -1,9 +1,8 @@
 //! Accent color themes for the UI chrome (header logo, status spinner, input
 //! prompt, palette selection). Cycled live with `/theme`. Transcript colors are
-//! fixed (see [`crate::ui::palette`]). Ports `packages/tui/src/ui/theme.ts`.
+//! fixed (see [`crate::ui::palette`]).
 //!
-//! Where the TS theme carried an `accent(s) => string` SGR wrapper, here a theme
-//! is just a named ratatui [`Color`]; callers build the accent [`Style`].
+//! A theme is just a named ratatui [`Color`]; callers build the accent [`Style`].
 
 use ratatui::style::{Color, Style};
 

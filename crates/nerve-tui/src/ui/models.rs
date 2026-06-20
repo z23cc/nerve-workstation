@@ -1,11 +1,10 @@
 //! Approximate per-model metadata for the status bar's context-window % and
-//! running cost. Ports `packages/tui/src/ui/models.ts`.
+//! running cost.
 //!
 //! Catalogs like this are inherently approximate and need upkeep; unknown models
 //! simply show tokens with no % or cost. Prices are USD per million tokens
-//! (input / output). The match is a first-wins ordered table of substrings (the
-//! TS used regexes; the patterns here are simple enough to express as substring
-//! checks against the lowercased id, which keeps the table dependency-free).
+//! (input / output). The match is a first-wins ordered table of substrings
+//! checked against the lowercased id, which keeps the table dependency-free.
 
 /// Approximate metadata for a model id.
 #[derive(Debug, Clone, Copy, PartialEq)]

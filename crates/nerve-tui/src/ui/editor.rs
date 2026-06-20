@@ -1,10 +1,8 @@
 //! The multiline input editor: value + cursor with grapheme-correct editing and
-//! submission history. Ports `packages/tui/src/ui/editor.ts` (`layout`) and the
-//! input/key/history mechanics from `app.ts` (`#insert`, backspace, ctrl-u,
-//! ctrl-w, left/right/home/end, `#pushHistory`/`#historyPrev`/`#historyNext`).
+//! submission history — line layout, the insert/backspace/ctrl-u/ctrl-w and
+//! left/right/home/end key mechanics, and prev/next submission history.
 //!
-//! The TS held cursor as a UTF-16 code-unit index into a JS string; here the
-//! cursor is a **byte** index into the Rust `String` and all movement snaps to
+//! The cursor is a **byte** index into the Rust `String` and all movement snaps to
 //! grapheme-cluster boundaries via `unicode-segmentation`, so a multi-codepoint
 //! emoji or a combining sequence moves/deletes as one unit. Display width comes
 //! from `unicode-width` (CJK = 2 cols), matching the renderer.

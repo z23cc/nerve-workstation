@@ -2,24 +2,21 @@
 //! values into width-wrapped ratatui [`Line`](ratatui::text::Line)s of styled
 //! [`Span`](ratatui::text::Span)s.
 //!
-//! Ported from the TypeScript TUI's `src/ui/{transcript,markdown,highlight,diff,
-//! ansi}.ts`. The model shift from the TS version: where TS emitted strings with
-//! inline SGR escapes, this layer emits ratatui `Style`/`Span` — so wrapping,
-//! coloring, and truncation operate on styled runs ([`width`]) rather than escape
-//! sequences. Behavior (which spans get which color, where lines break, frame
-//! glyphs) matches the TS pixel-for-pixel where the model allows; deviations are
-//! noted at each call site.
+//! This layer emits ratatui `Style`/`Span` — wrapping, coloring, and truncation
+//! operate on styled runs ([`width`]) rather than ANSI escape sequences, so which
+//! spans get which color, where lines break, and which frame glyphs are used are
+//! all decided here; deviations from the common defaults are noted at each call site.
 //!
 //! Submodules:
-//! - [`width`] — sanitize, display width, styled wrapping (was `ansi.ts`),
+//! - [`width`] — sanitize, display width, styled wrapping,
 //! - [`highlight`] — the regex/state-machine syntax highlighter,
 //! - [`diff`] — unified-diff coloring (intra-line via `REVERSED`),
 //! - [`markdown`] — markdown → styled lines,
-//! - [`render`] — the `Block` → lines entry points (was `transcript.ts`),
-//! - [`editor`] — the multiline input editor (was `editor.ts` + `app.ts` keys),
-//! - [`commands`] — slash-command parsing + palette (was `cli/commands.ts`),
-//! - [`models`] — per-model context-window + price table (was `models.ts`),
-//! - [`theme`] — the cycled accent themes (was `theme.ts`).
+//! - [`render`] — the `Block` → lines entry points,
+//! - [`editor`] — the multiline input editor,
+//! - [`commands`] — slash-command parsing + palette,
+//! - [`models`] — per-model context-window + price table,
+//! - [`theme`] — the cycled accent themes.
 
 pub mod commands;
 pub mod diff;

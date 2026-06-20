@@ -16,21 +16,20 @@ Keep public behavior stable while making the workspace easier to extend. The gui
 - `RuntimeToolAdapter<R>` — adapter seam for provider-specific or host-specific capabilities.
 - `RuntimeError` — preserves core dispatch errors and adapter messages for transports to render.
 - `RuntimeCommand` / `RuntimeEvent` — human-facing job command/event contracts for daemon and TUI hosts.
-- `RuntimeJob*` / `RuntimeInfo` / `RuntimeToolSpec` types — protocol v3 job start/get/list/cancel request, runtime metadata, and tool schema shared by the daemon and TypeScript backend.
-- `protocol_codegen.rs` plus `export-runtime-protocol` — generates Rust-owned protocol schema/constants under `docs/protocol/`; `packages/tui/scripts/generate-protocol.ts` feeds that schema into `json-schema-to-typescript` so Rust protocol schema stays the source of truth for TypeScript clients without a custom TS compiler.
+- `RuntimeJob*` / `RuntimeInfo` / `RuntimeToolSpec` types — protocol v3 job start/get/list/cancel request, runtime metadata, and tool schema shared by the daemon and the `nerve-tui` client.
+- `protocol_codegen.rs` plus `export-runtime-protocol` — generates Rust-owned protocol schema/constants under `docs/protocol/`; a Rust drift test (`generated_protocol_rust_artifacts_are_current`) asserts the committed JSON matches the schema, keeping `nerve-runtime` the single source of truth.
 
 Runtime dispatch order is explicit: registered adapters are consulted first, then the built-in `nerve-core` dispatcher handles unclaimed tools. Tool specs are de-duplicated by name with core specs kept first, so accidental adapter duplicates do not leak ambiguous tool definitions. This keeps MCP, CLI, TUI, and future daemon/Web hosts from each re-implementing tool aggregation.
 
-### `packages/tui/src`
+### `crates/nerve-tui/src`
 
-The TypeScript frontend package owns the human-facing backend adapter:
+The Rust terminal UI is a runtime-protocol client of `nerve daemon` (no engine deps):
 
-- `backend/NerveClient` — spawns `nerve daemon --stdio`, uses protocol v3 job methods, and dispatches `runtime/event` notifications.
-- `backend/protocol.generated.ts` — generated protocol constants and TypeScript types from Rust schema.
-- `backend/types.ts` — UI-neutral `WorkstationBackend` plus frontend aliases over generated protocol types.
-- `cli/smoke.ts` — local integration smoke check that starts, polls, and lists a job through the daemon protocol.
+- `protocol/client.rs` — spawns `nerve daemon --stdio`, uses protocol v3 job methods, and dispatches `runtime/event` notifications.
+- `app/` — the streaming chat shell (session lifecycle, transcript rendering, input/editor, approval modal).
+- `smoke.rs` — a no-LLM round-trip that starts, polls, and lists a job through the daemon protocol (`nerve-tui smoke`, run by `cargo test -p nerve-tui`).
 
-This keeps UI components independent from MCP and from Rust process details.
+This keeps the UI independent from MCP and uses only the versioned runtime protocol.
 
 ### `crates/nerve-workstation/src`
 
@@ -94,7 +93,7 @@ The public seams stay stable: `nerve_core::{get_repo_map, get_repo_map_cancellab
 - `nerve-runtime` is the stable seam for Core Runtime + multiple Adapter architecture and the source of truth for runtime protocol constants/types; MCP and daemon are consumers of runtime, not the core architecture.
 - `nerve daemon --stdio` is the local Nerve Runtime command for TUI/frontends: JSON-RPC 2.0 over NDJSON stdio, `runtime/event` notifications, and `runtime/jobs/start|get|list|cancel`.
 - `nerve mcp serve` remains the agent-facing MCP protocol adapter and is separate from the human-facing runtime daemon protocol.
-- `packages/tui` provides the first TypeScript `WorkstationBackend` client over that runtime daemon protocol.
+- `crates/nerve-tui` provides the Rust terminal-UI client over that runtime daemon protocol (`nerve chat`).
 - Clients execute runtime commands through the daemon job lifecycle only; the daemon does not expose the old synchronous `runtime/command` method.
 - Job progress events are coarse today; core tools cooperatively observe cancellation tokens, but the protocol does not promise detailed percentages for every operation.
 - Source file size gate is hard and passes: every source file is within 600 non-test lines.
@@ -107,9 +106,9 @@ The public seams stay stable: `nerve_core::{get_repo_map, get_repo_map_cancellab
    - Candidate seam: move auth status/login/logout and cache warm/purge execution behind typed runtime commands/events.
    - Risk: medium; browser OAuth and persistent auth storage must preserve current behavior.
 
-2. TypeScript TUI component tree
-   - Candidate seam: build UI screens on top of `WorkstationBackend`, not directly on process/MCP calls.
-   - Risk: low-medium; UI state should not leak into the Rust runtime protocol.
+2. Terminal UI client (now shipped as `crates/nerve-tui`)
+   - Realized seam: the Rust `nerve-tui` crate builds UI screens on the versioned runtime protocol, not on process/MCP calls.
+   - Invariant preserved: UI state does not leak into the Rust runtime protocol.
 
 3. `nerve-core::semantic/index`
    - Candidate seam: background build orchestration, built-index construction, build lifecycle.
