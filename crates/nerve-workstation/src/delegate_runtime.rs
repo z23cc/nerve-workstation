@@ -147,6 +147,17 @@ impl DelegateAgent {
             other => Err(DelegateError::UnknownAgent(other.to_string())),
         }
     }
+
+    /// The catalog agent name (the inverse of [`Self::from_name`]) — used to label
+    /// progress events and result JSON for the live persistent sessions.
+    #[must_use]
+    pub(crate) fn catalog_name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Gemini => "gemini",
+        }
+    }
 }
 
 /// Build the argv (and stdin payload) for a delegated run. `cwd` is the already

@@ -82,16 +82,17 @@ fn delegate_start_unknown_agent_is_rejected() {
 
 #[test]
 fn delegate_start_streams_progress_and_returns_outcome() {
-    // A canned codex JSONL stream is replayed through the launcher's default
-    // streaming path; the parser extracts the final result + usage and emits
-    // DelegateProgress for each agent_message line.
+    // A canned gemini stream is replayed through the launcher's default streaming
+    // path; the parser emits DelegateProgress for each assistant chunk and extracts
+    // the final result. gemini is the agent still on the DA-2 one-shot path (codex
+    // and claude take the DA-5 persistent live path), so it exercises `run_delegate`.
     let fixture = runtime_with_file();
     let stream = concat!(
-        r#"{"type":"item","item":{"type":"agent_message","text":"working"}}"#,
+        r#"{"type":"assistant","text":"working"}"#,
         "\n",
-        r#"{"type":"item","item":{"type":"agent_message","text":"the answer"}}"#,
+        r#"{"type":"assistant","text":"the answer"}"#,
         "\n",
-        r#"{"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7}}"#,
+        r#"{"type":"result","result":"the answer"}"#,
         "\n",
     );
     let (router, output) = output_router_with_delegate(
@@ -108,7 +109,7 @@ fn delegate_start_streams_progress_and_returns_outcome() {
                 "job_id": "stream-job",
                 "command": {
                     "kind": "delegate.start",
-                    "agent": "codex",
+                    "agent": "gemini",
                     "task": "do the thing"
                 }
             }),
@@ -146,11 +147,9 @@ fn delegate_start_streams_progress_and_returns_outcome() {
     let job = &response_with_id(&observed, json!(2))["result"]["job"];
     assert_eq!(job["status"], "completed");
     let result = &job["result"];
-    assert_eq!(result["agent"], "codex");
+    assert_eq!(result["agent"], "gemini");
     assert_eq!(result["ok"], true);
     assert_eq!(result["result"], "the answer");
-    assert_eq!(result["usage"]["input_tokens"], 11);
-    assert_eq!(result["usage"]["output_tokens"], 7);
 }
 
 #[test]
@@ -189,12 +188,13 @@ fn delegate_start_rejects_cwd_escape() {
 fn delegate_start_cancel_short_circuits_to_cancelled() {
     // A canned launcher that flips the cancel token mid-run (as a real kill would
     // leave it). The job must terminate as `cancelled`, not `completed`, even
-    // though the launcher returned an exit code.
+    // though the launcher returned an exit code. Uses gemini, the agent still on the
+    // DA-2 one-shot streaming path.
     let fixture = runtime_with_file();
     let (router, output) = output_router_with_delegate(
         Arc::clone(&fixture.runtime),
         Arc::new(CannedLauncher::cancelling(
-            r#"{"type":"item","item":{"type":"agent_message","text":"partial"}}"#,
+            r#"{"type":"assistant","text":"partial"}"#,
         )),
     );
     dispatch(
@@ -205,7 +205,7 @@ fn delegate_start_cancel_short_circuits_to_cancelled() {
             "runtime/jobs/start",
             json!({
                 "job_id": "cancel-delegate",
-                "command": { "kind": "delegate.start", "agent": "codex", "task": "x" }
+                "command": { "kind": "delegate.start", "agent": "gemini", "task": "x" }
             }),
         ),
     );

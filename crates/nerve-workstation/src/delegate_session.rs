@@ -77,9 +77,11 @@ pub(crate) struct TurnResult {
 impl TurnResult {
     /// Render the turn as the JSON returned over the protocol (mirrors the DA-2
     /// one-shot [`DelegateOutcome`](crate::delegate_runtime::DelegateOutcome) shape
-    /// so a steer result is shaped like a start result).
+    /// so a steer result is shaped like a start result). `agent` is the catalog
+    /// agent name (`claude` / `codex`) the turn ran under, so a steer result names
+    /// the same agent the persistent driver speaks.
     #[must_use]
-    pub(crate) fn to_json(&self, session_id: &str) -> Value {
+    pub(crate) fn to_json(&self, agent: &str, session_id: &str) -> Value {
         let usage = self.usage.map(|u| {
             json!({
                 "input_tokens": u.input_tokens,
@@ -89,7 +91,7 @@ impl TurnResult {
             })
         });
         json!({
-            "agent": "claude",
+            "agent": agent,
             "session_id": session_id,
             "ok": self.ok,
             "result": self.result,
@@ -100,7 +102,9 @@ impl TurnResult {
 }
 
 /// A session-runtime failure distinct from a turn that merely reported an error
-/// result: the child died, a turn stalled, or it was cancelled mid-flight.
+/// result: the child died, a turn stalled, or it was cancelled mid-flight. Shared
+/// by both the claude (`stream-json`) and codex (`app-server`, DA-5c) drivers, so
+/// the messages are agent-neutral ("delegated session …").
 #[derive(Debug)]
 pub(crate) enum SessionError {
     /// The child process exited (EOF on its stdout) before a turn completed.
@@ -116,16 +120,15 @@ pub(crate) enum SessionError {
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ProcessExited => write!(
-                f,
-                "delegated claude session exited before completing the turn"
-            ),
+            Self::ProcessExited => {
+                write!(f, "delegated session exited before completing the turn")
+            }
             Self::TurnTimedOut => write!(
                 f,
-                "delegated claude turn produced no result within the turn timeout"
+                "delegated turn produced no result within the turn timeout"
             ),
-            Self::Cancelled => write!(f, "delegated claude turn was cancelled"),
-            Self::Io(message) => write!(f, "delegated claude session io error: {message}"),
+            Self::Cancelled => write!(f, "delegated turn was cancelled"),
+            Self::Io(message) => write!(f, "delegated session io error: {message}"),
         }
     }
 }
@@ -700,7 +703,7 @@ mod tests {
             }),
             cost_usd: Some(0.1),
         };
-        let json = turn.to_json("sess-1");
+        let json = turn.to_json("claude", "sess-1");
         assert_eq!(json["agent"], "claude");
         assert_eq!(json["session_id"], "sess-1");
         assert_eq!(json["ok"], true);

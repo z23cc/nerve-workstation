@@ -14,14 +14,69 @@
 //! another steer. The close signal is a `Condvar` the parked start thread waits on.
 
 use crate::delegate_session::DelegateSession;
+use crate::delegate_session_codex::CodexSession;
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 
+/// A live persistent delegate driver — one per protocol. Both variants own a
+/// [`PersistentChild`](crate::sandbox::PersistentChild) and run one turn per
+/// message; this enum lets the [`LiveHandle`] registry hold either without
+/// duplicating the parking/close machinery. Steer/close dispatch to the variant.
+pub(crate) enum LiveDriver {
+    /// claude over `stream-json` (DA-5a/5b).
+    Claude(DelegateSession),
+    /// codex over `app-server` JSON-RPC (DA-5c).
+    Codex(CodexSession),
+}
+
+impl LiveDriver {
+    /// The catalog agent name this driver speaks (for progress events + result
+    /// JSON), so a steer reports the same agent the start did.
+    pub(crate) fn agent(&self) -> &'static str {
+        match self {
+            Self::Claude(_) => "claude",
+            Self::Codex(_) => "codex",
+        }
+    }
+
+    /// The agent's own session handle (claude's `session_id`, codex's thread id) if
+    /// it has been captured at start; otherwise `None` (the caller falls back to the
+    /// start-job id, which is the registry key).
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Claude(session) => session.session_id(),
+            Self::Codex(session) => session.thread_id(),
+        }
+    }
+
+    /// Run one more turn on the live child, forwarding streamed text to
+    /// `on_progress`.
+    fn steer(
+        &mut self,
+        message: &str,
+        cancel: &nerve_core::CancelToken,
+        on_progress: &mut dyn FnMut(&str),
+    ) -> Result<crate::delegate_session::TurnResult, crate::delegate_session::SessionError> {
+        match self {
+            Self::Claude(session) => session.steer(message, cancel, on_progress),
+            Self::Codex(session) => session.steer(message, cancel, on_progress),
+        }
+    }
+
+    /// Tear the child down (close stdin / reap, force-kill on a stuck child).
+    fn close(&mut self) {
+        match self {
+            Self::Claude(session) => session.close(),
+            Self::Codex(session) => session.close(),
+        }
+    }
+}
+
 /// One live delegated session, keyed by the originating `delegate.start` job id.
 pub(crate) struct LiveHandle {
-    /// The live session. `None` once closed/reaped, so a late steer sees a clear
+    /// The live driver. `None` once closed/reaped, so a late steer sees a clear
     /// "closed" error rather than touching a dead child.
-    session: Mutex<Option<DelegateSession>>,
+    session: Mutex<Option<LiveDriver>>,
     /// Set when close (or cancel) is requested; the parked start thread waits on
     /// `close_cv` for it to flip, then tears the session down.
     close_requested: Mutex<bool>,
@@ -29,7 +84,7 @@ pub(crate) struct LiveHandle {
 }
 
 impl LiveHandle {
-    fn new(session: DelegateSession) -> Self {
+    fn new(session: LiveDriver) -> Self {
         Self {
             session: Mutex::new(Some(session)),
             close_requested: Mutex::new(false),
@@ -37,19 +92,31 @@ impl LiveHandle {
         }
     }
 
+    /// The catalog agent name the live driver speaks, or `Err(closed)` if the
+    /// session was already torn down. Fixed for the session's life.
+    pub(crate) fn agent(&self) -> Result<&'static str, LiveError> {
+        crate::sync::lock_recover(&self.session)
+            .as_ref()
+            .map(LiveDriver::agent)
+            .ok_or(LiveError::Closed)
+    }
+
     /// Run one steer turn under the session lock, forwarding assistant text to
     /// `on_progress`. Returns `Err(closed)` if the session was already torn down.
+    /// The turn names whichever agent the live driver speaks.
     pub(crate) fn steer(
         &self,
         message: &str,
         cancel: &nerve_core::CancelToken,
         on_progress: &mut dyn FnMut(&str),
-    ) -> Result<crate::delegate_session::TurnResult, LiveError> {
+    ) -> Result<(crate::delegate_session::TurnResult, &'static str), LiveError> {
         let mut guard = crate::sync::lock_recover(&self.session);
         let session = guard.as_mut().ok_or(LiveError::Closed)?;
-        session
+        let agent = session.agent();
+        let turn = session
             .steer(message, cancel, on_progress)
-            .map_err(|err| LiveError::Session(err.to_string()))
+            .map_err(|err| LiveError::Session(err.to_string()))?;
+        Ok((turn, agent))
     }
 
     /// Signal the parked start thread to close: flip the flag and wake it.
@@ -74,8 +141,8 @@ impl LiveHandle {
     /// Tear the live session down (close stdin / reap, or force-kill on cancel).
     /// Idempotent: a second call finds the session already taken.
     fn shutdown(&self) {
-        if let Some(mut session) = crate::sync::lock_recover(&self.session).take() {
-            session.close();
+        if let Some(mut driver) = crate::sync::lock_recover(&self.session).take() {
+            driver.close();
         }
     }
 }
@@ -110,8 +177,8 @@ pub(crate) struct LiveSessions {
 impl LiveSessions {
     /// Register a freshly-started session under its start-job id, returning the
     /// shared handle the parked thread parks on.
-    pub(crate) fn register(&self, session_id: &str, session: DelegateSession) -> Arc<LiveHandle> {
-        let handle = Arc::new(LiveHandle::new(session));
+    pub(crate) fn register(&self, session_id: &str, driver: LiveDriver) -> Arc<LiveHandle> {
+        let handle = Arc::new(LiveHandle::new(driver));
         crate::sync::lock_recover(&self.sessions)
             .insert(session_id.to_string(), Arc::clone(&handle));
         handle

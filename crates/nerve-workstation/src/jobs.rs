@@ -426,8 +426,9 @@ impl JobManager {
         }
     }
 
-    /// Start a delegated run: a `claude` agent becomes a live, steerable session
-    /// (DA-5a) that parks after turn 1; codex/gemini stay one-shot (DA-2).
+    /// Start a delegated run: a `claude` (DA-5a) or `codex` (DA-5c) agent becomes a
+    /// live, steerable session that parks after turn 1; `gemini` stays one-shot
+    /// (DA-2).
     #[allow(clippy::too_many_arguments)] // reason: one cohesive start call; the agent
     // name, task, cwd, autonomy, and model are independent inputs to the spawn,
     // and bundling them into a struct would add indirection without isolating any
@@ -447,74 +448,135 @@ impl JobManager {
         let root = self.delegate_root()?;
         let run_cwd = delegate_runtime::resolve_delegate_cwd(&root, cwd.as_deref())
             .map_err(delegate_error)?;
-        if resolved == DelegateAgent::Claude {
-            return self.run_delegate_live(job_id, &run_cwd, autonomy, task, model, token);
+        if matches!(resolved, DelegateAgent::Claude | DelegateAgent::Codex) {
+            return self
+                .run_delegate_live(job_id, resolved, &run_cwd, autonomy, task, model, token);
         }
         self.run_delegate(
             job_id, resolved, agent, task, &run_cwd, autonomy, model, token,
         )
     }
 
-    /// Start a live `claude` session: spawn the persistent child, run turn 1
-    /// (streaming progress), register the session, and park the job thread until
-    /// close/cancel. The job stays `running` while parked, so a client can steer
-    /// it. The job result (delivered when it finally closes) is turn 1's outcome.
+    /// Start a live session (claude or codex): spawn the persistent child, run turn
+    /// 1 (streaming progress), register the live driver, and park the job thread
+    /// until close/cancel. The job stays `running` while parked, so a client can
+    /// steer it. The job result (delivered when it finally closes) is turn 1's
+    /// outcome.
+    #[allow(clippy::too_many_arguments)] // reason: one cohesive start call; the
+    // resolved agent, cwd, autonomy, task, and model are independent spawn inputs;
+    // bundling them adds indirection without isolating a responsibility.
     fn run_delegate_live(
         &self,
         job_id: &str,
+        resolved: DelegateAgent,
         cwd: &std::path::Path,
         autonomy: DelegateAutonomy,
         task: &str,
         model: Option<String>,
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
+        let agent = resolved.catalog_name();
         let emit = Arc::clone(&self.emit);
         let job = job_id.to_string();
         let mut on_progress = |text: &str| {
             emit(RuntimeEvent::delegate_progress(
                 job.clone(),
-                "claude",
+                agent,
                 text.to_string(),
             ));
         };
-        // Proxied mode (DA-5b): route claude's `can_use_tool` prompts through the
-        // SAME approval hub the SessionManager resolves `session.respond` against,
-        // keyed by the delegate job id — so the TUI modal and `SessionRespond` reach
-        // delegated tool approvals exactly as they reach agent-tool approvals.
-        let proxy = self.delegate_proxy(job_id);
-        let (session, turn) = DelegateSession::start(
-            self.delegate_launcher.as_ref(),
-            cwd,
-            autonomy,
-            model.as_deref(),
-            task,
-            proxy,
-            token,
-            &mut on_progress,
-        )
-        // A start that fails because the job was cancelled (e.g. cancel arrived
-        // while turn 1 was blocked on a tool approval) maps to `cancelled()` so the
-        // job finishes as `job_cancelled`, not `job_failed`.
-        .map_err(|err| {
-            if token.is_cancelled() {
-                nerve_runtime::RuntimeError::cancelled()
-            } else {
-                delegate_session_error("claude", &err.to_string())
-            }
-        })?;
+        // Proxied mode (DA-5b/5c): route the delegated agent's tool-permission
+        // prompts through the SAME approval hub the SessionManager resolves
+        // `session.respond` against, keyed by the delegate job id — so the TUI modal
+        // and `SessionRespond` reach delegated approvals exactly as they reach
+        // agent-tool approvals.
+        let proxy = self.delegate_proxy(job_id, agent);
+        let (driver, turn) = self
+            .start_live_driver(
+                resolved,
+                cwd,
+                autonomy,
+                task,
+                model,
+                proxy,
+                token,
+                &mut on_progress,
+            )
+            // A start that fails because the job was cancelled (e.g. cancel arrived
+            // while turn 1 was blocked on a tool approval) maps to `cancelled()` so
+            // the job finishes as `job_cancelled`, not `job_failed`.
+            .map_err(|err| {
+                if token.is_cancelled() {
+                    nerve_runtime::RuntimeError::cancelled()
+                } else {
+                    delegate_session_error(agent, &err.to_string())
+                }
+            })?;
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
-        let session_id = session.session_id().unwrap_or(job_id).to_string();
-        let result = turn.to_json(&session_id);
+        let session_id = driver.session_id().unwrap_or(job_id).to_string();
+        let result = turn.to_json(agent, &session_id);
         // Register and park: the session stays live for `delegate.steer` until a
         // `delegate.close` (or cancel) wakes this thread to tear it down.
-        let handle = self.live_sessions.register(job_id, session);
+        let handle = self.live_sessions.register(job_id, driver);
         self.live_sessions.park_until_closed(job_id, &handle);
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
         Ok(result)
+    }
+
+    /// Spawn the right persistent driver for `resolved` and run turn 1, returning the
+    /// live driver wrapper plus the first turn's outcome.
+    #[allow(clippy::too_many_arguments)] // reason: a single spawn call; the inputs are
+    // independent and a struct would add indirection without isolating a concern.
+    fn start_live_driver(
+        &self,
+        resolved: DelegateAgent,
+        cwd: &std::path::Path,
+        autonomy: DelegateAutonomy,
+        task: &str,
+        model: Option<String>,
+        proxy: Option<DelegateProxy>,
+        token: &CancelToken,
+        on_progress: &mut dyn FnMut(&str),
+    ) -> Result<
+        (
+            crate::delegate_live::LiveDriver,
+            crate::delegate_session::TurnResult,
+        ),
+        crate::delegate_session::SessionError,
+    > {
+        let launcher = self.delegate_launcher.as_ref();
+        match resolved {
+            DelegateAgent::Codex => {
+                let (session, turn) = crate::delegate_session_codex::CodexSession::start(
+                    launcher,
+                    cwd,
+                    autonomy,
+                    model.as_deref(),
+                    task,
+                    proxy,
+                    token,
+                    on_progress,
+                )?;
+                Ok((crate::delegate_live::LiveDriver::Codex(session), turn))
+            }
+            _ => {
+                let (session, turn) = DelegateSession::start(
+                    launcher,
+                    cwd,
+                    autonomy,
+                    model.as_deref(),
+                    task,
+                    proxy,
+                    token,
+                    on_progress,
+                )?;
+                Ok((crate::delegate_live::LiveDriver::Claude(session), turn))
+            }
+        }
     }
 
     /// Steer a live delegated session with a follow-up message, streaming this
@@ -530,22 +592,27 @@ impl JobManager {
             .live_sessions
             .get(session_id)
             .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
+        // The progress label is the agent the live driver speaks — fixed for the
+        // session's life, so read it once up front and stream this turn under it.
+        let agent = handle
+            .agent()
+            .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
         let emit = Arc::clone(&self.emit);
         let session = session_id.to_string();
         let mut on_progress = |text: &str| {
             emit(RuntimeEvent::delegate_progress(
                 session.clone(),
-                "claude",
+                agent,
                 text.to_string(),
             ));
         };
-        let turn = handle
+        let (turn, _agent) = handle
             .steer(message, token, &mut on_progress)
             .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
-        Ok(turn.to_json(session_id))
+        Ok(turn.to_json(agent, session_id))
     }
 
     /// Close a live delegated session: request close (the parked start thread then
@@ -557,18 +624,20 @@ impl JobManager {
         Ok(json!({ "session_id": session_id, "closed": true }))
     }
 
-    /// Build the proxied-mode approval bridge (DA-5b) for a delegated `claude`
+    /// Build the proxied-mode approval bridge (DA-5b/5c) for a delegated `agent`
     /// session keyed under its start-job id. The approver is the SessionManager's
     /// `ApprovalHub` — the same hub `session.respond` resolves against — so a
     /// delegated tool prompt rides the existing approval modal + `SessionRespond`
     /// round-trip. A fresh per-session [`DelegateDecisions`] memory backs
-    /// allow-always / deny-always for the life of the session.
-    fn delegate_proxy(&self, job_id: &str) -> Option<DelegateProxy> {
+    /// allow-always / deny-always for the life of the session. The `agent` selects
+    /// the per-agent tool-tier classifier + preview label.
+    fn delegate_proxy(&self, job_id: &str, agent: &str) -> Option<DelegateProxy> {
         let approver: Arc<dyn crate::delegate_proxy::DelegateApprover> = self.sessions.approvals();
-        Some(DelegateProxy::new(
+        Some(DelegateProxy::for_agent(
             approver,
             job_id.to_string(),
             DelegateDecisions::default(),
+            agent,
         ))
     }
 

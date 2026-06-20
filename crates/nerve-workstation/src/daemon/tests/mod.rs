@@ -1,6 +1,8 @@
 mod delegate;
 #[cfg(unix)]
 mod delegate_session;
+#[cfg(unix)]
+mod delegate_session_codex;
 
 use super::router::{RuntimeDaemonRouter, runtime_event_notification};
 use crate::jobs::JobManager;

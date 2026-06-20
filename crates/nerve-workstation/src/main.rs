@@ -15,6 +15,7 @@ mod delegate_live;
 mod delegate_proxy;
 mod delegate_runtime;
 mod delegate_session;
+mod delegate_session_codex;
 mod delegate_tool;
 mod exec_tool;
 mod hooks;

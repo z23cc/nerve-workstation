@@ -72,6 +72,11 @@ pub(crate) struct DelegateProxy {
     approver: Arc<dyn DelegateApprover>,
     session_id: String,
     decisions: DelegateDecisions,
+    /// The catalog agent name (`claude` / `codex`) this proxy serves. Selects the
+    /// tool-tier classifier and names the agent in the approval preview, so a codex
+    /// ask reads "codex wants to run …" and an exec/file-change tier is right per
+    /// agent. Defaults to `claude` for [`Self::new`] (the DA-5b constructor).
+    agent: String,
 }
 
 /// What the reader should do after handling a `can_use_tool` ask: write the built
@@ -84,16 +89,32 @@ pub(crate) struct ProxyResponse {
     pub(crate) interrupted: bool,
 }
 
+/// DA-5c: the codex analog of [`ProxyResponse`]. codex's approval reply is the
+/// `result` body of a JSON-RPC response (`{id,result:{decision}}`), so this carries
+/// only the mapped `decision` string (`accept` / `acceptForSession` / `decline` /
+/// `cancel`) — the caller frames the `{id,result}` envelope. `interrupted` mirrors
+/// [`ProxyResponse`]: a deny under cancel both replies `cancel` and ends the turn.
+pub(crate) struct CodexProxyResponse {
+    /// The `decision` value for the reply's `result` object.
+    pub(crate) decision: String,
+    /// Whether the response also interrupts the turn (a deny while cancelled).
+    pub(crate) interrupted: bool,
+}
+
 impl DelegateProxy {
-    pub(crate) fn new(
+    /// DA-5c: construct a proxy for a specific agent (`claude` / `codex`), selecting
+    /// the per-agent tool-tier classifier and preview label.
+    pub(crate) fn for_agent(
         approver: Arc<dyn DelegateApprover>,
         session_id: String,
         decisions: DelegateDecisions,
+        agent: &str,
     ) -> Self {
         Self {
             approver,
             session_id,
             decisions,
+            agent: agent.to_string(),
         }
     }
 
@@ -139,6 +160,29 @@ impl DelegateProxy {
         }
     }
 
+    /// DA-5c: resolve a codex app-server `*/requestApproval` server-request into the
+    /// `{decision}` payload of the JSON-RPC reply. Unlike [`Self::resolve`] (claude's
+    /// stdout `can_use_tool` → `control_response`), codex sends a JSON-RPC *request*
+    /// (it has an `id` the caller echoes); this builds only the `result` body, and the
+    /// caller frames `{id,result}`. The same [`Self::decide`] machinery is reused, so
+    /// allow-always / deny-always memory and the operator round-trip are identical;
+    /// the decision is mapped to codex's `accept` / `acceptForSession` / `decline`
+    /// vocabulary. A deny under cancel sets `interrupted` so the caller also tears the
+    /// turn down (codex's `cancel` reply).
+    pub(crate) fn resolve_codex(
+        &self,
+        request: &Value,
+        cancel: &CancelToken,
+    ) -> CodexProxyResponse {
+        let (tool, input) = codex_tool_and_input(request);
+        let decision = self.decide(&tool, &input, cancel);
+        let interrupted = !decision.allows() && cancel.is_cancelled();
+        CodexProxyResponse {
+            decision: codex_decision(&decision, interrupted),
+            interrupted,
+        }
+    }
+
     /// Decide the approval for `tool`: a remembered decision wins; otherwise prompt
     /// the operator and record an `AllowAlways` / `DenyAlways` for future asks.
     fn decide(&self, tool: &str, input: &Value, cancel: &CancelToken) -> SessionApprovalDecision {
@@ -149,8 +193,12 @@ impl DelegateProxy {
                 SessionApprovalDecision::Deny
             };
         }
-        let tier = claude_tool_tier(tool);
-        let preview = delegate_preview(tool, input);
+        let tier = if self.agent == "codex" {
+            codex_tool_tier(tool)
+        } else {
+            claude_tool_tier(tool)
+        };
+        let preview = delegate_preview(&self.agent, tool, input);
         let decision = self
             .approver
             .request(&self.session_id, tool, input, tier, preview, cancel);
@@ -203,16 +251,16 @@ fn claude_tool_summary(tool: &str, input: &Value) -> String {
     }
 }
 
-/// Delegate-aware approval preview: "claude wants to run <tool>: <summary>", where
+/// Delegate-aware approval preview: "<agent> wants to run <tool>: <summary>", where
 /// the summary is the tool's salient argument (the command / path / query), so the
 /// modal reads naturally for a delegated tool call rather than a raw JSON dump.
-fn delegate_preview(tool: &str, input: &Value) -> String {
+fn delegate_preview(agent: &str, tool: &str, input: &Value) -> String {
     const MAX: usize = 500;
     let summary = claude_tool_summary(tool, input);
     let rendered = if summary.is_empty() {
-        format!("claude wants to run {tool}")
+        format!("{agent} wants to run {tool}")
     } else {
-        format!("claude wants to run {tool}: {summary}")
+        format!("{agent} wants to run {tool}: {summary}")
     };
     truncate_chars(&rendered, MAX)
 }
@@ -284,6 +332,107 @@ fn string_field(value: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+// ---- DA-5c: codex app-server approval mapping --------------------------------
+
+/// Map a Nerve [`SessionApprovalDecision`] to codex's approval vocabulary. A plain
+/// allow → `accept`; an allow-always → `acceptForSession` (codex remembers it for
+/// the thread); a deny → `decline`, except a deny under cancel → `cancel` so codex
+/// also aborts the turn rather than just skipping the one tool call.
+fn codex_decision(decision: &SessionApprovalDecision, interrupted: bool) -> String {
+    if interrupted {
+        return "cancel".to_string();
+    }
+    match decision {
+        SessionApprovalDecision::Allow => "accept",
+        SessionApprovalDecision::AllowAlways => "acceptForSession",
+        SessionApprovalDecision::Deny | SessionApprovalDecision::DenyAlways => "decline",
+    }
+    .to_string()
+}
+
+/// Derive the (tool-name, input) pair for a codex `*/requestApproval` server-request,
+/// so the approval modal reads naturally and the per-session decision memory keys on
+/// the right family. `item/commandExecution/requestApproval` → a `Bash`-like exec
+/// (the `command` is the salient arg); `item/fileChange/requestApproval` → an `Edit`
+/// (a file mutation). Anything else maps to a generic tool named after the method's
+/// item segment, fail-safe to the exec tier via [`crate::delegate_proxy::codex_tool_tier`].
+fn codex_tool_and_input(request: &Value) -> (String, Value) {
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = request.get("params").cloned().unwrap_or(Value::Null);
+    match method {
+        "item/commandExecution/requestApproval" => {
+            let command = codex_command_text(&params);
+            (
+                "Bash".to_string(),
+                json!({ "command": command, "cwd": params.get("cwd").cloned() }),
+            )
+        }
+        "item/fileChange/requestApproval" => (
+            "Edit".to_string(),
+            json!({ "file_path": codex_change_path(&params) }),
+        ),
+        other => (codex_method_label(other), params),
+    }
+}
+
+/// The command string a codex exec approval is asking about. codex sends `command`
+/// either as a string or an argv array; both render to a single line for the modal.
+fn codex_command_text(params: &Value) -> String {
+    match params.get("command") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
+/// The path a codex file-change approval touches, for the preview. Tries the common
+/// `path` field, falling back to the first entry of a `changes`/`files` list.
+fn codex_change_path(params: &Value) -> String {
+    if let Some(path) = params.get("path").and_then(Value::as_str) {
+        return path.to_string();
+    }
+    for key in ["changes", "files"] {
+        if let Some(first) = params
+            .get(key)
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+        {
+            if let Some(path) = first.as_str() {
+                return path.to_string();
+            }
+            if let Some(path) = first.get("path").and_then(Value::as_str) {
+                return path.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// A readable tool label for an unrecognised codex `*/requestApproval` method (e.g.
+/// `item/permissions/requestApproval` → `permissions`), so the modal names the ask.
+fn codex_method_label(method: &str) -> String {
+    method
+        .strip_suffix("/requestApproval")
+        .and_then(|s| s.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("codex_tool")
+        .to_string()
+}
+
+/// Risk tier for a derived codex approval tool. `Edit` is a file mutation; `Bash`
+/// and everything else (an exec or an unrecognised ask) fail safe to the top tier,
+/// matching [`claude_tool_tier`]'s fail-safe posture.
+fn codex_tool_tier(tool: &str) -> RiskTier {
+    match tool {
+        "Edit" | "Write" => RiskTier::Edit,
+        _ => RiskTier::Exec,
+    }
 }
 
 #[cfg(test)]
@@ -358,10 +507,11 @@ mod tests {
     }
 
     fn proxy(decision: SessionApprovalDecision) -> DelegateProxy {
-        DelegateProxy::new(
+        DelegateProxy::for_agent(
             Arc::new(FixedApprover(decision)),
             "sess-1".to_string(),
             DelegateDecisions::default(),
+            "claude",
         )
     }
 
@@ -423,12 +573,13 @@ mod tests {
             }
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let proxy = DelegateProxy::new(
+        let proxy = DelegateProxy::for_agent(
             Arc::new(CountingApprover {
                 calls: Arc::clone(&calls),
             }),
             "sess-1".to_string(),
             DelegateDecisions::default(),
+            "claude",
         );
         let cancel = CancelToken::never();
         let first = proxy.resolve(&can_use_tool("r1", "Bash", json!({}), "t1"), &cancel);
@@ -466,12 +617,13 @@ mod tests {
             }
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let proxy = DelegateProxy::new(
+        let proxy = DelegateProxy::for_agent(
             Arc::new(CountingApprover {
                 calls: Arc::clone(&calls),
             }),
             "sess-1".to_string(),
             DelegateDecisions::default(),
+            "claude",
         );
         let cancel = CancelToken::never();
         let first = proxy.resolve(&can_use_tool("r1", "Bash", json!({}), "t1"), &cancel);
@@ -490,21 +642,26 @@ mod tests {
     #[test]
     fn delegate_preview_reads_naturally() {
         assert_eq!(
-            delegate_preview("Bash", &json!({ "command": "ls" })),
+            delegate_preview("claude", "Bash", &json!({ "command": "ls" })),
             "claude wants to run Bash: ls"
         );
         assert_eq!(
-            delegate_preview("Edit", &json!({ "file_path": "src/main.rs" })),
+            delegate_preview("claude", "Edit", &json!({ "file_path": "src/main.rs" })),
             "claude wants to run Edit: src/main.rs"
+        );
+        // The agent label flows through, so a codex ask reads as codex.
+        assert_eq!(
+            delegate_preview("codex", "Bash", &json!({ "command": "ls" })),
+            "codex wants to run Bash: ls"
         );
         // A tool with no salient field still names the tool.
         assert_eq!(
-            delegate_preview("UnknownTool", &Value::Null),
+            delegate_preview("claude", "UnknownTool", &Value::Null),
             "claude wants to run UnknownTool"
         );
         // Overlong previews are truncated with an ellipsis.
         let long = "x".repeat(600);
-        let preview = delegate_preview("Bash", &json!({ "command": long }));
+        let preview = delegate_preview("claude", "Bash", &json!({ "command": long }));
         assert_eq!(preview.chars().count(), 501);
         assert!(preview.ends_with('\u{2026}'));
     }
@@ -520,6 +677,180 @@ mod tests {
         // Bash and any unknown / plugin tool fail safe to the top tier.
         for tool in ["Bash", "Task", "mcp__x__y", "BrandNewTool"] {
             assert_eq!(claude_tool_tier(tool), RiskTier::Exec, "{tool}");
+        }
+    }
+
+    // ---- DA-5c: codex approval mapping --------------------------------------
+
+    /// Build a codex `*/requestApproval` server-request envelope (id + method +
+    /// params) like the app-server sends.
+    fn codex_request(id: i64, method: &str, params: Value) -> Value {
+        json!({ "id": id, "method": method, "params": params })
+    }
+
+    fn codex_proxy(decision: SessionApprovalDecision) -> DelegateProxy {
+        DelegateProxy::for_agent(
+            Arc::new(FixedApprover(decision)),
+            "sess-codex".to_string(),
+            DelegateDecisions::default(),
+            "codex",
+        )
+    }
+
+    #[test]
+    fn codex_decision_maps_nerve_to_codex_vocabulary() {
+        assert_eq!(
+            codex_decision(&SessionApprovalDecision::Allow, false),
+            "accept"
+        );
+        assert_eq!(
+            codex_decision(&SessionApprovalDecision::AllowAlways, false),
+            "acceptForSession"
+        );
+        assert_eq!(
+            codex_decision(&SessionApprovalDecision::Deny, false),
+            "decline"
+        );
+        assert_eq!(
+            codex_decision(&SessionApprovalDecision::DenyAlways, false),
+            "decline"
+        );
+        // A deny under interrupt → cancel (aborts the turn, not just the one tool).
+        assert_eq!(
+            codex_decision(&SessionApprovalDecision::Deny, true),
+            "cancel"
+        );
+    }
+
+    #[test]
+    fn codex_tool_and_input_classifies_exec_and_file_change() {
+        let (tool, input) = codex_tool_and_input(&codex_request(
+            7,
+            "item/commandExecution/requestApproval",
+            json!({ "command": ["echo", "hi"], "cwd": "/w" }),
+        ));
+        assert_eq!(tool, "Bash");
+        assert_eq!(input["command"], "echo hi");
+        assert_eq!(codex_tool_tier(&tool), RiskTier::Exec);
+
+        let (tool, input) = codex_tool_and_input(&codex_request(
+            8,
+            "item/fileChange/requestApproval",
+            json!({ "path": "src/main.rs" }),
+        ));
+        assert_eq!(tool, "Edit");
+        assert_eq!(input["file_path"], "src/main.rs");
+        assert_eq!(codex_tool_tier(&tool), RiskTier::Edit);
+
+        // An unrecognised approval method gets a readable label + the safe tier.
+        let (tool, _) = codex_tool_and_input(&codex_request(
+            9,
+            "item/permissions/requestApproval",
+            json!({}),
+        ));
+        assert_eq!(tool, "permissions");
+        assert_eq!(codex_tool_tier(&tool), RiskTier::Exec);
+    }
+
+    #[test]
+    fn codex_change_path_reads_list_shapes() {
+        assert_eq!(
+            codex_change_path(&json!({ "changes": [{ "path": "a.rs" }] })),
+            "a.rs"
+        );
+        assert_eq!(codex_change_path(&json!({ "files": ["b.rs"] })), "b.rs");
+        assert_eq!(codex_change_path(&json!({})), "");
+    }
+
+    #[test]
+    fn resolve_codex_allow_maps_to_accept() {
+        let proxy = codex_proxy(SessionApprovalDecision::Allow);
+        let resp = proxy.resolve_codex(
+            &codex_request(
+                1,
+                "item/commandExecution/requestApproval",
+                json!({ "command": "echo hi" }),
+            ),
+            &CancelToken::never(),
+        );
+        assert!(!resp.interrupted);
+        assert_eq!(resp.decision, "accept");
+    }
+
+    #[test]
+    fn resolve_codex_deny_maps_to_decline_no_interrupt() {
+        let proxy = codex_proxy(SessionApprovalDecision::Deny);
+        let resp = proxy.resolve_codex(
+            &codex_request(2, "item/fileChange/requestApproval", json!({ "path": "x" })),
+            &CancelToken::never(),
+        );
+        assert!(!resp.interrupted);
+        assert_eq!(resp.decision, "decline");
+    }
+
+    #[test]
+    fn resolve_codex_deny_under_cancel_maps_to_cancel_and_interrupts() {
+        let proxy = codex_proxy(SessionApprovalDecision::Deny);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let resp = proxy.resolve_codex(
+            &codex_request(3, "item/commandExecution/requestApproval", json!({})),
+            &cancel,
+        );
+        assert!(resp.interrupted);
+        assert_eq!(resp.decision, "cancel");
+    }
+
+    #[test]
+    fn resolve_codex_allow_always_remembers_and_skips_second_prompt() {
+        struct CountingApprover {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl DelegateApprover for CountingApprover {
+            fn request(
+                &self,
+                _session_id: &str,
+                _tool: &str,
+                _args: &Value,
+                _tier: RiskTier,
+                _preview: String,
+                _cancel: &CancelToken,
+            ) -> SessionApprovalDecision {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                SessionApprovalDecision::AllowAlways
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let proxy = DelegateProxy::for_agent(
+            Arc::new(CountingApprover {
+                calls: Arc::clone(&calls),
+            }),
+            "sess-codex".to_string(),
+            DelegateDecisions::default(),
+            "codex",
+        );
+        let cancel = CancelToken::never();
+        let first = proxy.resolve_codex(
+            &codex_request(1, "item/commandExecution/requestApproval", json!({})),
+            &cancel,
+        );
+        let second = proxy.resolve_codex(
+            &codex_request(2, "item/commandExecution/requestApproval", json!({})),
+            &cancel,
+        );
+        // First → acceptForSession; the remembered allow serves the second as a
+        // plain accept WITHOUT a second prompt.
+        assert_eq!(first.decision, "acceptForSession");
+        assert_eq!(second.decision, "accept");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn codex_tool_tier_classifies_and_fails_safe() {
+        assert_eq!(codex_tool_tier("Edit"), RiskTier::Edit);
+        assert_eq!(codex_tool_tier("Write"), RiskTier::Edit);
+        for tool in ["Bash", "permissions", "anything"] {
+            assert_eq!(codex_tool_tier(tool), RiskTier::Exec, "{tool}");
         }
     }
 }
