@@ -25,6 +25,14 @@ use std::os::unix::fs::PermissionsExt as _;
 /// emits a `commandExecution/requestApproval` server-request, reads back Nerve's
 /// `{id,result:{decision}}` reply (recording it verbatim to `__RECORD__`), and
 /// streams an allowed/declined message accordingly. Stays alive until stdin EOF.
+///
+/// Extra branches for the review-finding tests:
+/// - `NEEDS_PERMS` → emits an `item/permissions/requestApproval` server-request
+///   (finding A): the reply shape must honor a Deny (no `scope:"session"`).
+/// - `TURN_ERR` → answers the `turn/start` request with a JSON-RPC `error` instead
+///   of a `{turn}` result (finding E): the turn must fail fast, not wait 600s.
+/// - any `turn/interrupt` line is recorded verbatim to `__RECORD__` (finding F): the
+///   test asserts the interrupt carries the real (non-empty) `turnId`.
 const FAKE_CODEX: &str = r#"#!/bin/sh
 RECORD="__RECORD__"
 emit() { printf '%s\n' "$1"; }
@@ -45,8 +53,22 @@ while IFS= read -r line; do
     turn/start)
       turn=$((turn + 1))
       text=$(printf '%s' "$line" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p')
+      case "$text" in
+        *TURN_ERR*)
+          # Finding E: a turn/start that errors must fail fast, not loop to timeout.
+          emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"turn start rejected\"}}"
+          continue
+          ;;
+      esac
       emit "{\"id\":$id,\"result\":{\"turn\":{\"id\":\"turn-$turn\"}}}"
       case "$text" in
+        *NEEDS_PERMS*)
+          emit "{\"id\":900$turn,\"method\":\"item/permissions/requestApproval\",\"params\":{\"threadId\":\"codex-thread-1\",\"turnId\":\"turn-$turn\",\"itemId\":\"item-$turn\"}}"
+          IFS= read -r resp
+          printf '%s\n' "$resp" >> "$RECORD"
+          emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"codex-thread-1\",\"turnId\":\"turn-$turn\",\"itemId\":\"item-$turn\",\"delta\":\"perms handled for $text\"}}"
+          emit "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"codex-thread-1\",\"turn\":{\"id\":\"turn-$turn\",\"status\":\"completed\"}}}"
+          ;;
         *NEEDS_TOOL*)
           emit "{\"id\":900$turn,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"codex-thread-1\",\"turnId\":\"turn-$turn\",\"itemId\":\"item-$turn\",\"command\":\"echo hi\",\"cwd\":\"/w\"}}"
           IFS= read -r resp
@@ -70,7 +92,8 @@ while IFS= read -r line; do
       esac
       ;;
     turn/interrupt)
-      : # best-effort; the session is being torn down
+      # Finding F: record the interrupt so the test can assert its turnId is real.
+      printf '%s\n' "$line" >> "$RECORD"
       ;;
     *)
       : # unknown method, ignore
@@ -636,6 +659,115 @@ fn codex_cancel_during_pending_approval_reaps_the_session() {
             .expect("msg")
             .contains("no live delegated session")
     );
+}
+
+#[test]
+fn codex_permission_deny_reply_carries_no_session_scope() {
+    // Finding A: a DENY of a codex `item/permissions/requestApproval` must NOT
+    // become a session-wide grant. The recorded reply must omit `scope:"session"`.
+    let (_fixture, router, output, launcher) =
+        start_permission_session("codex-perms-deny", "NEEDS_PERMS please grant");
+    let approval = wait_for_approval(&output, "codex-perms-deny");
+    // The permissions ask is labeled and gated at the safe (exec) tier.
+    assert_eq!(approval["tool"], "permissions");
+    assert_eq!(approval["tier"], "exec");
+    let request_id = approval["request_id"].as_str().expect("request id");
+
+    // Deny it.
+    respond(&router, &output, "codex-perms-deny", request_id, "deny");
+
+    // The exact reply bytes the fake codex received for the permissions ask: a
+    // non-grant body with NO session scope (its absence is the deny).
+    let received = wait_for_received(&launcher, 1);
+    let reply = &received[0];
+    assert_eq!(reply["id"], json!(9001));
+    assert!(
+        reply["result"].get("scope").is_none(),
+        "a denied permissions reply must not carry a session scope: {reply}"
+    );
+    // The non-grant shape: empty permissions, no auto-review, no scope.
+    assert!(reply["result"]["permissions"].is_object());
+    assert_eq!(reply["result"]["strictAutoReview"], false);
+}
+
+#[test]
+fn codex_turn_start_error_fails_fast() {
+    // Finding E: a `turn/start` RESPONSE carrying an error must fail the turn
+    // immediately rather than looping to the 600s per-turn timeout. The job
+    // completing at all (well within the test budget) is the proof of "fast".
+    let fixture = runtime_with_file();
+    let (router, output) =
+        output_router_with_delegate(Arc::clone(&fixture.runtime), FakeCodexLauncher::new());
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(1),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "codex-turn-err",
+                "command": {
+                    "kind": "delegate.start",
+                    "agent": "codex",
+                    "task": "TURN_ERR boom"
+                }
+            }),
+        ),
+    );
+    let failed = wait_for_job_event(&output, "job_failed", "codex-turn-err");
+    let message = failed["params"]["error"]["message"]
+        .as_str()
+        .expect("error message");
+    assert!(
+        message.contains("turn/start error") || message.contains("turn start rejected"),
+        "{message}"
+    );
+}
+
+#[test]
+fn codex_deny_under_cancel_interrupts_with_real_turn_id() {
+    // Finding F: a deny-under-cancel must send `turn/interrupt` with the REAL turn
+    // id (captured from the approval request / turn/start response), never `""` —
+    // an empty turnId can't match the in-flight turn on real codex.
+    let (_fixture, router, output, launcher) =
+        start_permission_session("codex-cancel-interrupt", "NEEDS_TOOL run bash");
+    // Wait for the pending approval, then cancel WITHOUT responding: the blocked
+    // approval resolves to a deny-under-cancel, which interrupts the turn.
+    wait_for_approval(&output, "codex-cancel-interrupt");
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(2),
+            "runtime/jobs/cancel",
+            json!({ "job_id": "codex-cancel-interrupt" }),
+        ),
+    );
+    wait_for_job_event(&output, "job_cancelled", "codex-cancel-interrupt");
+
+    // The recording holds the decline reply AND the turn/interrupt frame. Find the
+    // interrupt and assert it names the real turn (turn-1), not an empty id.
+    let interrupt = wait_for_interrupt(&launcher);
+    assert_eq!(
+        interrupt["params"]["turnId"], "turn-1",
+        "turn/interrupt must target the real turn: {interrupt}"
+    );
+    assert_eq!(interrupt["method"], "turn/interrupt");
+}
+
+/// Poll the recording for the `turn/interrupt` frame the fake codex received.
+fn wait_for_interrupt(launcher: &Arc<FakeCodexLauncher>) -> Value {
+    for _ in 0..600 {
+        if let Some(frame) = launcher
+            .received()
+            .into_iter()
+            .find(|v| v.get("method") == Some(&json!("turn/interrupt")))
+        {
+            return frame;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("timed out waiting for a recorded turn/interrupt");
 }
 
 /// Close the parked start job and assert its terminal result (turn 1's outcome).

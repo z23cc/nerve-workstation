@@ -75,6 +75,11 @@ pub(crate) struct CodexSession {
     /// The confined working dir, captured at start and reused for every turn's
     /// `cwd` (so a steer needn't re-supply it — it stays on the thread's root).
     cwd: std::path::PathBuf,
+    /// The id of the in-flight turn, captured from the `turn/started`/`turn/start`
+    /// response and from any approval request's params. [`Self::interrupt`] targets
+    /// it so a `turn/interrupt` matches the real turn rather than carrying `""` (an
+    /// empty `turnId` is a no-op — real codex can't match the in-flight turn).
+    current_turn_id: String,
     /// DA-5b analog: when present, the child runs proxied (approvalPolicy
     /// `untrusted` + approvalsReviewer `user`) and `requestApproval` server-requests
     /// route through this proxy. `None` keeps the autonomy-driven sandbox mode.
@@ -109,6 +114,7 @@ impl CodexSession {
             next_id: 1,
             thread_id: String::new(),
             cwd: cwd.to_path_buf(),
+            current_turn_id: String::new(),
             proxy,
         };
         match session.boot(autonomy, model, first_message, cancel, on_progress) {
@@ -203,6 +209,9 @@ impl CodexSession {
             "input": [{ "type": "text", "text": message, "text_elements": [] }],
             "cwd": self.cwd.display().to_string(),
         });
+        // Start this turn with no known id; it is captured from the turn/start
+        // response (or an approval request) so a cancel/interrupt targets it.
+        self.current_turn_id.clear();
         let turn_req_id = self.send_request("turn/start", params)?;
         self.read_turn(turn_req_id, cancel, on_progress)
     }
@@ -221,12 +230,12 @@ impl CodexSession {
         let deadline = Instant::now() + TURN_TIMEOUT;
         loop {
             if cancel.is_cancelled() {
-                self.interrupt(&acc.turn_id);
+                self.interrupt();
                 return Err(SessionError::Cancelled);
             }
             match self.child.lines().recv_timeout(POLL_INTERVAL) {
                 Ok(raw) => {
-                    match self.ingest_line(&raw, turn_req_id, &mut acc, cancel, on_progress) {
+                    match self.ingest_line(&raw, turn_req_id, &mut acc, cancel, on_progress)? {
                         LineOutcome::Done => return Ok(acc.finish()),
                         LineOutcome::Interrupted => return Err(SessionError::Cancelled),
                         LineOutcome::Continue => {}
@@ -252,26 +261,41 @@ impl CodexSession {
         acc: &mut TurnAccumulator,
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(&str),
-    ) -> LineOutcome {
+    ) -> Result<LineOutcome, SessionError> {
         let Ok(value) = serde_json::from_str::<Value>(raw) else {
-            return LineOutcome::Continue;
+            return Ok(LineOutcome::Continue);
         };
         match classify(&value) {
             Inbound::Response { id } => {
                 // The turn/start response carries the turn id; other responses
                 // (none expected mid-turn) are ignored.
                 if id == turn_req_id {
+                    // A turn/start that itself errored must fail fast rather than
+                    // looping to the per-turn timeout.
+                    if let Some(error) = value.get("error") {
+                        return Err(SessionError::Io(format!("codex turn/start error: {error}")));
+                    }
                     acc.capture_turn_id(&value);
+                    self.capture_turn_id(&acc.turn_id);
                 }
-                LineOutcome::Continue
+                Ok(LineOutcome::Continue)
             }
             Inbound::ServerRequest { id, method } => {
-                self.handle_server_request(id, &method, &value, cancel)
+                Ok(self.handle_server_request(id, &method, &value, cancel))
             }
             Inbound::Notification { method } => {
-                acc.ingest_notification(&method, &value, on_progress)
+                Ok(acc.ingest_notification(&method, &value, on_progress))
             }
-            Inbound::Unknown => LineOutcome::Continue,
+            Inbound::Unknown => Ok(LineOutcome::Continue),
+        }
+    }
+
+    /// Record the in-flight turn id (from the turn/start response or an approval
+    /// request's params) so [`Self::interrupt`] targets the real turn. Ignores an
+    /// empty id so a later concrete id is not overwritten by a blank one.
+    fn capture_turn_id(&mut self, turn_id: &str) {
+        if !turn_id.is_empty() {
+            self.current_turn_id = turn_id.to_string();
         }
     }
 
@@ -302,6 +326,16 @@ impl CodexSession {
         request: &Value,
         cancel: &CancelToken,
     ) -> LineOutcome {
+        // The approval request names the turn it belongs to; capture it so a
+        // deny-under-cancel interrupt targets the real turn even if the approval
+        // arrived before the turn/start response was processed.
+        if let Some(turn_id) = request
+            .get("params")
+            .and_then(|p| p.get("turnId"))
+            .and_then(Value::as_str)
+        {
+            self.capture_turn_id(turn_id);
+        }
         let Some(proxy) = self.proxy.as_ref() else {
             // No approver wired (autonomy mode) — codex shouldn't ask, but if it
             // does, decline safely rather than blocking.
@@ -311,18 +345,20 @@ impl CodexSession {
         let response = proxy.resolve_codex(request, cancel);
         let _ = self.reply(id, approval_result(method, &response.decision));
         if response.interrupted {
-            self.interrupt("");
+            self.interrupt();
             return LineOutcome::Interrupted;
         }
         LineOutcome::Continue
     }
 
-    /// Send `turn/interrupt` for the in-flight turn (best effort).
-    pub(crate) fn interrupt(&self, turn_id: &str) {
+    /// Send `turn/interrupt` for the in-flight turn (best effort). Targets the
+    /// captured `current_turn_id` so real codex can match the running turn; a blank
+    /// id (no turn started yet) is a no-op on codex's side either way.
+    pub(crate) fn interrupt(&self) {
         let frame = json!({
             "id": -1,
             "method": "turn/interrupt",
-            "params": { "threadId": self.thread_id, "turnId": turn_id },
+            "params": { "threadId": self.thread_id, "turnId": self.current_turn_id },
         });
         let _ = self.child.write_line(&format!("{frame}\n"));
     }

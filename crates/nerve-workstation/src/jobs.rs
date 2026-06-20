@@ -491,7 +491,7 @@ impl JobManager {
         // and `SessionRespond` reach delegated approvals exactly as they reach
         // agent-tool approvals.
         let proxy = self.delegate_proxy(job_id, agent);
-        let (driver, turn) = self
+        let (mut driver, turn) = self
             .start_live_driver(
                 resolved,
                 cwd,
@@ -513,6 +513,10 @@ impl JobManager {
                 }
             })?;
         if token.is_cancelled() {
+            // Cancel landed between turn-1 success and registration: the live child
+            // is spawned but not yet registered/parked, so reap it here — a bare drop
+            // does NOT kill the process group. Mirrors the close path's teardown.
+            driver.close();
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
         let session_id = driver.session_id().unwrap_or(job_id).to_string();
@@ -608,7 +612,17 @@ impl JobManager {
         };
         let (turn, _agent) = handle
             .steer(message, token, &mut on_progress)
-            .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
+            .map_err(|err| {
+                // A steer interrupted in flight (the steer job's own cancel, OR a
+                // session-scoped close that interrupted this turn) tears the session
+                // down; report it as a cancellation so the job finishes `job_cancelled`,
+                // not `job_failed` — even when the steer job's own token didn't fire.
+                if err.is_cancellation() || token.is_cancelled() {
+                    nerve_runtime::RuntimeError::cancelled()
+                } else {
+                    nerve_runtime::RuntimeError::adapter(err.to_string())
+                }
+            })?;
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }

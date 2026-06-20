@@ -183,15 +183,37 @@ fn autonomy_sandbox(autonomy: DelegateAutonomy) -> &'static str {
 /// The `result` body of an approval reply. The decision rides under the shape the
 /// approval method expects: command/file-change use `{decision}`; permission asks
 /// use a permissions/scope object; a generic ask still carries `{decision}`.
+///
+/// A permission ask MUST honor the operator's decision: only an accept variant
+/// (`accept` / `acceptForSession`) emits the session-scoped grant; a `decline` /
+/// `cancel` replies with a non-grant body that never carries `scope:"session"`, so
+/// an operator Deny can't be silently turned into a session-wide grant.
 pub(super) fn approval_result(method: &str, decision: &str) -> Value {
     match method {
-        "item/permissions/requestApproval" => json!({
-            "permissions": {},
-            "scope": "session",
-            "strictAutoReview": false,
-        }),
+        "item/permissions/requestApproval" => {
+            if is_accept_decision(decision) {
+                json!({
+                    "permissions": {},
+                    "scope": "session",
+                    "strictAutoReview": false,
+                })
+            } else {
+                // A denied permission ask: no grant, and crucially no
+                // `scope:"session"` — the absence of a session grant is the deny.
+                json!({
+                    "permissions": {},
+                    "strictAutoReview": false,
+                })
+            }
+        }
         _ => json!({ "decision": decision }),
     }
+}
+
+/// Whether a mapped codex decision is an accept variant. Only these grant the
+/// session-scoped permission reply; `decline` / `cancel` (and anything else) do not.
+fn is_accept_decision(decision: &str) -> bool {
+    matches!(decision, "accept" | "acceptForSession")
 }
 
 /// A minimal safe reply for an unrecognised server-request (e.g.
@@ -359,11 +381,27 @@ mod tests {
             approval_result("item/fileChange/requestApproval", "decline"),
             json!({ "decision": "decline" })
         );
-        // A permissions ask gets the permissions/scope shape, not {decision}.
-        let perm = approval_result("item/permissions/requestApproval", "decline");
-        assert_eq!(perm["scope"], "session");
-        assert_eq!(perm["strictAutoReview"], false);
-        assert!(perm["permissions"].is_object());
+        // A DENIED permissions ask must NOT carry the session grant: no
+        // `scope:"session"` (its absence is the deny). A Deny that became a
+        // session-wide grant was the approval-bypass bug.
+        let perm_deny = approval_result("item/permissions/requestApproval", "decline");
+        assert!(
+            perm_deny.get("scope").is_none(),
+            "a denied permission reply must not carry a scope: {perm_deny}"
+        );
+        assert_eq!(perm_deny["strictAutoReview"], false);
+        assert!(perm_deny["permissions"].is_object());
+        // A `cancel` deny is likewise non-granting.
+        let perm_cancel = approval_result("item/permissions/requestApproval", "cancel");
+        assert!(perm_cancel.get("scope").is_none(), "{perm_cancel}");
+
+        // An ACCEPTED permissions ask DOES carry the session-scoped grant.
+        for accept in ["accept", "acceptForSession"] {
+            let perm = approval_result("item/permissions/requestApproval", accept);
+            assert_eq!(perm["scope"], "session", "{accept}");
+            assert_eq!(perm["strictAutoReview"], false);
+            assert!(perm["permissions"].is_object());
+        }
     }
 
     #[test]

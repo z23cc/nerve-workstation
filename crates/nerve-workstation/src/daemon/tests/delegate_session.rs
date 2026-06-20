@@ -18,6 +18,12 @@ use std::os::unix::fs::PermissionsExt as _;
 /// The fake-claude script body: emit an init line, then for each stream-json user
 /// line read from stdin, echo the message text as an assistant line and a result
 /// line, and stay alive (the `read` loop ends only on EOF → graceful exit).
+///
+/// A message containing `HANG` emits the assistant progress line but then NEVER
+/// emits a `result` — it blocks reading further stdin (the in-flight turn). The
+/// turn ends only when Nerve interrupts/closes it (findings C/D), so this drives
+/// the "close/cancel interrupts an in-flight steer + tears the session down" path
+/// without waiting out the 600s per-turn timeout.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 printf '{"type":"system","subtype":"init","session_id":"fake-sess-1"}\n'
 turn=0
@@ -25,6 +31,14 @@ while IFS= read -r line; do
   turn=$((turn + 1))
   msg=$(printf '%s' "$line" | sed 's/.*"text":"\([^"]*\)".*/\1/')
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":"got %s"}]}}\n' "$msg"
+  case "$msg" in
+    *HANG*)
+      # In-flight turn: stream progress but never complete; wait for the interrupt
+      # control_request (or stdin EOF on close) instead of emitting a result.
+      while IFS= read -r _; do : ; done
+      exit 0
+      ;;
+  esac
   printf '{"type":"result","subtype":"success","is_error":false,"result":"reply to %s","session_id":"fake-sess-1","num_turns":%s,"total_cost_usd":0.001,"usage":{"input_tokens":5,"output_tokens":3}}\n' "$msg" "$turn"
 done
 "#;
@@ -466,6 +480,149 @@ fn live_session_cancel_reaps_and_marks_cancelled() {
             .expect("msg")
             .contains("no live delegated session")
     );
+}
+
+#[test]
+fn steer_cancel_interrupts_in_flight_turn_and_tears_down_session() {
+    // Finding C/D: cancelling the STEER job during an in-flight (HANG) turn must
+    // interrupt it promptly (not after the 600s turn timeout) and tear the session
+    // down — a subsequent steer then errors "no live delegated session".
+    let fixture = runtime_with_file();
+    let (router, output) =
+        output_router_with_delegate(Arc::clone(&fixture.runtime), FakeClaudeLauncher::new());
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(1),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "live-steer-cancel",
+                "command": { "kind": "delegate.start", "agent": "claude", "task": "first" }
+            }),
+        ),
+    );
+    wait_for_progress_containing(&output, "live-steer-cancel", "got first");
+
+    // Start a steer that hangs (no result), then cancel the steer job. The steer's
+    // own per-turn token must interrupt the in-flight turn promptly.
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(2),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "steer-hang",
+                "command": {
+                    "kind": "delegate.steer",
+                    "session_id": "live-steer-cancel",
+                    "message": "HANG please"
+                }
+            }),
+        ),
+    );
+    wait_for_progress_containing(&output, "live-steer-cancel", "got HANG please");
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(3),
+            "runtime/jobs/cancel",
+            json!({ "job_id": "steer-hang" }),
+        ),
+    );
+    // The steer job goes terminal promptly (completing at all proves it didn't wait
+    // out the 600s turn timeout).
+    wait_for_job_event(&output, "job_cancelled", "steer-hang");
+
+    // The session was torn down by the interrupted steer: a later steer errors.
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(4),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "steer-after-teardown",
+                "command": {
+                    "kind": "delegate.steer",
+                    "session_id": "live-steer-cancel",
+                    "message": "still there?"
+                }
+            }),
+        ),
+    );
+    let failed = wait_for_job_event(&output, "job_failed", "steer-after-teardown");
+    assert!(
+        failed["params"]["error"]["message"]
+            .as_str()
+            .expect("msg")
+            .contains("no live delegated session"),
+        "{failed}"
+    );
+}
+
+#[test]
+fn close_during_in_flight_steer_interrupts_promptly_and_finishes_start_job() {
+    // Finding C: a `delegate.close` (firing the session-scoped cancel) while a steer
+    // turn is in flight must interrupt that turn promptly — the steer job finishes
+    // and the parked start job goes terminal, rather than the close waiting on the
+    // steer's session lock until the 600s turn timeout.
+    let fixture = runtime_with_file();
+    let (router, output) =
+        output_router_with_delegate(Arc::clone(&fixture.runtime), FakeClaudeLauncher::new());
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(1),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "live-close-steer",
+                "command": { "kind": "delegate.start", "agent": "claude", "task": "first" }
+            }),
+        ),
+    );
+    wait_for_progress_containing(&output, "live-close-steer", "got first");
+
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(2),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "steer-hang-2",
+                "command": {
+                    "kind": "delegate.steer",
+                    "session_id": "live-close-steer",
+                    "message": "HANG forever"
+                }
+            }),
+        ),
+    );
+    wait_for_progress_containing(&output, "live-close-steer", "got HANG forever");
+
+    // Close the SESSION (start-job id) while the steer turn is in flight: the
+    // session-scoped cancel fans into the steer's combined token and interrupts it.
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(3),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "close-steer",
+                "command": { "kind": "delegate.close", "session_id": "live-close-steer" }
+            }),
+        ),
+    );
+    // The close job and the interrupted steer both go terminal, and the parked start
+    // job finishes — none waits out the 600s timeout.
+    wait_for_job_event(&output, "job_completed", "close-steer");
+    wait_for_job_event(&output, "job_cancelled", "steer-hang-2");
+    wait_for_job_event(&output, "job_completed", "live-close-steer");
 }
 
 #[test]

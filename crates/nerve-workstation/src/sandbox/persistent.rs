@@ -109,6 +109,14 @@ impl PersistentChild {
     pub(crate) fn has_exited(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }
+
+    /// The child's pid (== its process-group id, since it is spawned with
+    /// `process_group(0)`). Test-only: lets a reaping test assert the whole group is
+    /// gone after a close/kill rather than leaked.
+    #[cfg(test)]
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
 }
 
 /// Read `reader` line by line, forwarding each newline-terminated line (terminator
