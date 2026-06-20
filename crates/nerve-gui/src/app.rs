@@ -1,18 +1,19 @@
-//! G2 chat surface: a multi-turn `session.*` chat over `/rpc` + `/events`.
+//! Chat surface (G2) + approvals & model picker (G3): a multi-turn `session.*`
+//! chat over `/rpc` + `/events`.
 //!
 //! The composer starts a session on first send, streams the assistant turn from
 //! the SSE `/events` stream (deserialized into the EXACT `nerve_proto` types —
 //! the single protocol authority), renders markdown + reasoning + tool cards,
-//! and offers a Stop button (`session.interrupt`) while a turn is in flight.
-//! Original styling; the full Codex polish + sidebar/model picker are G3/G4.
+//! routes the agent's `approval_requested` through a modal (`session.respond`),
+//! and exposes a provider/model picker (`session.set_model` on a live session).
+//! Original styling; the full Codex polish + the flip to `/` are G4.
 
 use crate::rpc::{daemon_token, open_events, start_job};
 use leptos::prelude::*;
 use nerve_proto::{AgentEventKind, RuntimeEvent};
 use serde_json::json;
 
-/// Defaults for `session.start`. The model/provider picker is a G3 surface; for
-/// now the chat starts a sensible default session and the engine can override.
+/// Defaults for `session.start` (editable in the picker).
 const DEFAULT_PROVIDER: &str = "claude";
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
@@ -30,8 +31,7 @@ struct ToolCard {
     output: String,
 }
 
-/// One conversation turn. Assistant turns stream: text/reasoning/tools fill in
-/// as `SessionAgent` events arrive; `streaming` clears on idle/interrupt.
+/// One conversation turn. Assistant turns stream as `SessionAgent` events arrive.
 #[derive(Clone)]
 struct Turn {
     role: Role,
@@ -62,21 +62,32 @@ impl Turn {
     }
 }
 
+/// A pending tool-permission decision surfaced by the agent.
+#[derive(Clone)]
+struct ApprovalReq {
+    request_id: String,
+    tool: String,
+    preview: String,
+    tier: String,
+}
+
 #[component]
 pub fn App() -> impl IntoView {
-    // `StoredValue` so the (non-Copy) token can be captured by multiple handlers.
     let token = StoredValue::new(daemon_token());
     let conversation = RwSignal::new(Vec::<Turn>::new());
     let session = RwSignal::new(None::<String>);
     let streaming = RwSignal::new(false);
     let input = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
+    let approval = RwSignal::new(None::<ApprovalReq>);
+    let provider = RwSignal::new(DEFAULT_PROVIDER.to_string());
+    let model = RwSignal::new(DEFAULT_MODEL.to_string());
 
     // Open the SSE stream once (app lifetime); route events into the signals.
     Effect::new(move |_| {
         if let Some(tok) = token.get_value() {
             let _ = open_events(&tok, move |event| {
-                route_event(event, session, conversation, streaming);
+                route_event(event, session, conversation, streaming, approval);
             });
         } else {
             error.set(Some(
@@ -98,8 +109,9 @@ pub fn App() -> impl IntoView {
             c.push(Turn::assistant_streaming());
         });
         streaming.set(true);
+        let (prov, mdl) = (provider.get_untracked(), model.get_untracked());
         leptos::task::spawn_local(async move {
-            let session_id = match ensure_session(&tok, session).await {
+            let session_id = match ensure_session(&tok, session, &prov, &mdl).await {
                 Ok(id) => id,
                 Err(err) => return finish_with_error(conversation, streaming, error, err),
             };
@@ -121,11 +133,24 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let apply_model = move || {
+        let Some(tok) = token.get_value() else { return };
+        let Some(session_id) = session.get_untracked() else {
+            return;
+        };
+        let (prov, mdl) = (provider.get_untracked(), model.get_untracked());
+        leptos::task::spawn_local(async move {
+            let cmd = json!({"kind": "session.set_model", "session_id": session_id, "provider": prov, "model": mdl});
+            let _ = start_job(&tok, cmd).await;
+        });
+    };
+
     let new_chat = move |_| {
         conversation.set(Vec::new());
         session.set(None);
         streaming.set(false);
         error.set(None);
+        approval.set(None);
     };
 
     view! {
@@ -144,6 +169,22 @@ pub fn App() -> impl IntoView {
                 </div>
             </aside>
             <main class="main chat">
+                <div class="topbar">
+                    <div class="picker">
+                        <input class="pick-in" prop:value=move || provider.get()
+                            on:input=move |ev| provider.set(event_target_value(&ev)) title="provider" />
+                        <span class="pick-sep">"/"</span>
+                        <input class="pick-in wide" prop:value=move || model.get()
+                            on:input=move |ev| model.set(event_target_value(&ev)) title="model" />
+                        {move || session.get().map(|_| view! {
+                            <button class="pick-apply" title="apply to live session (session.set_model)"
+                                on:click=move |_| apply_model()>"set"</button>
+                        })}
+                    </div>
+                    <div class="topbar-id">
+                        {move || session.get().map(|id| view! { <span class="sid">"#"{id}</span> })}
+                    </div>
+                </div>
                 <div class="transcript">
                     {move || {
                         let turns = conversation.get();
@@ -180,16 +221,78 @@ pub fn App() -> impl IntoView {
                     }}
                 </div>
             </main>
+            {move || approval.get().map(|req| view! {
+                <ApprovalModal req=req token=token session=session approval=approval />
+            })}
         </div>
     }
 }
 
+/// The approval overlay: shows the pending tool call and routes the decision
+/// back via `session.respond`.
+#[component]
+fn ApprovalModal(
+    req: ApprovalReq,
+    token: StoredValue<Option<String>>,
+    session: RwSignal<Option<String>>,
+    approval: RwSignal<Option<ApprovalReq>>,
+) -> impl IntoView {
+    let decide = move |decision: &'static str| respond(token, session, approval, decision);
+    view! {
+        <div class="modal-scrim">
+            <div class="modal">
+                <div class="modal-head">
+                    <span class="modal-title">"Allow "<b>{req.tool.clone()}</b></span>
+                    <span class=format!("tier {}", req.tier.to_lowercase())>{req.tier.clone()}</span>
+                </div>
+                {(!req.preview.is_empty()).then(|| view! { <pre class="modal-preview">{req.preview.clone()}</pre> })}
+                <div class="modal-actions">
+                    <button class="btn allow" on:click=move |_| decide("allow")>"Allow"</button>
+                    <button class="btn" on:click=move |_| decide("allow_always")>"Always"</button>
+                    <button class="btn" on:click=move |_| decide("deny")>"Deny"</button>
+                    <button class="btn danger" on:click=move |_| decide("deny_always")>"Deny always"</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// Send a `session.respond` decision and clear the modal.
+fn respond(
+    token: StoredValue<Option<String>>,
+    session: RwSignal<Option<String>>,
+    approval: RwSignal<Option<ApprovalReq>>,
+    decision: &'static str,
+) {
+    let req = approval.get_untracked();
+    approval.set(None);
+    let (Some(tok), Some(session_id), Some(req)) =
+        (token.get_value(), session.get_untracked(), req)
+    else {
+        return;
+    };
+    leptos::task::spawn_local(async move {
+        let cmd = json!({
+            "kind": "session.respond",
+            "session_id": session_id,
+            "request_id": req.request_id,
+            "decision": decision,
+        });
+        let _ = start_job(&tok, cmd).await;
+    });
+}
+
 /// Return the live session id, starting one (`session.start`) if needed.
-async fn ensure_session(token: &str, session: RwSignal<Option<String>>) -> Result<String, String> {
+async fn ensure_session(
+    token: &str,
+    session: RwSignal<Option<String>>,
+    provider: &str,
+    model: &str,
+) -> Result<String, String> {
     if let Some(id) = session.get_untracked() {
         return Ok(id);
     }
-    let cmd = json!({"kind": "session.start", "provider": DEFAULT_PROVIDER, "model": DEFAULT_MODEL});
+    let cmd = json!({"kind": "session.start", "provider": provider, "model": model});
     let result = start_job(token, cmd)
         .await
         .map_err(|err| format!("session.start: {err}"))?;
@@ -222,15 +325,16 @@ fn finish_with_error(
     error.set(Some(message));
 }
 
-/// Route one `RuntimeEvent` from the SSE stream into the conversation, scoped to
-/// the active session.
+/// Route one `RuntimeEvent` from the SSE stream, scoped to the active session.
 fn route_event(
     event: RuntimeEvent,
     session: RwSignal<Option<String>>,
     conversation: RwSignal<Vec<Turn>>,
     streaming: RwSignal<bool>,
+    approval: RwSignal<Option<ApprovalReq>>,
 ) {
     let current = session.get_untracked();
+    let matches = |sid: &str| current.as_deref() == Some(sid);
     match event {
         RuntimeEvent::SessionStarted { session_id } => {
             if current.is_none() {
@@ -238,7 +342,7 @@ fn route_event(
             }
         }
         RuntimeEvent::SessionIdle { session_id } => {
-            if current.as_deref() == Some(session_id.as_str()) {
+            if matches(&session_id) {
                 streaming.set(false);
                 conversation.update(|c| {
                     if let Some(turn) = c.last_mut() {
@@ -248,13 +352,30 @@ fn route_event(
             }
         }
         RuntimeEvent::SessionClosed { session_id } => {
-            if current.as_deref() == Some(session_id.as_str()) {
+            if matches(&session_id) {
                 streaming.set(false);
             }
         }
         RuntimeEvent::SessionAgent { session_id, event } => {
-            if current.as_deref() == Some(session_id.as_str()) {
+            if matches(&session_id) {
                 apply_agent_event(event, conversation, streaming);
+            }
+        }
+        RuntimeEvent::ApprovalRequested {
+            session_id,
+            request_id,
+            tool,
+            preview,
+            tier,
+            ..
+        } => {
+            if matches(&session_id) {
+                approval.set(Some(ApprovalReq {
+                    request_id,
+                    tool,
+                    preview,
+                    tier: format!("{tier:?}"),
+                }));
             }
         }
         _ => {}
@@ -367,7 +488,7 @@ fn render_tool(card: ToolCard) -> AnyView {
 }
 
 /// Render markdown to sanitized HTML: raw inline/block HTML in model output is
-/// downgraded to escaped text (no script injection), code is escaped by the
+/// downgraded to escaped text (no script injection); code is escaped by the
 /// writer. Loopback-only, but defense-in-depth regardless.
 fn markdown_to_html(src: &str) -> String {
     use pulldown_cmark::{Event, Options, Parser, html};
