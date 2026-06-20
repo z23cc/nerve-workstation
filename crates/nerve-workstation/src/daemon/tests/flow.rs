@@ -382,6 +382,93 @@ fn flow_close_marks_flow_closed() {
 }
 
 #[test]
+fn flow_steer_unknown_flow_errors() {
+    // flow.steer routes through the full protocol path (parse → executor → flow
+    // engine); an unknown flow id fails the steer job with a clear message.
+    let fixture = runtime_with_file();
+    let (router, output) = flow_router(Arc::clone(&fixture.runtime), FakeClaudeLauncher::new());
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(1),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "steer-missing",
+                "command": {
+                    "kind": "flow.steer",
+                    "flow_id": "nope",
+                    "message": "go"
+                }
+            }),
+        ),
+    );
+    let failed = wait_for_job_event(&output, "job_failed", "steer-missing");
+    assert!(
+        failed["params"]["error"]["message"]
+            .as_str()
+            .expect("msg")
+            .contains("nope")
+    );
+}
+
+#[test]
+fn flow_steer_finished_flow_errors_cleanly() {
+    // A flow that has already finished has no live frontier; steering it fails with
+    // a clear "finished" message rather than touching a dead session.
+    let fixture = runtime_with_file();
+    let (router, output) = flow_router(Arc::clone(&fixture.runtime), FakeClaudeLauncher::new());
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(1),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "flow-fin",
+                "command": {
+                    "kind": "flow.start",
+                    "workflow": {
+                        "schema_version": 1,
+                        "name": "single",
+                        "strategy": {
+                            "type": "single",
+                            "step": { "worker": { "kind": "cli", "name": "claude" }, "task": "go" }
+                        }
+                    }
+                }
+            }),
+        ),
+    );
+    wait_for_job_event(&output, "job_completed", "flow-fin");
+
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(2),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "steer-fin",
+                "command": {
+                    "kind": "flow.steer",
+                    "flow_id": "flow-fin",
+                    "message": "more please"
+                }
+            }),
+        ),
+    );
+    let failed = wait_for_job_event(&output, "job_failed", "steer-fin");
+    assert!(
+        failed["params"]["error"]["message"]
+            .as_str()
+            .expect("msg")
+            .contains("finished"),
+        "a finished flow is not steerable: {failed}"
+    );
+}
+
+#[test]
 fn flow_respond_to_unknown_request_is_a_noop_response() {
     // flow.respond reuses the ApprovalHub round-trip keyed by flow_id; responding to
     // a request that is not pending resolves to `responded: false` (no panic, no new

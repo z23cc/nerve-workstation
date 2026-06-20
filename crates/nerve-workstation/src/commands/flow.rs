@@ -161,6 +161,7 @@ fn strategy_label(strategy: &Strategy) -> &'static str {
     match strategy {
         Strategy::Single { .. } => "single",
         Strategy::Parallel { .. } => "parallel",
+        Strategy::Pipeline { .. } => "pipeline",
         _ => "experimental-strategy",
     }
 }

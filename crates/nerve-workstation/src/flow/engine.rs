@@ -73,6 +73,7 @@ pub(crate) fn step(state: &FlowState, def: &WorkflowDef) -> Vec<Action> {
     match &def.strategy {
         Strategy::Single { .. } => step_single(state),
         Strategy::Parallel { branches, join } => step_parallel(state, branches.len(), *join),
+        Strategy::Pipeline { stages } => step_pipeline(state, stages),
         // Defined-ahead strategies (design §3, C5): not yet interpreted. Terminate
         // deterministically with an explanatory outcome rather than diverging.
         other => vec![
@@ -146,6 +147,84 @@ fn step_parallel(state: &FlowState, branch_count: usize, join: nerve_runtime::Jo
     // Declared-order fold (results were collected in branch-index order).
     let outcome = fold_results(results, join);
     vec![Action::Emit { outcome }, Action::Terminate]
+}
+
+/// `Pipeline`: run stages SEQUENTIALLY (design §3). Stage N is dispatched only
+/// after stage N-1 has a recorded result in `state` (which the driver fills from
+/// the ledger), so a downstream stage always reads its upstream outputs from the
+/// blackboard. The fold is the LAST stage's result (the pipeline's "answer"), with
+/// every stage result kept in declared order for inspection; a failed stage aborts
+/// the pipeline early (its [`Step::on_fail`](nerve_runtime::Step) is honored by the
+/// driver — a `Continue` stage records `ok=false` and the engine still advances).
+fn step_pipeline(state: &FlowState, stages: &[nerve_runtime::Step]) -> Vec<Action> {
+    if stages.is_empty() {
+        return vec![
+            Action::Emit {
+                outcome: FlowOutcome {
+                    ok: false,
+                    results: Vec::new(),
+                    summary: "pipeline: no stages".to_string(),
+                },
+            },
+            Action::Terminate,
+        ];
+    }
+    // Walk the declared stages in order. The first not-yet-finished stage is the
+    // current frontier: dispatch it if undispatched, else wait for its result.
+    let mut completed: Vec<TurnResult> = Vec::with_capacity(stages.len());
+    for index in 0..stages.len() {
+        let node = NodeId::stage(index);
+        match state.result(&node) {
+            Some(result) => {
+                let failed = !result.ok;
+                completed.push(result.clone());
+                if failed {
+                    // A failed stage short-circuits the pipeline: fold what ran.
+                    return vec![
+                        Action::Emit {
+                            outcome: pipeline_outcome(completed),
+                        },
+                        Action::Terminate,
+                    ];
+                }
+            }
+            None if state.is_dispatched(&node) => return Vec::new(), // running; wait
+            None => {
+                return vec![Action::StartWorker {
+                    node,
+                    step_index: index,
+                }];
+            }
+        }
+    }
+    // Every stage finished ok: the last stage is the answer.
+    vec![
+        Action::Emit {
+            outcome: pipeline_outcome(completed),
+        },
+        Action::Terminate,
+    ]
+}
+
+/// Fold the recorded pipeline stage results (in declared order) into a
+/// [`FlowOutcome`]: ok iff the LAST recorded stage is ok, the kept results are all
+/// stages that ran, and the summary reports how far the pipeline got.
+fn pipeline_outcome(results: Vec<TurnResult>) -> FlowOutcome {
+    let last_ok = results.last().is_some_and(|r| r.ok);
+    let summary = format!(
+        "pipeline: {} stage(s) ran, {}",
+        results.len(),
+        if last_ok {
+            "completed"
+        } else {
+            "aborted on failure"
+        }
+    );
+    FlowOutcome {
+        ok: last_ok,
+        results,
+        summary,
+    }
 }
 
 fn strategy_name(strategy: &Strategy) -> &'static str {
@@ -276,11 +355,16 @@ mod tests {
 
     #[test]
     fn unimplemented_strategy_terminates_with_explanation() {
+        // A still-defined-ahead strategy (`MapReduce`, C5) terminates with an
+        // explanatory outcome rather than dispatching. (`Pipeline` is now wired, so
+        // it is exercised by the pipeline tests below instead.)
         let def = WorkflowDef {
             schema_version: 1,
-            name: "pipe".into(),
-            strategy: Strategy::Pipeline {
-                stages: vec![cli_step("a")],
+            name: "mr".into(),
+            strategy: Strategy::MapReduce {
+                map: cli_step("m"),
+                over: nerve_runtime::ContextSplit::Shards { n: 2 },
+                reduce: cli_step("r"),
             },
             budget: nerve_runtime::BudgetSpec::default(),
             max_depth: 2,
@@ -289,8 +373,104 @@ mod tests {
         match &actions[0] {
             Action::Emit { outcome } => {
                 assert!(!outcome.ok);
-                assert!(outcome.summary.contains("pipeline"));
+                assert!(outcome.summary.contains("map_reduce"));
             }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+        assert_eq!(actions[1], Action::Terminate);
+    }
+
+    // ---- Pipeline interpreter ---------------------------------------------------
+
+    fn pipeline_def(stages: usize) -> WorkflowDef {
+        WorkflowDef {
+            schema_version: 1,
+            name: "pipe".into(),
+            strategy: Strategy::Pipeline {
+                stages: (0..stages)
+                    .map(|i| cli_step(&format!("stage {i} task")))
+                    .collect(),
+            },
+            budget: nerve_runtime::BudgetSpec::default(),
+            max_depth: 2,
+        }
+    }
+
+    #[test]
+    fn pipeline_dispatches_stages_strictly_in_order() {
+        let def = pipeline_def(3);
+        let mut state = FlowState::new();
+        // Stage 0 only — stages 1/2 wait on the upstream result.
+        assert_eq!(
+            step(&state, &def),
+            vec![Action::StartWorker {
+                node: NodeId::stage(0),
+                step_index: 0,
+            }]
+        );
+        state.mark_dispatched(NodeId::stage(0));
+        assert!(step(&state, &def).is_empty(), "stage 0 still running");
+        state.record_result(NodeId::stage(0), result(true, "out0"));
+        // Now stage 1 is the frontier (not stage 2).
+        assert_eq!(
+            step(&state, &def),
+            vec![Action::StartWorker {
+                node: NodeId::stage(1),
+                step_index: 1,
+            }]
+        );
+        state.mark_dispatched(NodeId::stage(1));
+        state.record_result(NodeId::stage(1), result(true, "out1"));
+        assert_eq!(
+            step(&state, &def),
+            vec![Action::StartWorker {
+                node: NodeId::stage(2),
+                step_index: 2,
+            }]
+        );
+        state.mark_dispatched(NodeId::stage(2));
+        state.record_result(NodeId::stage(2), result(true, "out2"));
+        // All stages ok: emit + terminate, last stage is the answer.
+        let actions = step(&state, &def);
+        match &actions[0] {
+            Action::Emit { outcome } => {
+                assert!(outcome.ok);
+                assert_eq!(outcome.results.len(), 3, "all stages kept");
+                assert_eq!(outcome.results.last().unwrap().text, "out2");
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+        assert_eq!(actions[1], Action::Terminate);
+    }
+
+    #[test]
+    fn pipeline_aborts_on_a_failed_stage() {
+        let def = pipeline_def(3);
+        let mut state = FlowState::new();
+        state.mark_dispatched(NodeId::stage(0));
+        state.record_result(NodeId::stage(0), result(true, "out0"));
+        state.mark_dispatched(NodeId::stage(1));
+        state.record_result(NodeId::stage(1), result(false, "stage 1 failed"));
+        // Stage 1 failed → short-circuit: emit (not ok) + terminate, stage 2 never
+        // dispatched.
+        let actions = step(&state, &def);
+        match &actions[0] {
+            Action::Emit { outcome } => {
+                assert!(!outcome.ok);
+                assert_eq!(outcome.results.len(), 2, "only the stages that ran");
+                assert!(outcome.summary.contains("aborted"));
+            }
+            other => panic!("expected Emit, got {other:?}"),
+        }
+        assert_eq!(actions[1], Action::Terminate);
+    }
+
+    #[test]
+    fn empty_pipeline_terminates() {
+        let def = pipeline_def(0);
+        let actions = step(&FlowState::new(), &def);
+        match &actions[0] {
+            Action::Emit { outcome } => assert!(!outcome.ok),
             other => panic!("expected Emit, got {other:?}"),
         }
         assert_eq!(actions[1], Action::Terminate);

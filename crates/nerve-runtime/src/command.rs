@@ -27,6 +27,7 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "delegate.steer",
     "delegate.close",
     "flow.start",
+    "flow.steer",
     "flow.get",
     "flow.list",
     "flow.close",
@@ -206,6 +207,24 @@ pub enum RuntimeCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
     },
+    /// Steer a live flow branch with a follow-up message, running one more turn
+    /// against the same live worker session (design §4 / Wave C3a). Reuses the C0
+    /// [`WorkerSession::steer`] port per-worker, exactly as `delegate.steer` does
+    /// for a single delegated session: the host job manager looks up the live
+    /// worker for `target` in the live-flow worker registry and continues it;
+    /// progress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a
+    /// live, steerable branch (a `Single`/`Pipeline` worker still in flight, on a
+    /// steerable substrate) can be steered; a closed or one-shot worker
+    /// (`gemini`) returns a clear error. `flow_id` is the originating
+    /// [`Self::FlowStart`] job id; `target` selects which branch (by node id, or
+    /// the only live worker when unset).
+    #[serde(rename = "flow.steer")]
+    FlowSteer {
+        flow_id: String,
+        #[serde(default, skip_serializing_if = "WorkerSelector::is_default")]
+        target: WorkerSelector,
+        message: String,
+    },
     /// Fetch one live or recently-finished flow by id. Mirrors `session.get`.
     #[serde(rename = "flow.get")]
     FlowGet { flow_id: String },
@@ -242,6 +261,39 @@ pub enum FlowSource {
     Inline { workflow: Box<WorkflowDef> },
     /// A named workflow resolved from a loaded data file (loaded, not compiled).
     Named { workflow_ref: String },
+}
+
+/// Which live branch a [`RuntimeCommand::FlowSteer`] targets (design §4, the
+/// `WorkerSelector` row). Deliberately MINIMAL: a flow branch is identified by its
+/// deterministic node id, or — when `node_id` is unset — "the single live worker"
+/// (the common case for a `Single`/`Pipeline` flow, which has exactly one live
+/// branch at a time). An ambiguous unset selector against a multi-branch live flow
+/// is refused by the host with a clear message; the closed enum keeps the steer
+/// surface from drifting into a query language.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub struct WorkerSelector {
+    /// The deterministic node id of the branch to steer (e.g. `"node-0"` for a
+    /// `Single` flow, `"stage-1"` for a pipeline's second stage). `None` targets
+    /// the only live worker, erroring if more than one is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+}
+
+impl WorkerSelector {
+    /// A selector targeting a specific node id.
+    #[must_use]
+    pub fn node(node_id: impl Into<String>) -> Self {
+        Self {
+            node_id: Some(node_id.into()),
+        }
+    }
+
+    /// Whether this is the default ("only live worker") selector — used to keep an
+    /// unset `target` off the wire (serde `skip_serializing_if`).
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.node_id.is_none()
+    }
 }
 
 /// Autonomy posture handed to a delegated external agent CLI, mapping to each
@@ -347,6 +399,7 @@ impl RuntimeCommand {
             Self::DelegateSteer { .. } => "delegate.steer",
             Self::DelegateClose { .. } => "delegate.close",
             Self::FlowStart { .. } => "flow.start",
+            Self::FlowSteer { .. } => "flow.steer",
             Self::FlowGet { .. } => "flow.get",
             Self::FlowList => "flow.list",
             Self::FlowClose { .. } => "flow.close",
@@ -378,6 +431,7 @@ impl RuntimeCommand {
             | Self::DelegateSteer { .. }
             | Self::DelegateClose { .. }
             | Self::FlowStart { .. }
+            | Self::FlowSteer { .. }
             | Self::FlowGet { .. }
             | Self::FlowList
             | Self::FlowClose { .. }
@@ -631,6 +685,53 @@ mod tests {
             },
             other => panic!("unexpected variant: {}", other.name()),
         }
+    }
+
+    #[test]
+    fn flow_steer_round_trips_with_and_without_target() {
+        // Explicit node target round-trips and is on the wire.
+        let value = serde_json::json!({
+            "kind": "flow.steer",
+            "flow_id": "f1",
+            "target": { "node_id": "stage-1" },
+            "message": "now run the tests",
+        });
+        let command: RuntimeCommand = serde_json::from_value(value).expect("parse flow.steer");
+        assert_eq!(command.name(), "flow.steer");
+        assert_eq!(command.tool_name(), None);
+        match &command {
+            RuntimeCommand::FlowSteer {
+                flow_id,
+                target,
+                message,
+            } => {
+                assert_eq!(flow_id, "f1");
+                assert_eq!(target, &WorkerSelector::node("stage-1"));
+                assert_eq!(message, "now run the tests");
+            }
+            other => panic!("unexpected: {}", other.name()),
+        }
+        // An omitted target defaults to "the only live worker" and is skipped on
+        // the wire (so the default never bloats the command value).
+        let bare: RuntimeCommand = serde_json::from_value(serde_json::json!({
+            "kind": "flow.steer",
+            "flow_id": "f1",
+            "message": "go",
+        }))
+        .expect("parse bare flow.steer");
+        match &bare {
+            RuntimeCommand::FlowSteer { target, .. } => {
+                assert!(target.is_default());
+                assert_eq!(target.node_id, None);
+            }
+            other => panic!("unexpected: {}", other.name()),
+        }
+        let json = serde_json::to_value(&bare).expect("serialize bare");
+        assert!(
+            json.get("target").is_none(),
+            "default target is skipped: {json}"
+        );
+        assert!(RUNTIME_COMMAND_NAMES.contains(&"flow.steer"));
     }
 
     #[test]

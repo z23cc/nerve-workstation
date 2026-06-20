@@ -1158,6 +1158,32 @@
           "type": "object"
         },
         {
+          "description": "Steer a live flow branch with a follow-up message, running one more turn against the same live worker session (design §4 / Wave C3a). Reuses the C0 [`WorkerSession::steer`] port per-worker, exactly as `delegate.steer` does for a single delegated session: the host job manager looks up the live worker for `target` in the live-flow worker registry and continues it; progress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a live, steerable branch (a `Single`/`Pipeline` worker still in flight, on a steerable substrate) can be steered; a closed or one-shot worker (`gemini`) returns a clear error. `flow_id` is the originating [`Self::FlowStart`] job id; `target` selects which branch (by node id, or the only live worker when unset).",
+          "properties": {
+            "flow_id": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "flow.steer"
+              ],
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/WorkerSelector"
+            }
+          },
+          "required": [
+            "flow_id",
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Fetch one live or recently-finished flow by id. Mirrors `session.get`.",
           "properties": {
             "flow_id": {
@@ -3089,6 +3115,19 @@
           "type": "object"
         }
       ]
+    },
+    "WorkerSelector": {
+      "description": "Which live branch a [`RuntimeCommand::FlowSteer`] targets (design §4, the `WorkerSelector` row). Deliberately MINIMAL: a flow branch is identified by its deterministic node id, or — when `node_id` is unset — \"the single live worker\" (the common case for a `Single`/`Pipeline` flow, which has exactly one live branch at a time). An ambiguous unset selector against a multi-branch live flow is refused by the host with a clear message; the closed enum keeps the steer surface from drifting into a query language.",
+      "properties": {
+        "node_id": {
+          "description": "The deterministic node id of the branch to steer (e.g. `\"node-0\"` for a `Single` flow, `\"stage-1\"` for a pipeline's second stage). `None` targets the only live worker, erroring if more than one is live.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "WorkflowDef": {
       "description": "A complete, declarative workflow: a named [`Strategy`] plus the fleet-wide governance envelope (design §3). `schema_version` is bumped only on a breaking change to the data shape (additive fields don't bump it).",

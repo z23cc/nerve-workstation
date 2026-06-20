@@ -44,6 +44,7 @@ fn contract_declared_order_fold_is_independent_of_completion_order() {
                 Script {
                     result: ok("R1"),
                     delay: Duration::from_millis(da),
+                    steerable: false,
                 },
             ),
             (
@@ -51,6 +52,7 @@ fn contract_declared_order_fold_is_independent_of_completion_order() {
                 Script {
                     result: ok("R2"),
                     delay: Duration::from_millis(db),
+                    steerable: false,
                 },
             ),
             (
@@ -58,6 +60,7 @@ fn contract_declared_order_fold_is_independent_of_completion_order() {
                 Script {
                     result: ok("R3"),
                     delay: Duration::from_millis(dc),
+                    steerable: false,
                 },
             ),
         ])
@@ -132,6 +135,7 @@ fn replay_reconstructed_from_jsonl_matches() {
         Script {
             result: ok("done"),
             delay: Duration::ZERO,
+            steerable: false,
         },
     )]);
     let (_, ledger) = record(&workflow, scripts);

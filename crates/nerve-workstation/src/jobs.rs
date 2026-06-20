@@ -457,6 +457,11 @@ impl JobManager {
             RuntimeCommand::FlowStart { workflow, .. } => {
                 self.run_flow_start(job_id, workflow, token)
             }
+            RuntimeCommand::FlowSteer {
+                flow_id,
+                target,
+                message,
+            } => self.run_flow_steer(&flow_id, &target, &message, token),
             RuntimeCommand::FlowGet { flow_id } => flow_job::run_flow_get(&flow_id, &self.flows),
             RuntimeCommand::FlowList => flow_job::run_flow_list(&self.flows),
             RuntimeCommand::FlowClose { flow_id } => {
@@ -504,6 +509,20 @@ impl JobManager {
         decision: SessionApprovalDecision,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
         flow_job::run_flow_respond(flow_id, request_id, decision, &self.sessions.approvals())
+    }
+
+    /// Steer a live flow branch (C3a): look up the running flow's live-flow worker
+    /// registry and run one more turn against the branch `target` selects, streaming
+    /// the follow-up as `flow_node_agent` events scoped to `flow_id`. Runs as its own
+    /// short job (`token` is that job's cancel) — distinct from the `flow.start` job.
+    fn run_flow_steer(
+        &self,
+        flow_id: &str,
+        target: &nerve_runtime::WorkerSelector,
+        message: &str,
+        token: &CancelToken,
+    ) -> Result<Value, nerve_runtime::RuntimeError> {
+        flow_job::run_flow_steer(flow_id, target, message, &self.flows, &self.emit, token)
     }
 
     /// Assemble the [`FlowDeps`] the flow engine needs, all cloned from the daemon's
@@ -1032,6 +1051,7 @@ fn executor_for(command: &RuntimeCommand) -> Executor {
         | RuntimeCommand::AuthStatus { .. }
         | RuntimeCommand::AuthLogout { .. } => Executor::Auth,
         RuntimeCommand::FlowStart { .. }
+        | RuntimeCommand::FlowSteer { .. }
         | RuntimeCommand::FlowGet { .. }
         | RuntimeCommand::FlowList
         | RuntimeCommand::FlowClose { .. }
@@ -1116,6 +1136,7 @@ mod command_executor_partition {
                     }
                 }
             }),
+            "flow.steer" => json!({ "flow_id": "f", "message": "m" }),
             "flow.get" | "flow.close" => json!({ "flow_id": "f" }),
             "flow.respond" => json!({ "flow_id": "f", "request_id": "r", "decision": "allow" }),
             other => panic!(
@@ -1192,6 +1213,7 @@ mod command_executor_partition {
         assert_eq!(executor_for(&representative("auth.start")), Executor::Auth);
         for name in [
             "flow.start",
+            "flow.steer",
             "flow.get",
             "flow.list",
             "flow.close",

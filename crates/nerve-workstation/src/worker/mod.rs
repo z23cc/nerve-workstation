@@ -51,11 +51,13 @@ mod ledger;
 #[cfg(test)]
 mod parity;
 mod provider;
+mod steer;
 
 pub(crate) use cli::CliWorker;
 pub(crate) use factory::WorkerFactory;
 pub(crate) use ledger::{LedgerEntry, LedgerPayload, WorkerLedger};
 pub(crate) use provider::ProviderWorker;
+pub(crate) use steer::{SteerError, SteerRegistry};
 
 use nerve_core::CancelToken;
 use nerve_runtime::{AgentEventKind, DelegateAutonomy, RiskTier};

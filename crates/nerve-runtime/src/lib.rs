@@ -21,7 +21,7 @@ mod tool_spec;
 pub use adapter::{RiskTier, RuntimeToolAdapter, ToolCapability};
 pub use command::{
     ApprovalMode, DelegateAutonomy, FlowSource, RUNTIME_COMMAND_NAMES, RuntimeCommand,
-    SessionApprovalDecision,
+    SessionApprovalDecision, WorkerSelector,
 };
 pub use error::RuntimeError;
 pub use event::{

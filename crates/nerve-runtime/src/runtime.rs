@@ -124,6 +124,7 @@ where
                 "delegate commands are executed by the host delegate runtime, not the core runtime",
             )),
             RuntimeCommand::FlowStart { .. }
+            | RuntimeCommand::FlowSteer { .. }
             | RuntimeCommand::FlowGet { .. }
             | RuntimeCommand::FlowList
             | RuntimeCommand::FlowClose { .. }

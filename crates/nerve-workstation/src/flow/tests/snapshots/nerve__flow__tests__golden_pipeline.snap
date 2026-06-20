@@ -1,0 +1,10 @@
+---
+source: crates/nerve-workstation/src/flow/tests/mod.rs
+expression: render_outcome(&outcome)
+---
+ok=true
+summary=pipeline: 3 stage(s) ran, completed
+results:
+  [0] ok=true text="SPEC"
+  [1] ok=true text="REVIEWED"
+  [2] ok=true text="SHIPPED"

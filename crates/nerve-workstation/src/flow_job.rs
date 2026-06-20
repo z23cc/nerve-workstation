@@ -22,11 +22,13 @@ use crate::sandbox::SandboxLauncher;
 use crate::session_manager::{ApprovalHub, FlowDecisionMemory, FlowProtocolApprover};
 use crate::subagent::DEFAULT_MAX_DEPTH;
 use crate::tools::NerveRuntime;
-use crate::worker::{TurnResult, WorkerFactory, WorkerLedger};
+use crate::worker::{
+    SteerError, SteerRegistry, TurnResult, WorkerEvent, WorkerFactory, WorkerLedger,
+};
 use nerve_core::{CancelToken, WorkspaceResolver};
 use nerve_runtime::{
     ApprovalMode, FlowNodeUsage, FlowRunOutcome, FlowSource, FlowWorkerKind, RuntimeError,
-    RuntimeEvent, SessionApprovalDecision, Strategy, WorkerRef, WorkflowDef,
+    RuntimeEvent, SessionApprovalDecision, Strategy, WorkerRef, WorkerSelector, WorkflowDef,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -51,12 +53,21 @@ pub(crate) struct FlowDeps {
 }
 
 /// One live flow's registry entry: its cancel token (so `flow.close` can interrupt
-/// the engine loop) plus a lightweight status snapshot for `flow.get` / `flow.list`.
+/// the engine loop), the live-flow worker registry + shared ledger that
+/// `flow.steer` reaches the current frontier through (C3a), plus a lightweight
+/// status snapshot for `flow.get` / `flow.list`.
 struct FlowEntry {
     cancel: CancelToken,
     strategy_label: &'static str,
     name: String,
     created_seq: u64,
+    /// The live-flow worker registry the driver registers each steerable frontier
+    /// into; `flow.steer` looks up the live worker here. Shared (`Arc`) with the
+    /// run thread's [`Driver`].
+    steer: Arc<SteerRegistry>,
+    /// The flow's shared append-only ledger — a steered turn records into the SAME
+    /// tape as the original turn (recorded nondeterminism, design §5).
+    ledger: Arc<WorkerLedger>,
     /// Set once the flow finishes (the run thread records its terminal outcome).
     outcome: Option<FlowRunOutcome>,
 }
@@ -74,8 +85,16 @@ pub(crate) struct LiveFlows {
 
 impl LiveFlows {
     /// Register a starting flow under `flow_id`, returning the cancel token the run
-    /// thread drives the engine under (and `flow.close` fires).
-    fn register(&self, flow_id: &str, def: &WorkflowDef) -> CancelToken {
+    /// thread drives the engine under (and `flow.close` fires). The `steer` registry
+    /// and `ledger` are shared with the run thread's driver so a concurrent
+    /// `flow.steer` reaches the live frontier + records into the same tape (C3a).
+    fn register(
+        &self,
+        flow_id: &str,
+        def: &WorkflowDef,
+        steer: Arc<SteerRegistry>,
+        ledger: Arc<WorkerLedger>,
+    ) -> CancelToken {
         let cancel = CancelToken::new();
         let created_seq = {
             let mut seq = crate::sync::lock_recover(&self.next_seq);
@@ -89,10 +108,30 @@ impl LiveFlows {
                 strategy_label: strategy_label(&def.strategy),
                 name: def.name.clone(),
                 created_seq,
+                steer,
+                ledger,
                 outcome: None,
             },
         );
         cancel
+    }
+
+    /// Look up a live flow's `(steer registry, ledger)` for a `flow.steer`. Errors
+    /// on an unknown id, or on a flow that has already finished (no live frontier).
+    fn steer_target(
+        &self,
+        flow_id: &str,
+    ) -> Result<(Arc<SteerRegistry>, Arc<WorkerLedger>), RuntimeError> {
+        let flows = crate::sync::lock_recover(&self.flows);
+        let entry = flows
+            .get(flow_id)
+            .ok_or_else(|| RuntimeError::adapter(format!("no flow `{flow_id}`")))?;
+        if entry.outcome.is_some() {
+            return Err(RuntimeError::adapter(format!(
+                "flow `{flow_id}` has finished; nothing to steer"
+            )));
+        }
+        Ok((Arc::clone(&entry.steer), Arc::clone(&entry.ledger)))
     }
 
     /// Record a flow's terminal outcome (the run thread calls this when the driver
@@ -168,7 +207,12 @@ pub(crate) fn run_flow_start(
     cancel: &CancelToken,
 ) -> Result<Value, RuntimeError> {
     let def = resolve_workflow(workflow)?;
-    let registry_cancel = flows.register(flow_id, &def);
+    // The shared ledger + live-flow worker registry: both are held by the registry
+    // entry so a concurrent `flow.steer` reaches this flow's live frontier and
+    // records its follow-up into the same tape (C3a).
+    let ledger = Arc::new(WorkerLedger::new());
+    let steer = Arc::new(SteerRegistry::new());
+    let registry_cancel = flows.register(flow_id, &def, Arc::clone(&steer), Arc::clone(&ledger));
     // The engine runs under a token that fires if EITHER the job's own cancel OR a
     // flow.close (the registry token) fires.
     let run_cancel = combined_cancel(cancel, &registry_cancel);
@@ -181,7 +225,6 @@ pub(crate) fn run_flow_start(
     emit(RuntimeEvent::flow_started(flow_id, def.strategy.clone()));
     emit_strategy_edges(flow_id, &def.strategy, emit);
 
-    let ledger = Arc::new(WorkerLedger::new());
     // CLI workers raise approvals through the same hub via `WorkerContext.approver`.
     let approver: Arc<dyn crate::delegate_proxy::DelegateApprover> =
         Arc::clone(&deps.approvals) as Arc<dyn crate::delegate_proxy::DelegateApprover>;
@@ -199,7 +242,8 @@ pub(crate) fn run_flow_start(
     let on_progress = |progress: crate::flow::FlowProgress| observer.on_progress(&progress);
     let driver = Driver::new(&resolver, Arc::clone(&ledger), approver, root)
         .with_observer(&observer)
-        .with_progress(&on_progress);
+        .with_progress(&on_progress)
+        .with_steer_registry(&steer);
     let outcome = driver.run(&def, &run_cancel);
 
     finish_flow(
@@ -257,6 +301,62 @@ impl FlowDeps {
             memory,
         ));
         ToolGate::with_approver(self.policy.clone(), ApprovalMode::AlwaysAsk, approver)
+    }
+}
+
+/// Execute a `flow.steer` (C3a): look up the live flow's worker registry, run one
+/// more turn against the branch `target` selects (via the C0 [`WorkerSession::steer`]
+/// port), stream the follow-up turn as node-scoped [`RuntimeEvent::FlowNodeAgent`]
+/// events, and record it into the flow's ledger. A finished flow, a missing/closed
+/// branch, an ambiguous unset selector, or a one-shot worker (`gemini`) errors
+/// cleanly — no live LLM/subprocess is touched here beyond the existing session.
+pub(crate) fn run_flow_steer(
+    flow_id: &str,
+    target: &WorkerSelector,
+    message: &str,
+    flows: &LiveFlows,
+    emit: &Arc<EventEmitter>,
+    cancel: &CancelToken,
+) -> Result<Value, RuntimeError> {
+    let (steer, ledger) = flows.steer_target(flow_id)?;
+    let flow = flow_id.to_string();
+    let emit = Arc::clone(emit);
+    // Each steered event becomes a node-scoped FlowNodeAgent (the same projection
+    // the driver's progress sink uses for turn 1), keyed by the resolved node id.
+    let mut on_event = |node: &str, event: WorkerEvent| {
+        if let WorkerEvent::Step(kind) = event {
+            emit(RuntimeEvent::flow_node_agent(
+                flow.clone(),
+                node.to_string(),
+                kind,
+            ));
+        }
+    };
+    match steer.steer(
+        target.node_id.as_deref(),
+        message,
+        cancel,
+        &ledger,
+        &mut on_event,
+    ) {
+        Ok((node, result)) => Ok(json!({
+            "flow_id": flow_id,
+            "node_id": node,
+            "ok": result.ok,
+            "text": result.text,
+            "steered": true,
+        })),
+        Err(err) => Err(steer_error(flow_id, err)),
+    }
+}
+
+/// Map a [`SteerError`] onto a runtime error. A turn cancellation surfaces as a
+/// cancelled error (so the `flow.steer` job finishes `job_cancelled`); every other
+/// case is a clear adapter error the client renders.
+fn steer_error(flow_id: &str, err: SteerError) -> RuntimeError {
+    match err {
+        SteerError::Turn(message) if message.contains("cancel") => RuntimeError::cancelled(),
+        other => RuntimeError::adapter(format!("flow `{flow_id}` steer failed: {other}")),
     }
 }
 
@@ -352,8 +452,22 @@ fn emit_strategy_edges(flow_id: &str, strategy: &Strategy, emit: &Arc<EventEmitt
                 ));
             }
         }
-        // Defined-ahead strategies emit their edges from the engine in C3/C5.
+        Strategy::Pipeline { stages } => emit_pipeline_edges(flow_id, stages.len(), emit),
+        // The remaining defined-ahead strategies emit their edges from the engine
+        // in C5.
         _ => {}
+    }
+}
+
+/// Emit a `Pipeline`'s chain edges (C3a): `flow → stage-0 → stage-1 → …`, so a
+/// client renders the sequential DAG. The structure is static (declared stages),
+/// so the edges are known at `flow.start`.
+fn emit_pipeline_edges(flow_id: &str, stages: usize, emit: &Arc<EventEmitter>) {
+    let mut from = "flow".to_string();
+    for index in 0..stages {
+        let to = format!("stage-{index}");
+        emit(RuntimeEvent::flow_edge(flow_id, from.clone(), to.clone()));
+        from = to;
     }
 }
 

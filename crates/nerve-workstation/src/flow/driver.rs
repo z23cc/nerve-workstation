@@ -12,8 +12,8 @@ use super::engine::{FlowState, step};
 use super::{Action, FlowOutcome, NodeId};
 use crate::subagent::bounded_fan_out;
 use crate::worker::{
-    AgentWorker, BudgetGrant, TurnResult, WorkerContext, WorkerError, WorkerEvent, WorkerFactory,
-    WorkerKind, WorkerLedger, WorkerTask,
+    AgentWorker, BudgetGrant, SteerRegistry, TurnResult, WorkerContext, WorkerError, WorkerEvent,
+    WorkerFactory, WorkerKind, WorkerLedger, WorkerSession, WorkerTask,
 };
 use nerve_core::CancelToken;
 use nerve_runtime::{Step, Strategy, WorkerRef, WorkflowDef};
@@ -123,6 +123,11 @@ pub(crate) struct Driver<'a> {
     /// Optional node-lifecycle observer (C2): node start/finish callbacks the flow
     /// job maps onto `flow_*` protocol events.
     observer: Option<&'a dyn FlowObserver>,
+    /// Optional live-flow worker registry (C3a): for steerable single-node waves
+    /// (`Single` / `Pipeline` stages), the driver keeps each frontier's live
+    /// session registered here so a concurrent `flow.steer` can run a follow-up
+    /// turn against it. A `Parallel` wave never registers (no single live frontier).
+    steer: Option<&'a SteerRegistry>,
 }
 
 impl<'a> Driver<'a> {
@@ -141,6 +146,7 @@ impl<'a> Driver<'a> {
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             on_progress: None,
             observer: None,
+            steer: None,
         }
     }
 
@@ -166,10 +172,31 @@ impl<'a> Driver<'a> {
         self
     }
 
+    /// Attach a live-flow [`SteerRegistry`] (C3a): the driver keeps each steerable
+    /// single-node frontier's live session registered here so a concurrent
+    /// `flow.steer` can run a follow-up turn against it.
+    #[must_use]
+    pub(crate) fn with_steer_registry(mut self, steer: &'a SteerRegistry) -> Self {
+        self.steer = Some(steer);
+        self
+    }
+
     /// Run `def` to completion: loop `step` → apply actions → record results,
     /// until `Terminate`. Returns the emitted [`FlowOutcome`] (or a terminal
-    /// outcome if the flow never emitted one — e.g. it was cancelled).
+    /// outcome if the flow never emitted one — e.g. it was cancelled). Always tears
+    /// down any live steerable frontier on the way out (every exit path), so a
+    /// steered session never outlives its flow.
     pub(crate) fn run(&self, def: &WorkflowDef, cancel: &CancelToken) -> FlowOutcome {
+        let outcome = self.run_loop(def, cancel);
+        if let Some(registry) = self.steer {
+            registry.close_all();
+        }
+        outcome
+    }
+
+    /// The engine loop proper (see [`Self::run`], which wraps this with frontier
+    /// teardown).
+    fn run_loop(&self, def: &WorkflowDef, cancel: &CancelToken) -> FlowOutcome {
         let mut state = FlowState::new();
         let mut emitted: Option<FlowOutcome> = None;
         // Bound the loop defensively: each iteration must make progress (dispatch
@@ -193,7 +220,7 @@ impl<'a> Driver<'a> {
                     Action::Terminate => {
                         return emitted.unwrap_or_else(terminated_without_emit);
                     }
-                    // C1's interpreter never emits these (declared-ahead, C3+).
+                    // The interpreter never emits these (declared-ahead, C3+).
                     Action::SteerWorker { .. }
                     | Action::CloseWorker { .. }
                     | Action::RequestApproval { .. } => {}
@@ -222,30 +249,29 @@ impl<'a> Driver<'a> {
         for (node, _) in starts {
             state.mark_dispatched(node.clone());
         }
+        // A single-node wave on a steerable strategy (`Single`/`Pipeline`) is the
+        // flow's current frontier: its live session is kept registered so a
+        // concurrent `flow.steer` can run a follow-up turn (C3a). A `Parallel` wave
+        // (multi-node) has no single live frontier and never registers.
+        let steerable = starts.len() == 1 && is_steerable_strategy(&def.strategy);
         let inputs: Vec<(NodeId, usize)> = starts.to_vec();
         let results = bounded_fan_out(
             inputs,
             self.concurrency,
             cancel,
             |(node, step_index)| {
-                let (result, events) = self.run_node(def, &node, step_index, cancel);
-                NodeResult {
-                    node,
-                    result,
-                    events,
-                }
+                let run = self.run_node(def, &node, step_index, cancel);
+                NodeResult { node, run }
             },
             |(node, _)| NodeResult {
                 node: node.clone(),
-                result: failed_result("cancelled"),
-                events: Vec::new(),
+                run: NodeRun::cancelled(),
             },
             || NodeResult {
                 // A worker thread that panicked has no node id to recover; the
                 // node was still marked dispatched, so it folds as a failure.
                 node: NodeId::single(),
-                result: failed_result("worker thread panicked"),
-                events: Vec::new(),
+                run: NodeRun::failed("worker thread panicked"),
             },
         );
         // bounded_fan_out preserves INPUT ORDER, so `results` is in declared
@@ -255,11 +281,12 @@ impl<'a> Driver<'a> {
         // finished first (design §3, the determinism invariant that the
         // byte-identical replay gate enforces).
         for node_result in results {
-            let NodeResult {
-                node,
+            let NodeResult { node, run } = node_result;
+            let NodeRun {
                 result,
                 events,
-            } = node_result;
+                session,
+            } = run;
             for event in events {
                 self.ledger.record_event(node.as_str(), event);
             }
@@ -271,7 +298,32 @@ impl<'a> Driver<'a> {
             if let Some(observer) = self.observer {
                 observer.node_finished(node.as_str(), &result);
             }
+            self.handle_live_session(steerable, node.as_str(), session);
             state.record_result(node, result);
+        }
+    }
+
+    /// Decide what to do with a finished node's live session: register it as the
+    /// new steerable frontier (closing the previous one) when the wave is steerable
+    /// and a registry is attached, otherwise close it immediately. Without a
+    /// registry, behaviour is identical to C2 (close right after the turn).
+    fn handle_live_session(
+        &self,
+        steerable: bool,
+        node: &str,
+        session: Option<Box<dyn WorkerSession>>,
+    ) {
+        let Some(mut session) = session else {
+            return;
+        };
+        match (steerable, self.steer) {
+            (true, Some(registry)) => {
+                // Advance the frontier: close every prior frontier, then register
+                // this node so it is the single live, steerable worker.
+                registry.close_all();
+                registry.register(node, session);
+            }
+            _ => session.close(),
         }
     }
 
@@ -279,32 +331,31 @@ impl<'a> Driver<'a> {
     /// from the ledger blackboard, start it (turn 1), and return its
     /// [`TurnResult`] together with the events it emitted (BUFFERED, not written
     /// to the ledger here — the caller writes them in declared order so the tape
-    /// is deterministic). The live progress sink still fires during the turn for
-    /// real-time display. A start/turn error maps to a failed result so a sibling
-    /// branch is never aborted (mirrors `bounded_fan_out`'s per-task isolation).
+    /// is deterministic) and the LIVE session (so the caller can register it as a
+    /// steerable frontier or close it). The live progress sink still fires during
+    /// the turn for real-time display. A start/turn error maps to a failed result
+    /// with no live session, so a sibling branch is never aborted (mirrors
+    /// `bounded_fan_out`'s per-task isolation).
     fn run_node(
         &self,
         def: &WorkflowDef,
         node: &NodeId,
         step_index: usize,
         cancel: &CancelToken,
-    ) -> (TurnResult, Vec<WorkerEvent>) {
+    ) -> NodeRun {
         let Some(step_def) = step_for(def, step_index) else {
-            return (
-                failed_result(&format!("no step at index {step_index}")),
-                Vec::new(),
-            );
+            return NodeRun::failed(&format!("no step at index {step_index}"));
         };
         let worker = match self.resolver.resolve(&step_def.worker) {
             Ok(worker) => worker,
-            Err(err) => return (failed_result(&format!("resolve failed: {err}")), Vec::new()),
+            Err(err) => return NodeRun::failed(&format!("resolve failed: {err}")),
         };
         // A node whose worker resolved is genuinely starting: fire the lifecycle
         // observer (C2 maps this to FlowNodeStarted) with the declared WorkerRef.
         if let Some(observer) = self.observer {
             observer.node_started(node.as_str(), &step_def.worker);
         }
-        let task = self.build_task(step_def);
+        let task = self.build_task(step_def, def, step_index);
         let ctx = self.worker_context();
         let node_id = node.clone();
         let on_progress = self.on_progress;
@@ -321,21 +372,53 @@ impl<'a> Driver<'a> {
             events.push(event);
         };
         match worker.start(&task, &ctx, cancel, &mut on_event) {
-            Ok(mut session) => {
-                let result = session.result();
-                session.close();
-                (result, events)
-            }
-            Err(WorkerError::Cancelled) => (failed_result("cancelled"), events),
-            Err(err) => (failed_result(&err.to_string()), events),
+            Ok(session) => NodeRun {
+                result: session.result(),
+                events,
+                session: Some(session),
+            },
+            Err(WorkerError::Cancelled) => NodeRun {
+                result: failed_result("cancelled"),
+                events,
+                session: None,
+            },
+            Err(err) => NodeRun {
+                result: failed_result(&err.to_string()),
+                events,
+                session: None,
+            },
         }
     }
 
-    /// Render a step's task template, interpolating `{{node}}` placeholders from
-    /// the ledger blackboard (upstream outputs), then build the [`WorkerTask`].
-    fn build_task(&self, step_def: &Step) -> WorkerTask {
+    /// Render a step's task template (design §3 / §5, the cross-stage blackboard),
+    /// interpolating named-output placeholders from the ledger, then build the
+    /// [`WorkerTask`]. The supported placeholders are deliberately MINIMAL —
+    /// named-output substitution only, NO expression language (design §12, open
+    /// question 3):
+    ///
+    /// - `{{<node-id>}}` — the recorded output text of any finished node, by its
+    ///   deterministic id (`{{node-0}}` for a `Single`, `{{stage-0}}` for a
+    ///   pipeline's first stage, `{{branch-1}}` for a parallel branch).
+    /// - `{{prev}}` — a `Pipeline`-only alias for the immediately-upstream stage's
+    ///   output (`stage-{index-1}`). For a non-pipeline node, or stage 0, `prev`
+    ///   resolves to nothing and is left as a verbatim `{{prev}}` placeholder.
+    ///
+    /// An unknown/unresolved placeholder is left verbatim (the [`TaskTemplate`]
+    /// contract — no silent emptying). Pure and deterministic: the same recorded
+    /// blackboard renders byte-identically, so replay stays faithful.
+    fn build_task(&self, step_def: &Step, def: &WorkflowDef, step_index: usize) -> WorkerTask {
         let ledger = Arc::clone(&self.ledger);
-        let prompt = step_def.task.render(&|name| ledger.output(name));
+        let prev_node = (is_pipeline(def) && step_index > 0).then(|| NodeId::stage(step_index - 1));
+        let prompt = step_def.task.render(&|name| {
+            // `{{prev}}` is the upstream stage's output; everything else is a node
+            // id looked up directly in the blackboard.
+            if name == "prev" {
+                return prev_node
+                    .as_ref()
+                    .and_then(|node| ledger.output(node.as_str()));
+            }
+            ledger.output(name)
+        });
         WorkerTask {
             prompt,
             autonomy: step_def.autonomy,
@@ -362,17 +445,62 @@ impl<'a> Driver<'a> {
 /// determinism invariant (the ledger is then written in that order).
 struct NodeResult {
     node: NodeId,
-    result: TurnResult,
-    events: Vec<WorkerEvent>,
+    run: NodeRun,
 }
 
-/// Look up the declared [`Step`] for a flat `step_index` across the C1 strategies.
+/// What one [`Driver::run_node`] produced: the final [`TurnResult`], the BUFFERED
+/// events (written to the ledger in declared order by the caller), and the LIVE
+/// session when the turn started (so the caller registers it as a steerable
+/// frontier or closes it). The session is dropped — and thus implicitly NOT
+/// steerable — for any node whose start errored/cancelled.
+struct NodeRun {
+    result: TurnResult,
+    events: Vec<WorkerEvent>,
+    session: Option<Box<dyn WorkerSession>>,
+}
+
+impl NodeRun {
+    /// A failed run with no session (a resolve/start error or a panicked thread).
+    fn failed(reason: &str) -> Self {
+        Self {
+            result: failed_result(reason),
+            events: Vec::new(),
+            session: None,
+        }
+    }
+
+    /// A cancelled run with no session.
+    fn cancelled() -> Self {
+        Self::failed("cancelled")
+    }
+}
+
+/// Look up the declared [`Step`] for a flat `step_index` across the wired
+/// strategies (`Single` / `Parallel` / `Pipeline`).
 fn step_for(def: &WorkflowDef, step_index: usize) -> Option<&Step> {
     match &def.strategy {
         Strategy::Single { step } if step_index == 0 => Some(step),
         Strategy::Parallel { branches, .. } => branches.get(step_index),
+        Strategy::Pipeline { stages } => stages.get(step_index),
         _ => None,
     }
+}
+
+/// Whether `def`'s strategy interpolates a `{{prev}}` alias (only a `Pipeline` has
+/// an ordered upstream "previous stage"). For a `Single`/`Parallel` node `prev`
+/// has no meaning and is left as an unresolved placeholder.
+fn is_pipeline(def: &WorkflowDef) -> bool {
+    matches!(def.strategy, Strategy::Pipeline { .. })
+}
+
+/// Whether a strategy runs a single live frontier at a time (so that frontier is
+/// `flow.steer`-able, C3a). `Single` and `Pipeline` advance one node at a time; a
+/// `Parallel` wave has no single live frontier and is not steerable here.
+fn is_steerable_strategy(strategy: &Strategy) -> bool {
+    matches!(
+        strategy,
+        Strategy::Single { .. } | Strategy::Pipeline { .. }
+    )
 }
 
 /// A provider worker's model override comes from the `WorkerRef`; a CLI worker

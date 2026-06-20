@@ -59,6 +59,14 @@ impl NodeId {
         Self(format!("branch-{index}"))
     }
 
+    /// The node id for the `index`-th stage of a `Pipeline` strategy. A downstream
+    /// stage interpolates an upstream stage's output from the ledger blackboard by
+    /// this id (e.g. `{{stage-0}}`), and `flow.steer`'s [`WorkerSelector`] targets a
+    /// live stage by it.
+    fn stage(index: usize) -> Self {
+        Self(format!("stage-{index}"))
+    }
+
     /// The id as a string slice (for ledger keys / logs).
     pub(crate) fn as_str(&self) -> &str {
         &self.0

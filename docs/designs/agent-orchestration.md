@@ -567,6 +567,19 @@ freeze a protocol shape we regret ("versioned or dead", north-star §9).
   per-flow `BudgetLedger` (generalizing `CostTelemetryHook`) with `BudgetUpdate`/`BudgetWarning` +
   cooperative cancel, and the unified `FleetBudget` recursion model (depth/`max_workers`/
   policy-gated-spawn) replacing the two guards. Spawn becomes a gated exec-tier action.
+  - **C3a [SHIPPED]:** `Strategy::Pipeline` (sequential stages; stage N reads upstream outputs from the
+    ledger blackboard) + `flow.steer`. **Pipeline interpolation** is named-output substitution only (no
+    expression language, design §12 q3): a stage's `TaskTemplate` resolves `{{<node-id>}}` (`{{stage-0}}`,
+    `{{node-0}}`, `{{branch-1}}`) from any finished node's recorded output, plus a pipeline-only
+    `{{prev}}` alias for the immediately-upstream stage. `flow.steer { flow_id, target: WorkerSelector,
+    message }` (additive, v4 unchanged) runs one more turn on a live frontier via the C0
+    `WorkerSession::steer` port through a per-flow live-flow worker registry (`SteerRegistry`,
+    analogous to `LiveSessions`); `WorkerSelector { node_id? }` targets a node by id or the only live
+    worker. Only `Single`/`Pipeline` frontiers are steerable; a `Parallel` wave, a one-shot worker
+    (`gemini` → `NotSteerable`), a closed/advanced frontier, or an ambiguous unset selector errors
+    cleanly. The steered turn is recorded into the same ledger (recorded nondeterminism, §5). Pipeline
+    edges (`flow → stage-0 → stage-1 → …`) emit at `flow.start`. **Deferred to C3b:** the
+    `BudgetLedger` + `FleetBudget` governance.
 
 - **Wave C4 — replay verb + audit gate (lock the moat).** Ship `flow.replay` + the byte-identical
   REPLAY CI gate, `FlowDecision` audit events, the declared-order-fold contract test, the
