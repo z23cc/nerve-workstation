@@ -10,6 +10,7 @@ mod cli;
 mod commands;
 mod cost;
 mod daemon;
+mod delegate;
 mod exec_tool;
 mod hooks;
 mod jobs;

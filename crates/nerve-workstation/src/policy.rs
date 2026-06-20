@@ -73,6 +73,9 @@ const READONLY_TOOLS: &[&str] = &[
     "build_context",
     "workspace_context",
     "git",
+    // Discovery of delegatable external agents — a PATH probe, no spawn, no
+    // mutation. The actual delegation tool (`delegate_agent`) is exec-tier.
+    "list_agents",
 ];
 
 /// Agent-internal state tools that write only to `.nerve/` (working / long-term
@@ -113,6 +116,9 @@ const EXEC_TOOLS: &[&str] = &[
     "xai_tts",
     "xai_transcribe",
     "openai_image_generate",
+    // Delegates a coding task to an external agent CLI subprocess (DA-2) — the
+    // highest-privilege surface (arbitrary edits/exec by another agent).
+    "delegate_agent",
 ];
 
 /// Static risk classification for a tool, mirroring oh-my-pi's per-tool tier
@@ -634,6 +640,7 @@ mod tests {
             "get_repo_map",
             "update_checkpoint",
             "remember",
+            "list_agents",
         ] {
             assert_eq!(tool_tier(tool), RiskTier::ReadOnly, "{tool}");
         }
@@ -659,6 +666,7 @@ mod tests {
             "xai_image_generate",
             "xai_video_generate",
             "openai_image_generate",
+            "delegate_agent",
             // mcp + unknown fail safe to the top tier.
             "mcp__fs__write",
             "brand_new_tool",

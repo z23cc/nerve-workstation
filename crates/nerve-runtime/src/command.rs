@@ -23,6 +23,7 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "auth.complete",
     "auth.status",
     "auth.logout",
+    "delegate.start",
 ];
 
 /// Transport-neutral command understood by human-facing runtime adapters.
@@ -141,6 +142,40 @@ pub enum RuntimeCommand {
     /// Remove stored credentials for a provider.
     #[serde(rename = "auth.logout")]
     AuthLogout { provider: String },
+    /// Delegate a coding task to an external agent CLI (codex / claude / gemini)
+    /// as a long-lived job. Pure protocol vocabulary: the host job manager drives
+    /// the subprocess (DA-2); `nerve-core` has no subprocess knowledge. `agent` is
+    /// the catalog name from `list_agents`; `cwd` defaults to the workspace root;
+    /// `model` overrides the agent's default model. Progress streams back as
+    /// [`crate::RuntimeEvent::DelegateProgress`].
+    #[serde(rename = "delegate.start")]
+    DelegateStart {
+        agent: String,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default)]
+        autonomy: DelegateAutonomy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+}
+
+/// Autonomy posture handed to a delegated external agent CLI, mapping to each
+/// vendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`,
+/// gemini `--approval-mode` (read-only | edit | full). Defaults to the most
+/// restricted ([`Self::ReadOnly`]) so an omitted field never grants more than read
+/// access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegateAutonomy {
+    /// The delegated agent may only read; no edits, no command execution.
+    #[default]
+    ReadOnly,
+    /// The delegated agent may read and edit workspace files.
+    Edit,
+    /// The delegated agent may read, edit, and run commands.
+    Full,
 }
 
 /// Decision supplied by a human/client for a session approval request.
@@ -225,6 +260,7 @@ impl RuntimeCommand {
             Self::AuthComplete { .. } => "auth.complete",
             Self::AuthStatus { .. } => "auth.status",
             Self::AuthLogout { .. } => "auth.logout",
+            Self::DelegateStart { .. } => "delegate.start",
         }
     }
 
@@ -247,7 +283,8 @@ impl RuntimeCommand {
             | Self::AuthStart { .. }
             | Self::AuthComplete { .. }
             | Self::AuthStatus { .. }
-            | Self::AuthLogout { .. } => None,
+            | Self::AuthLogout { .. }
+            | Self::DelegateStart { .. } => None,
         }
     }
 }
@@ -304,6 +341,52 @@ mod tests {
             other => panic!("unexpected variant: {}", other.name()),
         }
         assert!(RUNTIME_COMMAND_NAMES.contains(&"session.set_mode"));
+    }
+
+    #[test]
+    fn delegate_start_round_trips_with_default_autonomy() {
+        // `autonomy` and `model`/`cwd` omitted: autonomy defaults to the most
+        // restricted tier, optionals to None.
+        let value = serde_json::json!({
+            "kind": "delegate.start",
+            "agent": "codex",
+            "task": "add a test",
+        });
+        let command: RuntimeCommand = serde_json::from_value(value).expect("parse delegate.start");
+        assert_eq!(command.name(), "delegate.start");
+        assert_eq!(command.tool_name(), None);
+        match command {
+            RuntimeCommand::DelegateStart {
+                agent,
+                task,
+                cwd,
+                autonomy,
+                model,
+            } => {
+                assert_eq!(agent, "codex");
+                assert_eq!(task, "add a test");
+                assert_eq!(cwd, None);
+                assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
+                assert_eq!(model, None);
+            }
+            other => panic!("unexpected variant: {}", other.name()),
+        }
+        assert!(RUNTIME_COMMAND_NAMES.contains(&"delegate.start"));
+    }
+
+    #[test]
+    fn delegate_autonomy_serde_names_and_default() {
+        assert_eq!(DelegateAutonomy::default(), DelegateAutonomy::ReadOnly);
+        for (autonomy, name) in [
+            (DelegateAutonomy::ReadOnly, "read_only"),
+            (DelegateAutonomy::Edit, "edit"),
+            (DelegateAutonomy::Full, "full"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(autonomy).unwrap(),
+                serde_json::json!(name)
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::{openai, xai};
+use crate::{delegate, openai, xai};
 use nerve_core::WorkspaceRegistry;
 use nerve_runtime::{Runtime, RuntimeError, RuntimeToolAdapter};
 use serde_json::Value;
@@ -7,6 +7,11 @@ pub(crate) type NerveRuntime = Runtime<WorkspaceRegistry>;
 
 struct XaiToolAdapter;
 struct OpenAiToolAdapter;
+
+/// Read-only discovery adapter for the external-agent delegation feature. Owns
+/// the `list_agents` tool; the actual `delegate.start` job runs through the job
+/// manager's delegate executor, not this adapter.
+struct DelegateToolAdapter;
 
 impl RuntimeToolAdapter<WorkspaceRegistry> for XaiToolAdapter {
     fn tool_specs(&self) -> Vec<Value> {
@@ -38,10 +43,25 @@ impl RuntimeToolAdapter<WorkspaceRegistry> for OpenAiToolAdapter {
     }
 }
 
+impl RuntimeToolAdapter<WorkspaceRegistry> for DelegateToolAdapter {
+    fn tool_specs(&self) -> Vec<Value> {
+        delegate::tool_specs()
+    }
+
+    fn handle_tool_call(
+        &self,
+        _registry: &WorkspaceRegistry,
+        params: &Value,
+    ) -> Result<Option<Value>, RuntimeError> {
+        Ok(delegate::handle_tool_call(params))
+    }
+}
+
 pub(crate) fn runtime(registry: WorkspaceRegistry) -> NerveRuntime {
     Runtime::new(registry)
         .with_adapter(XaiToolAdapter)
         .with_adapter(OpenAiToolAdapter)
+        .with_adapter(DelegateToolAdapter)
 }
 
 #[cfg(test)]
@@ -72,5 +92,17 @@ mod tests {
         assert!(names.contains(&"xai_x_search"));
         assert!(names.contains(&"openai_image_generate"));
         assert!(names.contains(&"openai_models"));
+        assert!(names.contains(&"list_agents"));
+    }
+
+    #[test]
+    fn runtime_dispatches_list_agents() {
+        let registry: WorkspaceRegistry<FsCatalogProvider> = WorkspaceRegistry::new();
+        let runtime = runtime(registry);
+        let response = runtime
+            .handle_tool_call(&serde_json::json!({ "name": "list_agents", "arguments": {} }))
+            .expect("list_agents response");
+        let agents = response["agents"].as_array().expect("agents array");
+        assert!(agents.iter().any(|a| a["name"] == "codex"));
     }
 }

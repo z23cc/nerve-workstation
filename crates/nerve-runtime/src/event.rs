@@ -96,6 +96,15 @@ pub enum RuntimeEvent {
         provider: String,
         kind: AuthEventKind,
     },
+    /// Streaming output fragment from a delegated external agent CLI, scoped to
+    /// its job. `agent` is the catalog name (codex / claude / gemini); `text` is a
+    /// raw stdout/stderr chunk. Additive and job-scoped; the producer is wired in
+    /// DA-2 (this variant only reserves the protocol shape).
+    DelegateProgress {
+        job_id: String,
+        agent: String,
+        text: String,
+    },
 }
 
 /// Authentication lifecycle event kind. Defined as pure protocol data; hosts map
@@ -183,6 +192,19 @@ impl RuntimeEvent {
             job_id: job_id.into(),
             delta: delta.into(),
             index,
+        }
+    }
+
+    #[must_use]
+    pub fn delegate_progress(
+        job_id: impl Into<String>,
+        agent: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::DelegateProgress {
+            job_id: job_id.into(),
+            agent: agent.into(),
+            text: text.into(),
         }
     }
 
@@ -310,6 +332,7 @@ impl RuntimeEvent {
             | Self::JobCancelled { .. }
             | Self::Agent { .. }
             | Self::ToolCallDelta { .. }
+            | Self::DelegateProgress { .. }
             | Self::Auth { .. } => None,
         }
     }

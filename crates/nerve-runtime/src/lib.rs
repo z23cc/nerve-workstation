@@ -18,7 +18,9 @@ pub mod runtime;
 mod tool_spec;
 
 pub use adapter::{RiskTier, RuntimeToolAdapter, ToolCapability};
-pub use command::{ApprovalMode, RUNTIME_COMMAND_NAMES, RuntimeCommand, SessionApprovalDecision};
+pub use command::{
+    ApprovalMode, DelegateAutonomy, RUNTIME_COMMAND_NAMES, RuntimeCommand, SessionApprovalDecision,
+};
 pub use error::RuntimeError;
 pub use event::{AgentEventKind, AuthEventKind, RuntimeEvent};
 pub use job::{

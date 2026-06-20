@@ -235,6 +235,7 @@ impl JobManager {
         // `RUNTIME_COMMAND_NAMES`.
         let outcome = match executor_for(&command) {
             Executor::AgentRun => self.run_agent_command(&job_id, command, &token),
+            Executor::Delegate => run_delegate_command(command),
             Executor::Session => self.sessions.handle_command(command, &token),
             Executor::Auth => self.auth.handle_command(command, &token),
             Executor::CoreHub => self.runtime.handle_command_cancellable(command, &token),
@@ -333,6 +334,22 @@ impl JobManager {
     fn emit(&self, event: RuntimeEvent) {
         (self.emit)(event);
     }
+}
+
+/// Execute a `delegate.start` command. DA-1 stub: the protocol and job plumbing
+/// are proven end-to-end here, but the external-agent subprocess driving (DA-2)
+/// is not yet implemented, so the job fails immediately with a clear marker. DA-2
+/// replaces this body with the real subprocess runtime, streaming output via
+/// [`RuntimeEvent::DelegateProgress`].
+fn run_delegate_command(command: RuntimeCommand) -> Result<Value, nerve_runtime::RuntimeError> {
+    let RuntimeCommand::DelegateStart { agent, .. } = command else {
+        return Err(nerve_runtime::RuntimeError::adapter(
+            "expected delegate.start command",
+        ));
+    };
+    Err(nerve_runtime::RuntimeError::adapter(format!(
+        "delegate runtime not yet implemented (DA-2): cannot run agent `{agent}`"
+    )))
 }
 
 impl JobRecord {
@@ -440,6 +457,9 @@ fn is_valid_job_id_byte(byte: u8) -> bool {
 enum Executor {
     /// The composition-root `agent.run` job (LLM orchestration).
     AgentRun,
+    /// The host delegate runtime (`delegate.*` family): drives an external agent
+    /// CLI subprocess. DA-1 ships a stub; DA-2 wires the real subprocess.
+    Delegate,
     /// The host `SessionManager` (`session.*` family).
     Session,
     /// The host `AuthManager` (`auth.*` family).
@@ -457,6 +477,7 @@ enum Executor {
 fn executor_for(command: &RuntimeCommand) -> Executor {
     match command {
         RuntimeCommand::AgentRun { .. } => Executor::AgentRun,
+        RuntimeCommand::DelegateStart { .. } => Executor::Delegate,
         RuntimeCommand::SessionStart { .. }
         | RuntimeCommand::SessionMessage { .. }
         | RuntimeCommand::SessionInterrupt { .. }
@@ -537,6 +558,7 @@ mod command_executor_partition {
             "session.set_mode" => json!({ "session_id": "s", "mode": "yolo" }),
             "auth.start" | "auth.status" | "auth.logout" => json!({ "provider": "p" }),
             "auth.complete" => json!({ "login_id": "l" }),
+            "delegate.start" => json!({ "agent": "codex", "task": "t" }),
             other => panic!(
                 "RUNTIME_COMMAND_NAMES gained `{other}` with no representative here; add one and \
                  wire the variant to exactly one executor in `run_job`"
@@ -578,6 +600,7 @@ mod command_executor_partition {
         );
         for executor in [
             Executor::AgentRun,
+            Executor::Delegate,
             Executor::Session,
             Executor::Auth,
             Executor::CoreHub,

@@ -205,6 +205,32 @@
       ],
       "type": "string"
     },
+    "DelegateAutonomy": {
+      "description": "Autonomy posture handed to a delegated external agent CLI, mapping to each vendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`, gemini `--approval-mode` (read-only | edit | full). Defaults to the most restricted ([`Self::ReadOnly`]) so an omitted field never grants more than read access.",
+      "oneOf": [
+        {
+          "description": "The delegated agent may only read; no edits, no command execution.",
+          "enum": [
+            "read_only"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The delegated agent may read and edit workspace files.",
+          "enum": [
+            "edit"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The delegated agent may read, edit, and run commands.",
+          "enum": [
+            "full"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "RiskTier": {
       "description": "Coarse risk classification for a tool, ordered least-to-most privileged. Advisory protocol data consumed by a future permission engine (P4); it does not gate execution today.",
       "oneOf": [
@@ -708,6 +734,49 @@
             "provider"
           ],
           "type": "object"
+        },
+        {
+          "description": "Delegate a coding task to an external agent CLI (codex / claude / gemini) as a long-lived job. Pure protocol vocabulary: the host job manager drives the subprocess (DA-2); `nerve-core` has no subprocess knowledge. `agent` is the catalog name from `list_agents`; `cwd` defaults to the workspace root; `model` overrides the agent's default model. Progress streams back as [`crate::RuntimeEvent::DelegateProgress`].",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "autonomy": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/DelegateAutonomy"
+                }
+              ],
+              "default": "read_only"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "delegate.start"
+              ],
+              "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent",
+            "kind",
+            "task"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1075,6 +1144,33 @@
           "required": [
             "kind",
             "provider",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Streaming output fragment from a delegated external agent CLI, scoped to its job. `agent` is the catalog name (codex / claude / gemini); `text` is a raw stdout/stderr chunk. Additive and job-scoped; the producer is wired in DA-2 (this variant only reserves the protocol shape).",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "delegate_progress"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent",
+            "job_id",
+            "text",
             "type"
           ],
           "type": "object"
@@ -1456,6 +1552,33 @@
           "required": [
             "kind",
             "provider",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Streaming output fragment from a delegated external agent CLI, scoped to its job. `agent` is the catalog name (codex / claude / gemini); `text` is a raw stdout/stderr chunk. Additive and job-scoped; the producer is wired in DA-2 (this variant only reserves the protocol shape).",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "delegate_progress"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent",
+            "job_id",
+            "text",
             "type"
           ],
           "type": "object"

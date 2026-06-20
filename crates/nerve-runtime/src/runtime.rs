@@ -118,6 +118,9 @@ where
             | RuntimeCommand::AuthLogout { .. } => Err(RuntimeError::adapter(
                 "auth commands are executed by the host auth manager, not the core runtime",
             )),
+            RuntimeCommand::DelegateStart { .. } => Err(RuntimeError::adapter(
+                "delegate.start is executed by the host delegate runtime, not the core runtime",
+            )),
         }
     }
 }
