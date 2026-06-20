@@ -761,6 +761,16 @@
               ],
               "type": "string"
             },
+            "mcp_enable": {
+              "description": "DA-6 (codex only): the MCP allowlist for this delegated codex session — the `[mcp_servers.<name>]` entries to keep enabled; every other configured server is disabled for a fast start. `Some(list)` overrides the persisted `[delegate.codex] mcp_enable` config (an empty list disables ALL); `None` falls back to that config. Ignored for non-codex agents.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "model": {
               "type": [
                 "string",

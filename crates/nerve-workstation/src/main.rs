@@ -11,6 +11,7 @@ mod commands;
 mod cost;
 mod daemon;
 mod delegate;
+mod delegate_codex_mcp;
 mod delegate_live;
 mod delegate_proxy;
 mod delegate_runtime;

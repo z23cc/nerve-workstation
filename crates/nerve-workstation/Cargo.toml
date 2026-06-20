@@ -20,6 +20,7 @@ semantic = ["nerve-core/semantic", "nerve-runtime/semantic"]
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
+directories = { workspace = true }
 nerve-agent = { path = "../nerve-agent" }
 nerve-core = { path = "../nerve-core" }
 nerve-runtime = { path = "../nerve-runtime" }

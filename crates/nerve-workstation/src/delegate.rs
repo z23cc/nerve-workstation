@@ -84,16 +84,50 @@ pub(crate) fn handle_tool_call(params: &Value) -> Option<Value> {
 }
 
 /// Resolve one catalog agent's availability by a PATH lookup (no spawn) and
-/// render it as the protocol shape.
+/// render it as the protocol shape. For codex, also surface the DA-6 MCP allowlist
+/// view (`mcp_servers`) so a client can see which servers a delegated codex would
+/// boot.
 fn probe_agent(spec: &AgentSpec) -> Value {
     let path = resolve_on_path(spec.binary);
-    json!({
+    let mut entry = json!({
         "name": spec.name,
         "binary": spec.binary,
         "available": path.is_some(),
         "path": path.as_ref().map(|p| p.display().to_string()),
         "autonomy_modes": AUTONOMY_MODES,
-    })
+    });
+    if spec.name == "codex" {
+        entry["mcp_servers"] = codex_mcp_servers_view();
+    }
+    entry
+}
+
+/// The read-only DA-6 MCP view for the codex agent entry: each discovered
+/// `[mcp_servers.<name>]` from `~/.codex/config.toml` with `enabled = name ∈
+/// effective config allowlist` (`toggleable: true`), followed by codex's built-in
+/// plugin/app servers marked `toggleable: false` (the `mcp_servers.*` override
+/// cannot disable them — DA-6 out of scope). Uses the **config** allowlist; a
+/// `delegate.start` may still override it per call.
+fn codex_mcp_servers_view() -> Value {
+    let allowlist: std::collections::BTreeSet<String> = crate::runconfig::codex_mcp_allowlist()
+        .into_iter()
+        .collect();
+    let mut servers: Vec<Value> = crate::delegate_codex_mcp::discover_codex_mcp_servers()
+        .into_iter()
+        .map(|name| {
+            let enabled = allowlist.contains(&name);
+            json!({ "name": name, "enabled": enabled, "toggleable": true })
+        })
+        .collect();
+    // The built-in plugin/app servers are always present and non-toggleable: the
+    // `mcp_servers.*` override does not reach them, so a client should not expect
+    // the allowlist to affect them.
+    servers.extend(
+        crate::delegate_codex_mcp::NON_TOGGLEABLE_PLUGIN_SERVERS
+            .iter()
+            .map(|name| json!({ "name": name, "enabled": true, "toggleable": false })),
+    );
+    Value::Array(servers)
 }
 
 /// Resolve `binary` against the `PATH` environment variable, returning the first
@@ -164,6 +198,49 @@ mod tests {
                 agent["autonomy_modes"],
                 json!(["read_only", "edit", "full"])
             );
+        }
+    }
+
+    #[test]
+    fn list_agents_codex_entry_carries_mcp_servers_view() {
+        // DA-6: the codex entry surfaces an `mcp_servers` allowlist view; the other
+        // agents do not. Discovery is pinned to {chrome-devtools, xcodebuildmcp} and
+        // the config allowlist opts chrome-devtools in (thread-local overrides, so no
+        // process-env mutation — env writes race with concurrent readers).
+        let result = crate::delegate_codex_mcp::test_override::with(
+            &["chrome-devtools", "xcodebuildmcp"],
+            || {
+                crate::runconfig::codex_allowlist_override::with(&["chrome-devtools"], || {
+                    handle_tool_call(&json!({ "name": "list_agents" })).expect("claimed")
+                })
+            },
+        );
+        let agents = result["agents"].as_array().expect("agents array");
+        let codex = agents.iter().find(|a| a["name"] == "codex").expect("codex");
+        let servers = codex["mcp_servers"].as_array().expect("mcp_servers array");
+        // Two declared servers (toggleable) + 4 built-in plugins (non-toggleable).
+        let declared: Vec<_> = servers
+            .iter()
+            .filter(|s| s["toggleable"] == json!(true))
+            .map(|s| (s["name"].as_str().unwrap(), s["enabled"].as_bool().unwrap()))
+            .collect();
+        assert_eq!(
+            declared,
+            vec![("chrome-devtools", true), ("xcodebuildmcp", false)],
+            "allowlist opts chrome-devtools in, disables xcodebuildmcp"
+        );
+        let plugins: Vec<_> = servers
+            .iter()
+            .filter(|s| s["toggleable"] == json!(false))
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            plugins,
+            crate::delegate_codex_mcp::NON_TOGGLEABLE_PLUGIN_SERVERS.to_vec()
+        );
+        // The other agents never carry the codex-specific view.
+        for other in agents.iter().filter(|a| a["name"] != "codex") {
+            assert!(other.get("mcp_servers").is_none(), "{other}");
         }
     }
 

@@ -160,6 +160,14 @@ pub enum RuntimeCommand {
         autonomy: DelegateAutonomy,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// DA-6 (codex only): the MCP allowlist for this delegated codex session —
+        /// the `[mcp_servers.<name>]` entries to keep enabled; every other
+        /// configured server is disabled for a fast start. `Some(list)` overrides
+        /// the persisted `[delegate.codex] mcp_enable` config (an empty list
+        /// disables ALL); `None` falls back to that config. Ignored for non-codex
+        /// agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_enable: Option<Vec<String>>,
     },
     /// Steer a live delegated session with a follow-up user message, running one
     /// more turn against the same long-lived agent process. Pure protocol
@@ -382,16 +390,59 @@ mod tests {
                 cwd,
                 autonomy,
                 model,
+                mcp_enable,
             } => {
                 assert_eq!(agent, "codex");
                 assert_eq!(task, "add a test");
                 assert_eq!(cwd, None);
                 assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
                 assert_eq!(model, None);
+                assert_eq!(mcp_enable, None);
             }
             other => panic!("unexpected variant: {}", other.name()),
         }
         assert!(RUNTIME_COMMAND_NAMES.contains(&"delegate.start"));
+    }
+
+    #[test]
+    fn delegate_start_round_trips_mcp_enable_allowlist() {
+        // DA-6: a per-call codex MCP allowlist round-trips (and an empty list is a
+        // valid override meaning "disable all").
+        let value = serde_json::json!({
+            "kind": "delegate.start",
+            "agent": "codex",
+            "task": "investigate",
+            "mcp_enable": ["chrome-devtools"],
+        });
+        let command: RuntimeCommand = serde_json::from_value(value).expect("parse with allowlist");
+        match command {
+            RuntimeCommand::DelegateStart { mcp_enable, .. } => {
+                assert_eq!(mcp_enable, Some(vec!["chrome-devtools".to_string()]));
+            }
+            other => panic!("unexpected variant: {}", other.name()),
+        }
+
+        // Re-serialize: `mcp_enable` is present when Some, absent when None.
+        let with = RuntimeCommand::DelegateStart {
+            agent: "codex".into(),
+            task: "t".into(),
+            cwd: None,
+            autonomy: DelegateAutonomy::ReadOnly,
+            model: None,
+            mcp_enable: Some(vec![]),
+        };
+        let json = serde_json::to_value(&with).expect("serialize Some([])");
+        assert_eq!(json["mcp_enable"], serde_json::json!([]));
+        let without = RuntimeCommand::DelegateStart {
+            agent: "codex".into(),
+            task: "t".into(),
+            cwd: None,
+            autonomy: DelegateAutonomy::ReadOnly,
+            model: None,
+            mcp_enable: None,
+        };
+        let json = serde_json::to_value(&without).expect("serialize None");
+        assert!(json.get("mcp_enable").is_none(), "None is skipped: {json}");
     }
 
     #[test]

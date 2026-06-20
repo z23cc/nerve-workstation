@@ -163,28 +163,37 @@ impl DelegateAgent {
 /// Build the argv (and stdin payload) for a delegated run. `cwd` is the already
 /// confined child working directory (see [`resolve_delegate_cwd`]); `model`
 /// overrides the agent's default model when set.
+///
+/// DA-6: `mcp_disable_flags` are the pre-computed, sorted `-c
+/// mcp_servers.<name>.enabled=false` pairs for the codex servers this run must skip
+/// (see [`crate::delegate_codex_mcp`]). They apply to the **codex** one-shot recipe
+/// only; claude/gemini ignore them. An empty slice leaves the argv unchanged.
 pub(crate) fn build_command(
     agent: DelegateAgent,
     task: &str,
     cwd: &Path,
     autonomy: DelegateAutonomy,
     model: Option<&str>,
+    mcp_disable_flags: &[String],
 ) -> DelegateInvocation {
     match agent {
-        DelegateAgent::Codex => build_codex(task, cwd, autonomy, model),
+        DelegateAgent::Codex => build_codex(task, cwd, autonomy, model, mcp_disable_flags),
         DelegateAgent::Claude => build_claude(task, cwd, autonomy, model),
         DelegateAgent::Gemini => build_gemini(task, cwd, autonomy, model),
     }
 }
 
-/// `codex exec --json --skip-git-repo-check --sandbox <S> -C <cwd> [-m <model>] -`
-/// with the task on stdin (the trailing `-` makes codex read the prompt from
-/// stdin). Emits JSONL events on stdout.
+/// `codex exec --json --skip-git-repo-check [-c mcp_servers.<n>.enabled=false …]
+/// --sandbox <S> -C <cwd> [-m <model>] -` with the task on stdin (the trailing `-`
+/// makes codex read the prompt from stdin). Emits JSONL events on stdout. The DA-6
+/// MCP-disable `-c` pairs (if any) are inserted before `--sandbox` so codex applies
+/// them at boot, in the order given (callers pass an already-sorted set).
 fn build_codex(
     task: &str,
     cwd: &Path,
     autonomy: DelegateAutonomy,
     model: Option<&str>,
+    mcp_disable_flags: &[String],
 ) -> DelegateInvocation {
     let sandbox = match autonomy {
         DelegateAutonomy::ReadOnly => "read-only",
@@ -195,11 +204,12 @@ fn build_codex(
         "exec".to_string(),
         "--json".to_string(),
         "--skip-git-repo-check".to_string(),
-        "--sandbox".to_string(),
-        sandbox.to_string(),
-        "-C".to_string(),
-        cwd.display().to_string(),
     ];
+    args.extend(mcp_disable_flags.iter().cloned());
+    args.push("--sandbox".to_string());
+    args.push(sandbox.to_string());
+    args.push("-C".to_string());
+    args.push(cwd.display().to_string());
     if let Some(model) = model {
         args.push("-m".to_string());
         args.push(model.to_string());
@@ -559,6 +569,7 @@ mod tests {
             cwd,
             DelegateAutonomy::ReadOnly,
             None,
+            &[],
         );
         assert_eq!(ro.spec.command, "codex");
         assert_eq!(
@@ -582,6 +593,7 @@ mod tests {
             cwd,
             DelegateAutonomy::Edit,
             Some("o3"),
+            &[],
         );
         assert_eq!(
             edit.spec.args,
@@ -608,8 +620,82 @@ mod tests {
             Path::new("/w"),
             DelegateAutonomy::Full,
             None,
+            &[],
         );
         assert!(inv.spec.args.iter().any(|a| a == "danger-full-access"));
+    }
+
+    #[test]
+    fn codex_one_shot_argv_inserts_mcp_disable_flags_before_sandbox() {
+        // DA-6: disabled {b, c} -> their `-c …=false` pairs land between
+        // --skip-git-repo-check and --sandbox, in the order given (sorted by the
+        // caller). The allowed server "a" is never disabled.
+        let flags = crate::delegate_codex_mcp::disable_flags(&["b".to_string(), "c".to_string()]);
+        let inv = build_command(
+            DelegateAgent::Codex,
+            "do it",
+            Path::new("/work"),
+            DelegateAutonomy::ReadOnly,
+            None,
+            &flags,
+        );
+        assert_eq!(
+            inv.spec.args,
+            vec![
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-c",
+                "mcp_servers.b.enabled=false",
+                "-c",
+                "mcp_servers.c.enabled=false",
+                "--sandbox",
+                "read-only",
+                "-C",
+                "/work",
+                "-",
+            ]
+        );
+        assert!(
+            !inv.spec
+                .args
+                .iter()
+                .any(|a| a == "mcp_servers.a.enabled=false"),
+            "{:?}",
+            inv.spec.args
+        );
+    }
+
+    #[test]
+    fn mcp_disable_flags_only_apply_to_codex() {
+        // claude/gemini ignore the codex MCP-disable flags entirely.
+        let flags = crate::delegate_codex_mcp::disable_flags(&["b".to_string()]);
+        let claude = build_command(
+            DelegateAgent::Claude,
+            "t",
+            Path::new("/w"),
+            DelegateAutonomy::ReadOnly,
+            None,
+            &flags,
+        );
+        assert!(
+            !claude.spec.args.iter().any(|a| a.contains("mcp_servers")),
+            "{:?}",
+            claude.spec.args
+        );
+        let gemini = build_command(
+            DelegateAgent::Gemini,
+            "t",
+            Path::new("/w"),
+            DelegateAutonomy::ReadOnly,
+            None,
+            &flags,
+        );
+        assert!(
+            !gemini.spec.args.iter().any(|a| a.contains("mcp_servers")),
+            "{:?}",
+            gemini.spec.args
+        );
     }
 
     #[test]
@@ -621,6 +707,7 @@ mod tests {
             cwd,
             DelegateAutonomy::ReadOnly,
             None,
+            &[],
         );
         assert_eq!(plan.spec.command, "claude");
         assert_eq!(
@@ -644,6 +731,7 @@ mod tests {
             cwd,
             DelegateAutonomy::Edit,
             Some("claude-sonnet-4-6"),
+            &[],
         );
         assert_eq!(
             edit.spec.args,
@@ -670,6 +758,7 @@ mod tests {
             Path::new("/w"),
             DelegateAutonomy::Full,
             None,
+            &[],
         );
         assert!(inv.spec.args.iter().any(|a| a == "bypassPermissions"));
     }
@@ -682,6 +771,7 @@ mod tests {
             Path::new("/w"),
             DelegateAutonomy::Full,
             Some("gemini-2.5-pro"),
+            &[],
         );
         assert_eq!(inv.spec.command, "gemini");
         assert_eq!(

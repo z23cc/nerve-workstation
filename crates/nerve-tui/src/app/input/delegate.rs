@@ -81,6 +81,9 @@ fn delegate_start_command(agent: String, task: String) -> RuntimeCommand {
         cwd: None,
         autonomy: DelegateAutonomy::ReadOnly,
         model: None,
+        // The TUI does not expose a per-call codex MCP allowlist; the daemon falls
+        // back to the persisted `[delegate.codex] mcp_enable` config (DA-6).
+        mcp_enable: None,
     }
 }
 
@@ -157,12 +160,14 @@ mod tests {
                 cwd,
                 autonomy,
                 model,
+                mcp_enable,
             } => {
                 assert_eq!(agent, "claude");
                 assert_eq!(task, "fix the bug");
                 assert_eq!(cwd, None);
                 assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
                 assert_eq!(model, None);
+                assert_eq!(mcp_enable, None);
             }
             other => panic!("expected DelegateStart, got {other:?}"),
         }

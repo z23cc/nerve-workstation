@@ -128,16 +128,24 @@ impl TurnAccumulator {
 
 /// Build the `codex app-server` argv. The two `-c` overrides set the per-tool
 /// output cap and enable mid-turn steering; `app-server` selects the ndjson server.
-pub(super) fn build_codex_app_server_command() -> CommandSpec {
+///
+/// DA-6: `mcp_disable_flags` are the pre-computed, sorted `-c
+/// mcp_servers.<name>.enabled=false` pairs for the servers this delegated session
+/// must skip (see [`crate::delegate_codex_mcp`]). They are inserted before
+/// `app-server` so codex applies them at boot; an empty slice leaves the argv
+/// unchanged (every configured MCP server boots, the pre-DA-6 behavior).
+pub(super) fn build_codex_app_server_command(mcp_disable_flags: &[String]) -> CommandSpec {
+    let mut args = vec![
+        "-c".to_string(),
+        format!("tool_output_token_limit={TOOL_OUTPUT_TOKEN_LIMIT}"),
+        "-c".to_string(),
+        "features.steer=true".to_string(),
+    ];
+    args.extend(mcp_disable_flags.iter().cloned());
+    args.push("app-server".to_string());
     CommandSpec {
         command: "codex".to_string(),
-        args: vec![
-            "-c".to_string(),
-            format!("tool_output_token_limit={TOOL_OUTPUT_TOKEN_LIMIT}"),
-            "-c".to_string(),
-            "features.steer=true".to_string(),
-            "app-server".to_string(),
-        ],
+        args,
     }
 }
 
@@ -243,7 +251,8 @@ mod tests {
 
     #[test]
     fn app_server_argv_sets_overrides_and_app_server() {
-        let spec = build_codex_app_server_command();
+        // No disable flags (empty slice) -> the pre-DA-6 argv, unchanged.
+        let spec = build_codex_app_server_command(&[]);
         assert_eq!(spec.command, "codex");
         assert_eq!(
             spec.args,
@@ -254,6 +263,35 @@ mod tests {
                 "features.steer=true",
                 "app-server",
             ]
+        );
+    }
+
+    #[test]
+    fn app_server_argv_inserts_mcp_disable_flags_before_app_server() {
+        // DA-6: disabled {b, c} -> their `-c …=false` pairs land between the
+        // steer override and the `app-server` subcommand, in the order given
+        // (callers pass an already-sorted set).
+        let flags = crate::delegate_codex_mcp::disable_flags(&["b".to_string(), "c".to_string()]);
+        let spec = build_codex_app_server_command(&flags);
+        assert_eq!(
+            spec.args,
+            vec![
+                "-c",
+                "tool_output_token_limit=32000",
+                "-c",
+                "features.steer=true",
+                "-c",
+                "mcp_servers.b.enabled=false",
+                "-c",
+                "mcp_servers.c.enabled=false",
+                "app-server",
+            ]
+        );
+        // The allowed server "a" is never disabled.
+        assert!(
+            !spec.args.iter().any(|a| a == "mcp_servers.a.enabled=false"),
+            "{:?}",
+            spec.args
         );
     }
 

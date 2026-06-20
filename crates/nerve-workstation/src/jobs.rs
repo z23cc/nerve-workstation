@@ -414,7 +414,10 @@ impl JobManager {
                 cwd,
                 autonomy,
                 model,
-            } => self.run_delegate_start(job_id, &agent, &task, cwd, autonomy, model, token),
+                mcp_enable,
+            } => self.run_delegate_start(
+                job_id, &agent, &task, cwd, autonomy, model, mcp_enable, token,
+            ),
             RuntimeCommand::DelegateSteer {
                 session_id,
                 message,
@@ -429,10 +432,15 @@ impl JobManager {
     /// Start a delegated run: a `claude` (DA-5a) or `codex` (DA-5c) agent becomes a
     /// live, steerable session that parks after turn 1; `gemini` stays one-shot
     /// (DA-2).
+    ///
+    /// DA-6: for a **codex** run, compute the `-c mcp_servers.<name>.enabled=false`
+    /// flags from the effective allowlist (per-call `mcp_enable` if present, else the
+    /// persisted `[delegate.codex] mcp_enable` config) and thread them into the argv;
+    /// claude/gemini get an empty set and are unaffected.
     #[allow(clippy::too_many_arguments)] // reason: one cohesive start call; the agent
-    // name, task, cwd, autonomy, and model are independent inputs to the spawn,
-    // and bundling them into a struct would add indirection without isolating any
-    // separate responsibility.
+    // name, task, cwd, autonomy, model, and per-call mcp allowlist are independent
+    // inputs to the spawn, and bundling them into a struct would add indirection
+    // without isolating any separate responsibility.
     fn run_delegate_start(
         &self,
         job_id: &str,
@@ -441,6 +449,7 @@ impl JobManager {
         cwd: Option<String>,
         autonomy: DelegateAutonomy,
         model: Option<String>,
+        mcp_enable: Option<Vec<String>>,
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
         let resolved = DelegateAgent::from_name(agent)
@@ -448,12 +457,30 @@ impl JobManager {
         let root = self.delegate_root()?;
         let run_cwd = delegate_runtime::resolve_delegate_cwd(&root, cwd.as_deref())
             .map_err(delegate_error)?;
+        let mcp_disable_flags =
+            crate::delegate_codex_mcp::delegate_disable_flags(resolved, mcp_enable);
         if matches!(resolved, DelegateAgent::Claude | DelegateAgent::Codex) {
-            return self
-                .run_delegate_live(job_id, resolved, &run_cwd, autonomy, task, model, token);
+            return self.run_delegate_live(
+                job_id,
+                resolved,
+                &run_cwd,
+                autonomy,
+                task,
+                model,
+                &mcp_disable_flags,
+                token,
+            );
         }
         self.run_delegate(
-            job_id, resolved, agent, task, &run_cwd, autonomy, model, token,
+            job_id,
+            resolved,
+            agent,
+            task,
+            &run_cwd,
+            autonomy,
+            model,
+            &mcp_disable_flags,
+            token,
         )
     }
 
@@ -463,8 +490,9 @@ impl JobManager {
     /// steer it. The job result (delivered when it finally closes) is turn 1's
     /// outcome.
     #[allow(clippy::too_many_arguments)] // reason: one cohesive start call; the
-    // resolved agent, cwd, autonomy, task, and model are independent spawn inputs;
-    // bundling them adds indirection without isolating a responsibility.
+    // resolved agent, cwd, autonomy, task, model, and codex mcp-disable flags are
+    // independent spawn inputs; bundling them adds indirection without isolating a
+    // responsibility.
     fn run_delegate_live(
         &self,
         job_id: &str,
@@ -473,6 +501,7 @@ impl JobManager {
         autonomy: DelegateAutonomy,
         task: &str,
         model: Option<String>,
+        mcp_disable_flags: &[String],
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
         let agent = resolved.catalog_name();
@@ -499,6 +528,7 @@ impl JobManager {
                 task,
                 model,
                 proxy,
+                mcp_disable_flags,
                 token,
                 &mut on_progress,
             )
@@ -532,7 +562,8 @@ impl JobManager {
     }
 
     /// Spawn the right persistent driver for `resolved` and run turn 1, returning the
-    /// live driver wrapper plus the first turn's outcome.
+    /// live driver wrapper plus the first turn's outcome. `mcp_disable_flags` apply to
+    /// the codex driver only (DA-6); the claude driver ignores them.
     #[allow(clippy::too_many_arguments)] // reason: a single spawn call; the inputs are
     // independent and a struct would add indirection without isolating a concern.
     fn start_live_driver(
@@ -543,6 +574,7 @@ impl JobManager {
         task: &str,
         model: Option<String>,
         proxy: Option<DelegateProxy>,
+        mcp_disable_flags: &[String],
         token: &CancelToken,
         on_progress: &mut dyn FnMut(&str),
     ) -> Result<
@@ -562,6 +594,7 @@ impl JobManager {
                     model.as_deref(),
                     task,
                     proxy,
+                    mcp_disable_flags,
                     token,
                     on_progress,
                 )?;
@@ -673,8 +706,8 @@ impl JobManager {
     /// Spawn the delegated CLI through the streaming launcher, forwarding progress
     /// and parsing the stream into a [`DelegateOutcome`].
     #[allow(clippy::too_many_arguments)] // reason: one cohesive spawn call; splitting the
-    // resolved/raw agent name, cwd, autonomy, and model into a struct would add
-    // indirection without separating any responsibility.
+    // resolved/raw agent name, cwd, autonomy, model, and codex mcp-disable flags into
+    // a struct would add indirection without separating any responsibility.
     fn run_delegate(
         &self,
         job_id: &str,
@@ -684,10 +717,17 @@ impl JobManager {
         cwd: &std::path::Path,
         autonomy: DelegateAutonomy,
         model: Option<String>,
+        mcp_disable_flags: &[String],
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
-        let invocation =
-            delegate_runtime::build_command(resolved, task, cwd, autonomy, model.as_deref());
+        let invocation = delegate_runtime::build_command(
+            resolved,
+            task,
+            cwd,
+            autonomy,
+            model.as_deref(),
+            mcp_disable_flags,
+        );
         let policy = delegate_runtime::delegate_policy(cwd);
         let mut parser = DelegateParser::new(resolved);
         let emit = Arc::clone(&self.emit);

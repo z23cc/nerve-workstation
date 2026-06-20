@@ -25,6 +25,86 @@ pub(crate) struct RunConfig {
     pub(crate) default_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) default_model: Option<String>,
+    /// Per-target delegation settings (DA-6). Currently only the codex MCP
+    /// allowlist; absent by default (no settings overrides the built-in defaults).
+    #[serde(default, skip_serializing_if = "DelegateConfig::is_empty")]
+    pub(crate) delegate: DelegateConfig,
+}
+
+/// Delegation-target settings, keyed by external agent. JSON shape (in
+/// `config.json`):
+///
+/// ```json
+/// { "delegate": { "codex": { "mcp_enable": ["chrome-devtools"] } } }
+/// ```
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct DelegateConfig {
+    #[serde(default, skip_serializing_if = "DelegateCodexConfig::is_empty")]
+    pub(crate) codex: DelegateCodexConfig,
+}
+
+impl DelegateConfig {
+    /// Whether every nested target is at its default (so the whole block can be
+    /// skipped on serialize).
+    fn is_empty(&self) -> bool {
+        self.codex.is_empty()
+    }
+}
+
+/// codex-specific delegation settings (DA-6).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct DelegateCodexConfig {
+    /// MCP allowlist for delegated codex sessions: the `[mcp_servers.<name>]`
+    /// entries (from `~/.codex/config.toml`) to keep ENABLED. Every other
+    /// configured server is disabled (`-c mcp_servers.<name>.enabled=false`) so a
+    /// delegated codex starts fast. **Empty/absent disables all configured MCP
+    /// servers** — opt servers back in by listing their names here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) mcp_enable: Vec<String>,
+}
+
+impl DelegateCodexConfig {
+    fn is_empty(&self) -> bool {
+        self.mcp_enable.is_empty()
+    }
+}
+
+/// The codex MCP allowlist from the persisted config (the read-only default used
+/// when a `delegate.start` carries no per-call override). Empty/absent => all
+/// configured codex MCP servers are disabled for delegated runs.
+#[must_use]
+pub(crate) fn codex_mcp_allowlist() -> Vec<String> {
+    #[cfg(test)]
+    if let Some(allowlist) = codex_allowlist_override::take() {
+        return allowlist;
+    }
+    load().delegate.codex.mcp_enable
+}
+
+/// Test-only override for [`codex_mcp_allowlist`]: a thread-local config allowlist so
+/// integration tests are deterministic **without** mutating process-wide env (env
+/// writes race with concurrent readers under Rust 2024). Thread-local => isolated.
+#[cfg(test)]
+pub(crate) mod codex_allowlist_override {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static ALLOWLIST: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` with the persisted codex allowlist on this thread pinned to `allow`.
+    pub(crate) fn with<T>(allow: &[&str], f: impl FnOnce() -> T) -> T {
+        let value: Vec<String> = allow.iter().map(|s| (*s).to_string()).collect();
+        let prev = ALLOWLIST.with(|cell| cell.borrow_mut().replace(value));
+        let out = f();
+        ALLOWLIST.with(|cell| *cell.borrow_mut() = prev);
+        out
+    }
+
+    /// The current thread's pinned allowlist, if any.
+    pub(super) fn take() -> Option<Vec<String>> {
+        ALLOWLIST.with(|cell| cell.borrow().clone())
+    }
 }
 
 /// Built-in providers: `(id, canonical --provider name, model hint)`.
@@ -99,10 +179,14 @@ pub(crate) fn resolve(
             provider.or(config.default_provider),
             model.or(config.default_model),
         )?;
-        if let Err(err) = save(&RunConfig {
+        // Persist the picked default, preserving any other config (e.g. the
+        // delegate codex MCP allowlist) the user already has on disk.
+        let saved = RunConfig {
             default_provider: Some(picked.0.clone()),
             default_model: Some(picked.1.clone()),
-        }) {
+            delegate: config.delegate.clone(),
+        };
+        if let Err(err) = save(&saved) {
             eprintln!("\u{26a0}  could not save default model: {err}");
         }
         return Ok(picked);
@@ -205,6 +289,7 @@ mod tests {
         let cfg = RunConfig {
             default_provider: Some("xai".into()),
             default_model: Some("grok-4-fast".into()),
+            ..Default::default()
         };
         assert_eq!(
             decide(Some("claude".into()), Some("m".into()), &cfg),
@@ -236,11 +321,49 @@ mod tests {
         let cfg = RunConfig {
             default_provider: Some("claude".into()),
             default_model: Some("claude-sonnet-4".into()),
+            ..Default::default()
         };
         save_to(&path, &cfg).expect("save");
         let loaded = load_from(&path);
         assert_eq!(loaded.default_provider.as_deref(), Some("claude"));
         assert_eq!(loaded.default_model.as_deref(), Some("claude-sonnet-4"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delegate_codex_allowlist_round_trips_and_is_skipped_when_empty() {
+        // An empty delegate block is skipped on serialize (config stays minimal).
+        let minimal = RunConfig {
+            default_provider: Some("claude".into()),
+            default_model: Some("m".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&minimal).expect("serialize");
+        assert!(
+            !json.contains("delegate"),
+            "an empty delegate block must be skipped: {json}"
+        );
+
+        // A populated allowlist round-trips through the nested JSON shape.
+        let path = std::env::temp_dir().join(format!(
+            "nerve-runconfig-delegate-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let cfg = RunConfig {
+            delegate: DelegateConfig {
+                codex: DelegateCodexConfig {
+                    mcp_enable: vec!["chrome-devtools".into(), "xcodebuildmcp".into()],
+                },
+            },
+            ..Default::default()
+        };
+        save_to(&path, &cfg).expect("save");
+        let loaded = load_from(&path);
+        assert_eq!(
+            loaded.delegate.codex.mcp_enable,
+            vec!["chrome-devtools".to_string(), "xcodebuildmcp".to_string()]
+        );
         let _ = std::fs::remove_file(&path);
     }
 

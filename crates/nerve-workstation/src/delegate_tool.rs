@@ -103,12 +103,19 @@ impl<T: ToolBox> DelegateAgentToolBox<T> {
         })?;
         let cwd = delegate_runtime::resolve_delegate_cwd(root, args.cwd.as_deref())
             .map_err(delegate_tool_error)?;
+        // DA-6: for a codex delegation, disable the configured MCP servers that are
+        // not on the effective allowlist (per-call `mcp_enable` overriding the
+        // persisted `[delegate.codex] mcp_enable` config). Non-codex agents get an
+        // empty set (the flags are codex-only).
+        let mcp_disable_flags =
+            crate::delegate_codex_mcp::delegate_disable_flags(agent, args.mcp_enable.clone());
         let invocation = delegate_runtime::build_command(
             agent,
             task,
             &cwd,
             args.autonomy,
             args.model.as_deref(),
+            &mcp_disable_flags,
         );
         let mut policy = delegate_runtime::delegate_policy(&cwd);
         if let Some(secs) = args.timeout_secs {
@@ -193,6 +200,11 @@ struct DelegateArgs {
     model: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// DA-6 (codex only): MCP allowlist for this delegated codex run. `Some(list)`
+    /// overrides the persisted `[delegate.codex] mcp_enable` config (empty disables
+    /// all); `None` uses the config. Ignored for claude/gemini.
+    #[serde(default)]
+    mcp_enable: Option<Vec<String>>,
 }
 
 fn delegate_agent_spec() -> ToolSpec {
@@ -238,6 +250,15 @@ fn delegate_agent_spec() -> ToolSpec {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Optional wall-clock timeout in seconds (default 600)."
+                },
+                "mcp_enable": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "codex only: MCP allowlist for this delegation — the \
+                        configured `[mcp_servers.<name>]` to keep enabled (every other is \
+                        disabled for a fast start). An empty array disables ALL; omit to use \
+                        the persisted `[delegate.codex] mcp_enable` config. Ignored for \
+                        claude/gemini."
                 }
             },
             "required": ["agent", "task"],
@@ -365,13 +386,16 @@ mod tests {
     fn codex_argv_read_only_reaches_launcher() {
         let launcher = Arc::new(RecordingLauncher::new(""));
         let tools = delegate_box(FakeInner, launcher.clone(), true, None);
-        tools
-            .call(
-                DELEGATE_AGENT,
-                &json!({ "agent": "codex", "task": "investigate" }),
-                &CancelToken::never(),
-            )
-            .expect("enabled delegate runs");
+        // Pin discovery to empty so the base argv carries no DA-6 MCP flags.
+        crate::delegate_codex_mcp::test_override::with(&[], || {
+            tools
+                .call(
+                    DELEGATE_AGENT,
+                    &json!({ "agent": "codex", "task": "investigate" }),
+                    &CancelToken::never(),
+                )
+                .expect("enabled delegate runs");
+        });
         let seen = launcher.seen.lock().expect("seen lock").clone();
         assert_eq!(
             seen,
@@ -393,6 +417,86 @@ mod tests {
         assert_eq!(
             *launcher.seen_timeout.lock().expect("timeout lock"),
             Some(DEFAULT_DELEGATE_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn codex_per_call_mcp_allowlist_reaches_launcher_as_disable_flags() {
+        // DA-6: discovery sees {a, b, c}; the per-call allowlist {a} disables {b, c}
+        // (sorted) on the codex one-shot argv, and never disables the allowed "a".
+        let launcher = Arc::new(RecordingLauncher::new(""));
+        let tools = delegate_box(FakeInner, launcher.clone(), true, None);
+        crate::delegate_codex_mcp::test_override::with(&["a", "b", "c"], || {
+            tools
+                .call(
+                    DELEGATE_AGENT,
+                    &json!({ "agent": "codex", "task": "x", "mcp_enable": ["a"] }),
+                    &CancelToken::never(),
+                )
+                .expect("runs");
+        });
+        let seen = launcher
+            .seen
+            .lock()
+            .expect("seen lock")
+            .clone()
+            .expect("seen");
+        assert_eq!(seen.0, "codex");
+        assert!(
+            seen.1
+                .windows(2)
+                .any(|w| w == ["-c", "mcp_servers.b.enabled=false"]),
+            "{:?}",
+            seen.1
+        );
+        assert!(
+            seen.1
+                .windows(2)
+                .any(|w| w == ["-c", "mcp_servers.c.enabled=false"]),
+            "{:?}",
+            seen.1
+        );
+        assert!(
+            !seen.1.iter().any(|a| a == "mcp_servers.a.enabled=false"),
+            "allowed server must not be disabled: {:?}",
+            seen.1
+        );
+    }
+
+    #[test]
+    fn codex_config_allowlist_used_when_no_per_call_override() {
+        // No per-call `mcp_enable`: the persisted config allowlist applies. Discovery
+        // {a, b}; config allows {a} -> only b is disabled.
+        let launcher = Arc::new(RecordingLauncher::new(""));
+        let tools = delegate_box(FakeInner, launcher.clone(), true, None);
+        crate::delegate_codex_mcp::test_override::with(&["a", "b"], || {
+            crate::runconfig::codex_allowlist_override::with(&["a"], || {
+                tools
+                    .call(
+                        DELEGATE_AGENT,
+                        &json!({ "agent": "codex", "task": "x" }),
+                        &CancelToken::never(),
+                    )
+                    .expect("runs");
+            });
+        });
+        let seen = launcher
+            .seen
+            .lock()
+            .expect("seen lock")
+            .clone()
+            .expect("seen");
+        assert!(
+            seen.1
+                .windows(2)
+                .any(|w| w == ["-c", "mcp_servers.b.enabled=false"]),
+            "{:?}",
+            seen.1
+        );
+        assert!(
+            !seen.1.iter().any(|a| a == "mcp_servers.a.enabled=false"),
+            "config-allowed server must not be disabled: {:?}",
+            seen.1
         );
     }
 
@@ -425,13 +529,17 @@ mod tests {
     fn custom_timeout_is_applied() {
         let launcher = Arc::new(RecordingLauncher::new(""));
         let tools = delegate_box(FakeInner, launcher.clone(), true, None);
-        tools
-            .call(
-                DELEGATE_AGENT,
-                &json!({ "agent": "codex", "task": "x", "timeout_secs": 30 }),
-                &CancelToken::never(),
-            )
-            .expect("runs");
+        // Pin discovery to empty so this codex call does not read the machine's real
+        // ~/.codex config (keeps the test deterministic and env-free).
+        crate::delegate_codex_mcp::test_override::with(&[], || {
+            tools
+                .call(
+                    DELEGATE_AGENT,
+                    &json!({ "agent": "codex", "task": "x", "timeout_secs": 30 }),
+                    &CancelToken::never(),
+                )
+                .expect("runs");
+        });
         assert_eq!(
             *launcher.seen_timeout.lock().expect("timeout lock"),
             Some(Duration::from_secs(30))
@@ -464,13 +572,16 @@ mod tests {
             true,
             Some(sink),
         );
-        let out = tools
-            .call(
-                DELEGATE_AGENT,
-                &json!({ "agent": "codex", "task": "do it" }),
-                &CancelToken::never(),
-            )
-            .expect("runs");
+        // Pin discovery to empty so this codex call stays deterministic and env-free.
+        let out = crate::delegate_codex_mcp::test_override::with(&[], || {
+            tools
+                .call(
+                    DELEGATE_AGENT,
+                    &json!({ "agent": "codex", "task": "do it" }),
+                    &CancelToken::never(),
+                )
+                .expect("runs")
+        });
         // Final outcome parsed from the stream.
         assert_eq!(out["agent"], "codex");
         assert_eq!(out["ok"], true);

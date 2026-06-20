@@ -2497,6 +2497,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
+ "directories",
  "libc",
  "nerve-agent",
  "nerve-core",

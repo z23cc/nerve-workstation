@@ -101,10 +101,11 @@ impl CodexSession {
         model: Option<&str>,
         first_message: &str,
         proxy: Option<DelegateProxy>,
+        mcp_disable_flags: &[String],
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(&str),
     ) -> Result<(Self, TurnResult), SessionError> {
-        let spec = build_codex_app_server_command();
+        let spec = build_codex_app_server_command(mcp_disable_flags);
         let policy = crate::delegate_runtime::delegate_policy(cwd);
         let child = launcher
             .launch_persistent(&spec, &policy)
