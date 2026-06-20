@@ -9,12 +9,24 @@
 //! so the registry only needs the cancel handle + status, not a live driver.
 
 use super::observer::strategy_label;
-use crate::worker::{SteerRegistry, WorkerLedger};
+use crate::worker::{BudgetLedger, FleetBudget, SteerRegistry, WorkerLedger};
 use nerve_core::CancelToken;
 use nerve_runtime::{FlowRunOutcome, RuntimeError, WorkflowDef};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// What a `flow.steer` needs from the live-flow registry: the steerable frontier, the
+/// shared ledger to record the follow-up turn into, the budget fold to debit it
+/// against, the spawn-control envelope to refuse it at a ceiling, and the flow's run
+/// cancel token to trip on budget exhaustion (finding C).
+pub(super) struct SteerTarget {
+    pub(super) steer: Arc<SteerRegistry>,
+    pub(super) ledger: Arc<WorkerLedger>,
+    pub(super) budget: Arc<BudgetLedger>,
+    pub(super) fleet: FleetBudget,
+    pub(super) cancel: CancelToken,
+}
 
 /// One live flow's registry entry: its cancel token (so `flow.close` can interrupt
 /// the engine loop), the live-flow worker registry + shared ledger that
@@ -32,6 +44,14 @@ struct FlowEntry {
     /// The flow's shared append-only ledger — a steered turn records into the SAME
     /// tape as the original turn (recorded nondeterminism, design §5).
     ledger: Arc<WorkerLedger>,
+    /// The flow's budget fold (design §6). Shared with the run thread's [`Driver`] so a
+    /// concurrent `flow.steer` debits its turn against the SAME ledger as a
+    /// driver-dispatched turn — a steered turn can never escape the budget (finding C).
+    budget: Arc<BudgetLedger>,
+    /// The flow's spawn-control envelope (design §8). Shares the process-global worker
+    /// semaphore with the driver, so a steered turn acquires a slot + is refused at the
+    /// worker/budget ceiling exactly like a driver-dispatched turn (finding C).
+    fleet: FleetBudget,
     /// Set once the flow finishes (the run thread records its terminal outcome).
     outcome: Option<FlowRunOutcome>,
 }
@@ -47,15 +67,18 @@ pub(crate) struct LiveFlows {
 
 impl LiveFlows {
     /// Register a starting flow under `flow_id`, returning the cancel token the run
-    /// thread drives the engine under (and `flow.close` fires). The `steer` registry
-    /// and `ledger` are shared with the run thread's driver so a concurrent
-    /// `flow.steer` reaches the live frontier + records into the same tape (C3a).
+    /// thread drives the engine under (and `flow.close` fires). The `steer` registry,
+    /// `ledger`, `budget`, and `fleet` are shared with the run thread's driver so a
+    /// concurrent `flow.steer` reaches the live frontier + records into the same tape
+    /// (C3a) AND debits/refuses against the SAME budget envelope (finding C).
     pub(super) fn register(
         &self,
         flow_id: &str,
         def: &WorkflowDef,
         steer: Arc<SteerRegistry>,
         ledger: Arc<WorkerLedger>,
+        budget: Arc<BudgetLedger>,
+        fleet: FleetBudget,
     ) -> CancelToken {
         let cancel = CancelToken::new();
         let created_seq = {
@@ -72,18 +95,19 @@ impl LiveFlows {
                 created_seq,
                 steer,
                 ledger,
+                budget,
+                fleet,
                 outcome: None,
             },
         );
         cancel
     }
 
-    /// Look up a live flow's `(steer registry, ledger)` for a `flow.steer`. Errors
-    /// on an unknown id, or on a flow that has already finished (no live frontier).
-    pub(super) fn steer_target(
-        &self,
-        flow_id: &str,
-    ) -> Result<(Arc<SteerRegistry>, Arc<WorkerLedger>), RuntimeError> {
+    /// Look up a live flow's `(steer registry, ledger, budget, fleet)` for a
+    /// `flow.steer`. Errors on an unknown id, or on a flow that has already finished
+    /// (no live frontier). The budget + fleet are returned so the steer path debits +
+    /// refuses against the flow's live envelope (finding C).
+    pub(super) fn steer_target(&self, flow_id: &str) -> Result<SteerTarget, RuntimeError> {
         let flows = crate::sync::lock_recover(&self.flows);
         let entry = flows
             .get(flow_id)
@@ -93,7 +117,13 @@ impl LiveFlows {
                 "flow `{flow_id}` has finished; nothing to steer"
             )));
         }
-        Ok((Arc::clone(&entry.steer), Arc::clone(&entry.ledger)))
+        Ok(SteerTarget {
+            steer: Arc::clone(&entry.steer),
+            ledger: Arc::clone(&entry.ledger),
+            budget: Arc::clone(&entry.budget),
+            fleet: entry.fleet.clone(),
+            cancel: entry.cancel.clone(),
+        })
     }
 
     /// Record a flow's terminal outcome (the run thread calls this when the driver

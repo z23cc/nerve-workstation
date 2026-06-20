@@ -254,6 +254,14 @@ impl CliWorker {
     /// the real round-trip drives the operator decision. We always proxy so
     /// approvals route through the one hub.
     ///
+    /// The approval is keyed by the flow's `session_id` (`ctx.flow_id`), matching
+    /// what `flow.respond` resolves against
+    /// ([`FlowProtocolApprover`](crate::session_manager::FlowProtocolApprover)) — so a
+    /// CLI worker's approval inside a flow is actually answerable, and two concurrent
+    /// flows never collide (finding F). The projection into `ctx.ledger` is namespaced
+    /// by the node id so two concurrent nodes within one flow stay distinct. When no
+    /// flow id is set (the non-flow callers), fall back to the agent name as before.
+    ///
     /// The projection is recorded into `ctx.ledger` (the thread-safe, kind-agnostic
     /// record) rather than the turn's `&mut on_event` sink: the proxy resolves on
     /// the driver's read-loop control flow, so threading the borrow there would
@@ -261,17 +269,28 @@ impl CliWorker {
     /// node-scoped sink. The blocking operator round-trip is UNCHANGED.
     fn build_proxy(&self, ctx: &WorkerContext) -> Option<DelegateProxy> {
         let agent = self.agent.catalog_name();
+        // The approval session_id MUST match `flow.respond{flow_id}`; fall back to the
+        // agent name only for the non-flow callers that carry no flow id.
+        let session_id = if ctx.flow_id.is_empty() {
+            format!("cli-{agent}")
+        } else {
+            ctx.flow_id.clone()
+        };
+        // Namespace the ledger projection by node id (avoiding intra-flow collision).
+        let projection_node = if ctx.node_id.is_empty() {
+            format!("cli-{agent}")
+        } else {
+            ctx.node_id.clone()
+        };
         let approver: Arc<dyn DelegateApprover> = Arc::new(ProjectingApprover {
             inner: Arc::clone(&ctx.approver),
             sink: Arc::clone(&ctx.ledger),
-            node_id: format!("cli-{agent}"),
+            node_id: projection_node,
             seq: AtomicU64::new(0),
         });
         Some(DelegateProxy::for_agent(
             approver,
-            // The approval is keyed under the agent name for C0 (the engine assigns
-            // node ids in C1); the hub mints its own request_id.
-            format!("cli-{agent}"),
+            session_id,
             DelegateDecisions::default(),
             agent,
         ))
@@ -452,5 +471,137 @@ fn delegate_usage_to_usage(usage: Option<DelegateUsage>) -> nerve_agent::Usage {
         output_tokens: usage.output_tokens.min(u64::from(u32::MAX)) as u32,
         cache_read_tokens: usage.cache_read_tokens.min(u64::from(u32::MAX)) as u32,
         cache_creation_tokens: usage.cache_creation_tokens.min(u64::from(u32::MAX)) as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_manager::ApprovalHub;
+    use nerve_runtime::RuntimeEvent;
+    use std::sync::mpsc;
+
+    /// A `WorkerContext` for a flow-scoped CLI worker: the approver IS the
+    /// [`ApprovalHub`] (so `flow.respond` can resolve it), keyed by `flow_id`/`node_id`.
+    fn flow_ctx(hub: Arc<ApprovalHub>, flow_id: &str, node_id: &str) -> WorkerContext {
+        WorkerContext {
+            root: None,
+            snapshot_generation: 0,
+            ledger: Arc::new(super::super::WorkerLedger::new()),
+            approver: hub,
+            flow_id: flow_id.to_string(),
+            node_id: node_id.to_string(),
+        }
+    }
+
+    /// The hub emit type (the private `session_manager` alias is not re-exported).
+    type Emit = dyn Fn(RuntimeEvent) + Send + Sync + 'static;
+
+    /// A `can_use_tool` request shaped like the one a claude session emits.
+    fn can_use_tool_request() -> Value {
+        serde_json::json!({
+            "request_id": "claude-req-1",
+            "request": { "tool_name": "Bash", "input": { "command": "ls" }, "tool_use_id": "t1" },
+        })
+    }
+
+    /// An [`ApprovalHub`] whose emit sink forwards each raised `(session_id,
+    /// request_id)` over `tx`, so a test can observe the key a CLI worker raised.
+    fn hub_forwarding_approvals(tx: mpsc::Sender<(String, String)>) -> Arc<ApprovalHub> {
+        let emit: Arc<Emit> = Arc::new(move |event: RuntimeEvent| {
+            if let RuntimeEvent::ApprovalRequested {
+                session_id,
+                request_id,
+                ..
+            } = event
+            {
+                let _ = tx.send((session_id, request_id));
+            }
+        });
+        Arc::new(ApprovalHub::new(emit))
+    }
+
+    /// Drive a flow-scoped CLI worker's approval proxy on a background thread (it blocks
+    /// on the hub), returning a join handle that yields whether the proxy allowed.
+    fn drive_flow_approval(
+        hub: &Arc<ApprovalHub>,
+        flow_id: &'static str,
+    ) -> std::thread::JoinHandle<bool> {
+        let worker = CliWorker::new(
+            DelegateAgent::Claude,
+            crate::sandbox::refuse_launcher(),
+            Vec::new(),
+        );
+        let ctx = flow_ctx(Arc::clone(hub), flow_id, "branch-0");
+        let proxy = worker
+            .build_proxy(&ctx)
+            .expect("a CLI worker always proxies");
+        let cancel = CancelToken::never();
+        std::thread::spawn(move || {
+            proxy
+                .resolve(&can_use_tool_request(), &cancel)
+                .line
+                .contains("\"behavior\":\"allow\"")
+        })
+    }
+
+    #[test]
+    fn cli_worker_approval_in_a_flow_is_keyed_by_flow_id_and_respond_resolves_it() {
+        // Finding F: a CLI worker's `can_use_tool` ask inside a flow must be keyed by
+        // `flow_id` (what `flow.respond` resolves against), not `cli-{agent}`. Capture
+        // the hub's raised approval, assert its session_id IS the flow id, then resolve
+        // it with `respond(flow_id, request_id)` and confirm the proxy allows the call.
+        let (tx, rx) = mpsc::channel::<(String, String)>();
+        let hub = hub_forwarding_approvals(tx);
+        let handle = drive_flow_approval(&hub, "flow-abc");
+
+        let (session_id, request_id) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the CLI worker raised an approval on the hub");
+        assert_eq!(
+            session_id, "flow-abc",
+            "the approval MUST be keyed by flow_id (so flow.respond can resolve it), not `cli-claude`"
+        );
+        // `flow.respond` resolves by (flow_id, request_id).
+        assert!(
+            hub.respond("flow-abc", &request_id, SessionApprovalDecision::Allow),
+            "respond keyed by flow_id resolves the pending approval"
+        );
+        assert!(
+            handle.join().expect("proxy thread"),
+            "the resolved approval allowed the tool"
+        );
+    }
+
+    #[test]
+    fn two_concurrent_flows_do_not_collide_on_the_same_agent() {
+        // Finding F: two concurrent flows running the SAME agent (claude) must raise
+        // approvals under DISTINCT session ids (their flow ids), so responding to one
+        // never resolves the other's. With the old `cli-{agent}` key they collided.
+        let (tx, rx) = mpsc::channel::<(String, String)>();
+        let hub = hub_forwarding_approvals(tx);
+        let h1 = drive_flow_approval(&hub, "flow-1");
+        let h2 = drive_flow_approval(&hub, "flow-2");
+
+        // Collect the two raised approvals, keyed by their (distinct) session ids.
+        let mut keys = std::collections::HashMap::new();
+        for _ in 0..2 {
+            let (session_id, request_id) = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("both flows raised approvals");
+            keys.insert(session_id, request_id);
+        }
+        assert!(
+            keys.contains_key("flow-1") && keys.contains_key("flow-2"),
+            "each flow's approval is keyed by its own flow id, not a shared `cli-claude`: {keys:?}"
+        );
+        // Resolving flow-1 must NOT resolve flow-2 (distinct keys): respond to each.
+        assert!(hub.respond("flow-1", &keys["flow-1"], SessionApprovalDecision::Allow));
+        assert!(hub.respond("flow-2", &keys["flow-2"], SessionApprovalDecision::Deny));
+        assert!(h1.join().expect("flow-1 proxy"), "flow-1 was allowed");
+        assert!(
+            !h2.join().expect("flow-2 proxy"),
+            "flow-2 was denied (no collision)"
+        );
     }
 }

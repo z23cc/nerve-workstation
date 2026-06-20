@@ -5,12 +5,17 @@
 //! re-emits byte-identically under replay, and the fold is a function of declared
 //! order, never completion order.
 
-use super::{NeverApprover, Script, def, ok, parallel_out_of_order, record, render_outcome};
+use super::{
+    NeverApprover, Script, cli_step, def, ok, parallel_out_of_order, record, record_node_keyed,
+    render_outcome, script,
+};
 use crate::delegate_proxy::DelegateApprover;
 use crate::flow::{Driver, ReplayResolver, replay_generation_provider};
 use crate::worker::WorkerLedger;
 use nerve_core::CancelToken;
-use nerve_runtime::{Join, Strategy};
+use nerve_runtime::{
+    ContextSplit, FailPolicy, Join, Step, Strategy, TaskTemplate, WorkerRef, WorkflowDef,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -164,4 +169,115 @@ fn replay_is_byte_identical_single() {
         from_restored_jsonl, recorded_jsonl,
         "replay from a reconstructed ledger is byte-identical too"
     );
+}
+
+// ---- REPLAY: identical prompts across distinct nodes (finding A) ----------------
+
+#[test]
+fn replay_is_byte_identical_parallel_with_identical_branch_templates() {
+    // Finding A: two Parallel branches with the SAME task template render an
+    // IDENTICAL prompt, yet are DISTINCT nodes (`branch-0`, `branch-1`). Keying replay
+    // by the rendered prompt collided them (last-write-wins) → one node's events were
+    // re-emitted for BOTH, so the ledger was NOT byte-identical and the blackboard
+    // `output("branch-0") == output("branch-1")`. Keying by `task.node_id` keeps each
+    // node distinct. Give the two branches DIFFERENT results so a collision is
+    // observable (identical results would mask it).
+    let workflow = def(
+        "identical_branches",
+        Strategy::Parallel {
+            branches: vec![cli_step("do the work"), cli_step("do the work")],
+            join: Join::All,
+        },
+    );
+    let scripts = BTreeMap::from([
+        ("branch-0".to_string(), script(ok("FROM BRANCH ZERO"))),
+        ("branch-1".to_string(), script(ok("FROM BRANCH ONE"))),
+    ]);
+    let (recorded_outcome, recorded_ledger) = record_node_keyed(&workflow, scripts);
+    let recorded_jsonl = recorded_ledger.to_jsonl();
+
+    // The record run kept the two branches DISTINCT on the blackboard.
+    assert_eq!(
+        recorded_ledger.output("branch-0"),
+        Some("FROM BRANCH ZERO".to_string())
+    );
+    assert_eq!(
+        recorded_ledger.output("branch-1"),
+        Some("FROM BRANCH ONE".to_string()),
+        "two identical-template branches must NOT collide on the blackboard"
+    );
+
+    let (replay_outcome, replay_jsonl) = replay(&workflow, &recorded_ledger, 8);
+    assert_eq!(
+        render_outcome(&replay_outcome),
+        render_outcome(&recorded_outcome),
+        "replay reproduces the recorded outcome (both distinct branch results kept)"
+    );
+    assert_eq!(
+        replay_jsonl, recorded_jsonl,
+        "replay of identical-template branches is byte-identical (keyed by node id, not prompt)"
+    );
+}
+
+#[test]
+fn replay_is_byte_identical_mapreduce_map_without_split_placeholder() {
+    // Finding A, the second collision shape: a MapReduce whose `map` step omits the
+    // `{{split}}` placeholder renders the SAME prompt for every map node (`map-0`,
+    // `map-1`), even though they are distinct nodes over distinct shards. A
+    // prompt-keyed replay collided all map nodes; a node-id-keyed replay keeps them
+    // distinct. Different per-node results make any collision observable.
+    let workflow = def(
+        "map_without_split",
+        Strategy::MapReduce {
+            // No `{{split}}` → every map node renders "map each shard" identically.
+            map: cli_step("map each shard"),
+            over: ContextSplit::Shards { n: 2 },
+            reduce: reduce_step("reduce: {{map-0}} + {{map-1}}"),
+        },
+    );
+    let scripts = BTreeMap::from([
+        ("map-0".to_string(), script(ok("MAP ZERO"))),
+        ("map-1".to_string(), script(ok("MAP ONE"))),
+        // The reduce renders against the (distinct) map outputs.
+        (
+            "reduce".to_string(),
+            script(ok("REDUCED MAP ZERO + MAP ONE")),
+        ),
+    ]);
+    let (recorded_outcome, recorded_ledger) = record_node_keyed(&workflow, scripts);
+    let recorded_jsonl = recorded_ledger.to_jsonl();
+
+    assert_eq!(
+        recorded_ledger.output("map-0"),
+        Some("MAP ZERO".to_string())
+    );
+    assert_eq!(
+        recorded_ledger.output("map-1"),
+        Some("MAP ONE".to_string()),
+        "two identical-prompt map nodes must NOT collide on the blackboard"
+    );
+
+    let (replay_outcome, replay_jsonl) = replay(&workflow, &recorded_ledger, 8);
+    assert_eq!(
+        render_outcome(&replay_outcome),
+        render_outcome(&recorded_outcome),
+        "mapreduce replay reproduces the recorded outcome"
+    );
+    assert_eq!(
+        replay_jsonl, recorded_jsonl,
+        "mapreduce-without-split replay is byte-identical (keyed by node id, not prompt)"
+    );
+}
+
+/// A reduce/judge step (Abort on fail) with a custom template — local helper so the
+/// MapReduce test can interpolate the distinct map outputs into the reduce prompt.
+fn reduce_step(prompt: &str) -> Step {
+    Step {
+        worker: WorkerRef::Cli {
+            name: "claude".into(),
+        },
+        task: TaskTemplate::new(prompt),
+        autonomy: nerve_runtime::DelegateAutonomy::ReadOnly,
+        on_fail: FailPolicy::Abort,
+    }
 }

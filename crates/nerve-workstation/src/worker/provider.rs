@@ -236,6 +236,9 @@ fn outcome_to_result(outcome: &nerve_agent::RunOutcome) -> TurnResult {
 /// a steer — `run_config` only reads `prompt`/`model`/`tool_filter`/`budget`).
 fn steer_task(message: &str) -> WorkerTask {
     WorkerTask {
+        // A steer reuses the live session; its node id is supplied out of band by the
+        // steer registry, so the throwaway task carries none.
+        node_id: String::new(),
         prompt: message.to_string(),
         autonomy: nerve_runtime::DelegateAutonomy::ReadOnly,
         model: None,

@@ -137,6 +137,28 @@ impl BudgetLedger {
         }
     }
 
+    /// Whether the flow's budget has no headroom left (design §6/§8). True once a
+    /// debit has tripped the hard cap, OR a capped dimension is already at/over zero
+    /// remaining. Used as the LIVE pre-check before a `flow.steer` turn so a steered
+    /// turn is refused on an exhausted budget — exactly like a driver-dispatched spawn
+    /// (finding C). An uncapped flow is never exhausted.
+    #[must_use]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        let state = crate::sync::lock_recover(&self.state);
+        if state.exhausted {
+            return true;
+        }
+        let usd_dry = self
+            .spec
+            .max_total_cost_usd
+            .is_some_and(|limit| state.spent_usd >= limit);
+        let tokens_dry = self
+            .spec
+            .max_total_tokens
+            .is_some_and(|limit| state.spent_tokens >= limit);
+        usd_dry || tokens_dry
+    }
+
     /// The remaining USD headroom (`None` = uncapped), for carving a [`FleetBudget`].
     #[must_use]
     pub(crate) fn remaining_usd(&self) -> Option<f64> {

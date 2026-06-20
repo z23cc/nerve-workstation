@@ -12,7 +12,7 @@ use super::observer::{FlowEventObserver, emit_strategy_edges};
 use super::{EventEmitter, FlowDeps, LiveFlows, combined_cancel};
 use crate::flow::{Driver, ReplayResolver, replay_generation_provider};
 use crate::flow_store::FlowStore;
-use crate::worker::{SteerRegistry, WorkerLedger};
+use crate::worker::{BudgetLedger, FleetBudget, SteerRegistry, WorkerLedger};
 use nerve_core::CancelToken;
 use nerve_runtime::{LedgerRef, RuntimeError, RuntimeEvent, SessionApprovalDecision, WorkflowDef};
 use serde_json::Value;
@@ -38,8 +38,27 @@ pub(crate) fn run_flow_replay(
     // tape, and a replayed flow has no live frontier to steer).
     let replay_ledger = Arc::new(WorkerLedger::new());
     let steer = Arc::new(SteerRegistry::new());
-    let registry_cancel =
-        flows.register(job_id, &def, Arc::clone(&steer), Arc::clone(&replay_ledger));
+    // Reconstruct the SAME budget envelope from the recorded def so a budgeted flow's
+    // deterministic spawn refusals (depth / worker-ceiling, design §8) reproduce under
+    // replay (finding B): the budget fold is a pure function of the recorded results,
+    // and admission is decided in declared order, so the refusal cut matches the record
+    // run and the re-emitted tape stays byte-identical. An unbudgeted recorded flow
+    // gets an all-None spec, which caps nothing — the prior behaviour.
+    let budget = Arc::new(BudgetLedger::new(def.budget));
+    let fleet = FleetBudget::root(
+        def.max_depth,
+        def.budget.max_workers,
+        budget.remaining_usd(),
+        budget.remaining_tokens(),
+    );
+    let registry_cancel = flows.register(
+        job_id,
+        &def,
+        Arc::clone(&steer),
+        Arc::clone(&replay_ledger),
+        Arc::clone(&budget),
+        fleet.clone(),
+    );
     let run_cancel = combined_cancel(cancel, &registry_cancel);
 
     emit(RuntimeEvent::flow_started(job_id, def.strategy.clone()));
@@ -55,7 +74,8 @@ pub(crate) fn run_flow_replay(
     let driver = Driver::new(&resolver, Arc::clone(&replay_ledger), approver, None)
         .with_observer(&observer)
         .with_progress(&on_progress)
-        .with_generation(&generation);
+        .with_generation(&generation)
+        .with_budget(Arc::clone(&budget), fleet);
     let outcome = driver.run(&def, &run_cancel);
 
     super::finish_flow(

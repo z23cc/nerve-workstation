@@ -32,7 +32,8 @@ use crate::session_manager::{ApprovalHub, FlowDecisionMemory, FlowProtocolApprov
 use crate::subagent::DEFAULT_MAX_DEPTH;
 use crate::tools::NerveRuntime;
 use crate::worker::{
-    BudgetLedger, FleetBudget, SteerError, SteerRegistry, WorkerEvent, WorkerFactory, WorkerLedger,
+    BudgetDecision, BudgetLedger, FleetBudget, SpawnRefusal, SteerError, SteerRegistry,
+    WorkerEvent, WorkerFactory, WorkerLedger,
 };
 use nerve_core::{CancelToken, WorkspaceResolver};
 use nerve_runtime::{
@@ -95,7 +96,27 @@ pub(crate) fn run_flow_start(
     // records its follow-up into the same tape (C3a).
     let ledger = Arc::new(WorkerLedger::new());
     let steer = Arc::new(SteerRegistry::new());
-    let registry_cancel = flows.register(flow_id, &def, Arc::clone(&steer), Arc::clone(&ledger));
+    // Per-flow budget governance (C3b, design §6/§8): the BudgetLedger is a pure fold
+    // over each node's recorded usage (so it is replayable); the FleetBudget carves the
+    // spawn-control envelope from the WorkflowDef's budget + max_depth. A default
+    // (all-None) BudgetSpec caps nothing — the C2/C3a behaviour. Built BEFORE `register`
+    // so the live-flow entry holds them and a concurrent `flow.steer` debits/refuses
+    // against the SAME envelope as a driver-dispatched turn (finding C).
+    let budget = Arc::new(BudgetLedger::new(def.budget));
+    let fleet = FleetBudget::root(
+        def.max_depth,
+        def.budget.max_workers,
+        budget.remaining_usd(),
+        budget.remaining_tokens(),
+    );
+    let registry_cancel = flows.register(
+        flow_id,
+        &def,
+        Arc::clone(&steer),
+        Arc::clone(&ledger),
+        Arc::clone(&budget),
+        fleet.clone(),
+    );
     // The engine runs under a token that fires if EITHER the job's own cancel OR a
     // flow.close (the registry token) fires.
     let run_cancel = combined_cancel(cancel, &registry_cancel);
@@ -125,18 +146,6 @@ pub(crate) fn run_flow_start(
         }
     };
 
-    // Per-flow budget governance (C3b, design §6/§8): the BudgetLedger is a pure
-    // fold over each node's recorded usage (so it is replayable); the FleetBudget
-    // carves the spawn-control envelope from the WorkflowDef's budget + max_depth.
-    // A default (all-None) BudgetSpec caps nothing — the C2/C3a behaviour.
-    let budget = Arc::new(BudgetLedger::new(def.budget));
-    let fleet = FleetBudget::root(
-        def.max_depth,
-        def.budget.max_workers,
-        budget.remaining_usd(),
-        budget.remaining_tokens(),
-    );
-
     // Per-node snapshot generation (C4, design §5): pin the live workspace snapshot
     // generation at each node-start and record it in the ledger, so a node that
     // mutated files makes a LATER node observe a different generation — replayed
@@ -151,6 +160,7 @@ pub(crate) fn run_flow_start(
     // and budget debits/refusals onto `BudgetUpdate`/`BudgetWarning`/`FlowDecision`.
     let on_progress = |progress: crate::flow::FlowProgress| observer.on_progress(&progress);
     let driver = Driver::new(&resolver, Arc::clone(&ledger), approver, root)
+        .with_flow_id(flow_id)
         .with_observer(&observer)
         .with_progress(&on_progress)
         .with_steer_registry(&steer)
@@ -272,7 +282,25 @@ pub(crate) fn run_flow_steer(
     emit: &Arc<EventEmitter>,
     cancel: &CancelToken,
 ) -> Result<Value, RuntimeError> {
-    let (steer, ledger) = flows.steer_target(flow_id)?;
+    let live::SteerTarget {
+        steer,
+        ledger,
+        budget,
+        fleet,
+        cancel: run_cancel,
+    } = flows.steer_target(flow_id)?;
+    // Budget envelope (finding C): a steered turn must honor the SAME envelope as a
+    // driver-dispatched one. Refuse before running if the budget is already exhausted,
+    // then acquire a process-global worker slot (refusing at the worker ceiling). The
+    // slot is held for the steer turn's lifetime and released on drop.
+    if budget.is_exhausted() {
+        return Err(RuntimeError::adapter(format!(
+            "flow `{flow_id}` steer refused: fleet budget exhausted"
+        )));
+    }
+    let _slot = fleet
+        .acquire()
+        .map_err(|refusal| RuntimeError::adapter(steer_refusal_message(flow_id, refusal)))?;
     let flow = flow_id.to_string();
     let emit = Arc::clone(emit);
     // Each steered event becomes a node-scoped FlowNodeAgent (the same projection
@@ -293,15 +321,41 @@ pub(crate) fn run_flow_steer(
         &ledger,
         &mut on_event,
     ) {
-        Ok((node, result)) => Ok(json!({
-            "flow_id": flow_id,
-            "node_id": node,
-            "ok": result.ok,
-            "text": result.text,
-            "steered": true,
-        })),
+        Ok((node, result)) => {
+            // Debit the steered turn's Usage into the SAME budget fold as a
+            // driver-dispatched turn (finding C). On exhaustion, cooperatively cancel
+            // the flow's run token so the driver's remaining turns stop too — exactly
+            // the `BudgetDecision::Exhausted` brake the driver applies.
+            if matches!(budget.debit(&result), BudgetDecision::Exhausted) {
+                run_cancel.cancel();
+            }
+            Ok(json!({
+                "flow_id": flow_id,
+                "node_id": node,
+                "ok": result.ok,
+                "text": result.text,
+                "steered": true,
+            }))
+        }
         Err(err) => Err(steer_error(flow_id, err)),
     }
+}
+
+/// A clear message for a `flow.steer` refused at the spawn-control ceiling (finding C):
+/// the worker semaphore is full, the depth ceiling is hit, or the budget is dry. Mirrors
+/// the driver's recorded-refusal vocabulary so an operator sees the same reason.
+fn steer_refusal_message(flow_id: &str, refusal: SpawnRefusal) -> String {
+    let reason = match refusal {
+        SpawnRefusal::Depth { depth, max_depth } => {
+            format!("depth ceiling ({depth}/{max_depth})")
+        }
+        SpawnRefusal::Workers {
+            live_workers,
+            max_workers,
+        } => format!("worker ceiling ({live_workers}/{max_workers})"),
+        SpawnRefusal::Budget => "fleet budget exhausted".to_string(),
+    };
+    format!("flow `{flow_id}` steer refused: {reason}")
 }
 
 /// Map a [`SteerError`] onto a runtime error. A turn cancellation surfaces as a
@@ -417,7 +471,15 @@ pub(super) fn finish_flow(
     job_cancel: &CancelToken,
     registry_cancel: &CancelToken,
 ) -> Result<Value, RuntimeError> {
+    // Read the cancellation status BEFORE we trip the registry token below.
     let cancelled = job_cancel.is_cancelled() || registry_cancel.is_cancelled();
+    // Terminal cleanup (finding E): a normally-completing flow never fires either the
+    // job or the registry cancel, so the `combined_cancel` watcher thread — which only
+    // exits when one of those is cancelled — would spin/park forever, leaking one OS
+    // thread per completed flow/replay. Trip the registry token here on EVERY terminal
+    // path so the watcher observes `is_cancelled()` and returns. Safe: the engine has
+    // already returned its outcome, and we captured `cancelled` above.
+    registry_cancel.cancel();
     let run_outcome = FlowRunOutcome {
         ok: outcome.ok,
         summary: outcome.summary.clone(),
@@ -475,4 +537,248 @@ pub(super) fn combined_cancel(job: &CancelToken, registry: &CancelToken) -> Canc
         }
     });
     combined
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::FlowOutcome;
+    use crate::worker::{TurnResult, WorkerSession};
+    use nerve_runtime::{BudgetSpec, Step, Strategy, TaskTemplate, WorkerRef, WorkerSelector};
+
+    /// A steerable test session: each steer returns a fixed-usage [`TurnResult`] so a
+    /// test can assert the steer path debited the flow's budget (finding C).
+    struct UsageSession {
+        result: TurnResult,
+    }
+
+    impl WorkerSession for UsageSession {
+        fn steer(
+            &mut self,
+            _message: &str,
+            _cancel: &CancelToken,
+            on_event: &mut dyn FnMut(WorkerEvent),
+        ) -> Result<TurnResult, crate::worker::WorkerError> {
+            crate::worker::synthesize_turn_steps(2, &self.result, on_event);
+            Ok(self.result.clone())
+        }
+        fn interrupt(&self) {}
+        fn close(&mut self) {}
+        fn result(&self) -> TurnResult {
+            self.result.clone()
+        }
+    }
+
+    /// A pricey turn result: $0.50 + 1000 tokens (so a couple exceed a small cap).
+    fn pricey_turn(text: &str) -> TurnResult {
+        TurnResult {
+            ok: true,
+            text: text.into(),
+            usage: nerve_agent::Usage {
+                input_tokens: 600,
+                output_tokens: 400,
+                ..nerve_agent::Usage::default()
+            },
+            cost_usd: Some(0.50),
+            timed_out: false,
+        }
+    }
+
+    /// Register a flow with one steerable frontier under `node`, plus a budget over
+    /// `spec` (a `flow.steer` debits/refuses against it). Returns the registry handle.
+    fn register_steerable_flow(
+        flows: &LiveFlows,
+        flow_id: &str,
+        node: &str,
+        spec: BudgetSpec,
+    ) -> Arc<BudgetLedger> {
+        let def = tiny_def();
+        let steer = Arc::new(SteerRegistry::new());
+        steer.register(
+            node,
+            Box::new(UsageSession {
+                result: pricey_turn("turn 1"),
+            }),
+        );
+        let budget = Arc::new(BudgetLedger::new(spec));
+        let fleet = FleetBudget::root(
+            def.max_depth,
+            spec.max_workers,
+            budget.remaining_usd(),
+            budget.remaining_tokens(),
+        );
+        flows.register(
+            flow_id,
+            &def,
+            steer,
+            Arc::new(WorkerLedger::new()),
+            Arc::clone(&budget),
+            fleet,
+        );
+        budget
+    }
+
+    #[test]
+    fn steer_debits_its_usage_into_the_flow_budget() {
+        // Finding C: a steered turn must be debited from the SAME BudgetLedger as a
+        // driver-dispatched turn. Steer a flow under a generous budget and assert the
+        // ledger's spend rose by the steered turn's cost/tokens.
+        let flows = LiveFlows::default();
+        let budget = register_steerable_flow(
+            &flows,
+            "flow-steer",
+            "node-0",
+            BudgetSpec {
+                max_total_cost_usd: Some(100.0),
+                max_total_tokens: Some(1_000_000),
+                max_workers: None,
+            },
+        );
+        assert_eq!(budget.snapshot().spent_usd, 0.0, "nothing spent yet");
+
+        let emit: Arc<EventEmitter> = Arc::new(|_event| {});
+        let result = run_flow_steer(
+            "flow-steer",
+            &WorkerSelector::node("node-0"),
+            "keep going",
+            &flows,
+            &emit,
+            &CancelToken::never(),
+        );
+        assert!(result.is_ok(), "the steer ran: {result:?}");
+        let snap = budget.snapshot();
+        assert!(
+            (snap.spent_usd - 0.50).abs() < 1e-9,
+            "the steered turn's USD cost was debited (got {})",
+            snap.spent_usd
+        );
+        assert_eq!(
+            snap.spent_tokens, 1000,
+            "the steered turn's tokens were debited"
+        );
+    }
+
+    #[test]
+    fn steer_on_an_exhausted_budget_is_refused() {
+        // Finding C: steering a flow whose budget is already exhausted must be REFUSED
+        // (it used to bypass the envelope entirely). Seed the budget over its cap, then
+        // assert `run_flow_steer` errors rather than running the turn.
+        let flows = LiveFlows::default();
+        let budget = register_steerable_flow(
+            &flows,
+            "flow-broke",
+            "node-0",
+            BudgetSpec {
+                max_total_cost_usd: Some(1.0),
+                max_total_tokens: None,
+                max_workers: None,
+            },
+        );
+        // Drive the budget over its $1.00 cap (two $0.50 debits -> exhausted on the
+        // boundary-crossing debit; a third makes `is_exhausted` unambiguous).
+        budget.debit(&pricey_turn("a"));
+        budget.debit(&pricey_turn("b"));
+        budget.debit(&pricey_turn("c"));
+        assert!(budget.is_exhausted(), "the budget is over its cap");
+
+        let emit: Arc<EventEmitter> = Arc::new(|_event| {});
+        let result = run_flow_steer(
+            "flow-broke",
+            &WorkerSelector::node("node-0"),
+            "keep going",
+            &flows,
+            &emit,
+            &CancelToken::never(),
+        );
+        let err = result.expect_err("steering an exhausted flow must be refused");
+        assert!(
+            err.to_string().contains("exhausted"),
+            "the refusal names the exhausted budget: {err}"
+        );
+        // And the refused steer did NOT run a turn (no further spend beyond the seed).
+        assert_eq!(
+            budget.snapshot().spent_usd,
+            1.5,
+            "a refused steer never debits a new turn"
+        );
+    }
+
+    fn tiny_def() -> WorkflowDef {
+        WorkflowDef {
+            schema_version: 1,
+            name: "leak-test".into(),
+            strategy: Strategy::Single {
+                step: Step {
+                    worker: WorkerRef::Cli {
+                        name: "claude".into(),
+                    },
+                    task: TaskTemplate::new("noop"),
+                    autonomy: nerve_runtime::DelegateAutonomy::ReadOnly,
+                    on_fail: nerve_runtime::FailPolicy::Continue,
+                },
+            },
+            budget: BudgetSpec::default(),
+            max_depth: 2,
+        }
+    }
+
+    #[test]
+    fn finish_flow_on_completion_stops_the_combined_cancel_watcher() {
+        // Finding E: a normally-completing flow must NOT leak the `combined_cancel`
+        // watcher thread. `finish_flow` trips the registry token on completion, so the
+        // watcher observes `is_cancelled()`, fans it into the combined token, and exits.
+        // We assert the watcher observed it by polling the COMBINED token to cancel
+        // (which only the watcher does, on its way to returning).
+        let flows = LiveFlows::default();
+        let def = tiny_def();
+        let budget = Arc::new(BudgetLedger::new(def.budget));
+        let fleet = FleetBudget::root(def.max_depth, def.budget.max_workers, None, None);
+        let registry_cancel = flows.register(
+            "flow-leak",
+            &def,
+            Arc::new(SteerRegistry::new()),
+            Arc::new(WorkerLedger::new()),
+            budget,
+            fleet,
+        );
+        let job_cancel = CancelToken::new();
+        // The watcher thread is spawned here, watching job + registry tokens.
+        let combined = combined_cancel(&job_cancel, &registry_cancel);
+        assert!(!combined.is_cancelled(), "the flow has not been cancelled");
+
+        let outcome = FlowOutcome {
+            ok: true,
+            results: Vec::new(),
+            summary: "done".into(),
+        };
+        let emit: Arc<EventEmitter> = Arc::new(|_event| {});
+        let result = finish_flow(
+            "flow-leak",
+            &def,
+            &outcome,
+            &flows,
+            &emit,
+            &job_cancel,
+            &registry_cancel,
+        );
+        // A completed (not job/registry-cancelled-before-finish) flow returns ok.
+        assert!(
+            result.is_ok(),
+            "a completed flow returns its result, not cancelled"
+        );
+        assert!(
+            registry_cancel.is_cancelled(),
+            "finish_flow trips the registry token so the watcher can observe it"
+        );
+        // The watcher polls every 20ms; within a generous window it must observe the
+        // registry cancel and fan it into the combined token, then RETURN (no leak).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !combined.is_cancelled() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher never observed the completion — it leaked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
 }

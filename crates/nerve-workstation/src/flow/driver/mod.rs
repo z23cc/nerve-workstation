@@ -19,7 +19,7 @@ use super::{Action, FlowOutcome, NodeId};
 use crate::subagent::bounded_fan_out;
 use crate::worker::{
     BudgetDecision, BudgetLedger, BudgetSnapshot, FleetBudget, PathLeases, SpawnRefusal,
-    SteerRegistry, TurnResult, WorkerEvent, WorkerLedger, WorkerSession,
+    SteerRegistry, TurnResult, WorkerEvent, WorkerLedger, WorkerSession, WorkerSlot,
 };
 use nerve_core::CancelToken;
 use nerve_runtime::{WorkerRef, WorkflowDef};
@@ -30,9 +30,17 @@ use std::sync::Arc;
 /// index into the strategy's step list.
 type Dispatch = (NodeId, usize);
 
+/// An ADMITTED dispatch: the node + step index plus the worker slot the partition
+/// already acquired for it (`None` for an unbudgeted flow). Carrying the slot from
+/// the single-threaded partition — rather than acquiring it in a fan-out thread —
+/// is what makes admission DETERMINISTIC: which branches run is decided in declared
+/// order before dispatch, never by a threaded `acquire()` race (finding B).
+type Admitted = (NodeId, usize, Option<WorkerSlot>);
+
 /// A budget partition of one wave (design §8): the spawns the [`FleetBudget`]
-/// admits, and the ones it refuses at a ceiling (with the typed [`SpawnRefusal`]).
-type BudgetPartition = (Vec<Dispatch>, Vec<(NodeId, SpawnRefusal)>);
+/// admits (each carrying its pre-acquired slot), and the ones it refuses at a
+/// ceiling (with the typed [`SpawnRefusal`]).
+type BudgetPartition = (Vec<Admitted>, Vec<(NodeId, SpawnRefusal)>);
 
 /// A per-node `snapshot_generation` provider (design §5): given the def + node id,
 /// it returns the generation to pin at that node's start. The host backs it with
@@ -122,6 +130,11 @@ pub(crate) struct Driver<'a> {
     /// property and the precondition for replay fidelity under mutation. Unset =
     /// no leasing (the C1/C2/C3 behaviour; a read-only flow needs none).
     leases: Option<&'a PathLeases>,
+    /// The owning flow's id, threaded into each [`WorkerContext`] so a CLI worker's
+    /// approval is keyed by `flow_id` and `flow.respond{flow_id,...}` resolves it
+    /// (finding F). Empty for the hidden CLI / tests (which don't route through
+    /// `flow.respond`).
+    flow_id: String,
 }
 
 impl<'a> Driver<'a> {
@@ -145,7 +158,17 @@ impl<'a> Driver<'a> {
             fleet: None,
             generation: None,
             leases: None,
+            flow_id: String::new(),
         }
+    }
+
+    /// Set the owning flow's id, threaded into each [`WorkerContext`] so a CLI
+    /// worker's approval is keyed by `flow_id` (so `flow.respond{flow_id,...}`
+    /// resolves it, finding F). Unset = empty (the hidden CLI / tests).
+    #[must_use]
+    pub(crate) fn with_flow_id(mut self, flow_id: impl Into<String>) -> Self {
+        self.flow_id = flow_id.into();
+        self
     }
 
     /// Attach a progress sink that observes every recorded `(node, event)`.
@@ -308,16 +331,15 @@ impl<'a> Driver<'a> {
         // concurrent `flow.steer` can run a follow-up turn (C3a). A `Parallel` wave
         // (multi-node) has no single live frontier and never registers.
         let steerable = admitted.len() == 1 && is_steerable_strategy(&def.strategy);
-        let inputs: Vec<(NodeId, usize)> = admitted;
         let results = bounded_fan_out(
-            inputs,
+            admitted,
             self.concurrency,
             cancel,
-            |(node, step_index)| {
-                let run = self.run_node(def, &node, step_index, cancel);
+            |(node, step_index, slot)| {
+                let run = self.run_node(def, &node, step_index, slot, cancel);
                 NodeResult { node, run }
             },
-            |(node, _)| NodeResult {
+            |(node, _, _)| NodeResult {
                 node: node.clone(),
                 run: NodeRun::cancelled(),
             },
@@ -375,17 +397,43 @@ impl<'a> Driver<'a> {
 
     /// Partition a wave's `starts` into the spawns the [`FleetBudget`] admits and
     /// those it refuses at a ceiling (depth / worker / budget — absence-at-floor,
-    /// design §8). Unbudgeted flows (no [`FleetBudget`]) admit everything, so the
-    /// C1/C2/C3a behaviour is unchanged.
+    /// design §8). Unbudgeted flows (no [`FleetBudget`]) admit everything (no slots),
+    /// so the C1/C2/C3a behaviour is unchanged.
+    ///
+    /// Admission is DETERMINISTIC and in DECLARED order (finding B): the partition
+    /// runs single-threaded BEFORE dispatch and ACQUIRES each admitted node's worker
+    /// slot here, in declared order, so when a wave exceeds the worker ceiling the
+    /// SAME first-N branches are admitted and the rest refused on every run — never
+    /// decided by a threaded `acquire()` race in `run_node` (which broke
+    /// byte-identical replay). The acquired slot rides along with the dispatch into
+    /// `run_node`, which no longer races to acquire.
     fn partition_by_budget(&self, starts: &[Dispatch]) -> BudgetPartition {
         let Some(fleet) = &self.fleet else {
-            return (starts.to_vec(), Vec::new());
+            return (
+                starts
+                    .iter()
+                    .map(|(node, step_index)| (node.clone(), *step_index, None))
+                    .collect(),
+                Vec::new(),
+            );
         };
         let mut admitted = Vec::new();
         let mut refused = Vec::new();
         for (node, step_index) in starts {
-            match fleet.may_spawn() {
-                Ok(()) => admitted.push((node.clone(), *step_index)),
+            // Depth/worker/budget pre-check in declared order. Because this loop is
+            // single-threaded and acquires a slot on each admit (bumping the live
+            // count), a later node correctly sees fewer free slots — so the cut
+            // between admitted and refused is a deterministic function of declared
+            // order, not completion order.
+            if let Err(refusal) = fleet.may_spawn() {
+                refused.push((node.clone(), refusal));
+                continue;
+            }
+            match fleet.acquire() {
+                Ok(slot) => admitted.push((node.clone(), *step_index, Some(slot))),
+                // may_spawn passed but the slot was unavailable: in single-threaded
+                // partitioning this only happens at the exact ceiling, so record the
+                // typed worker refusal rather than over-spawning.
                 Err(refusal) => refused.push((node.clone(), refusal)),
             }
         }

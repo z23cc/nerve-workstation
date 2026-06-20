@@ -168,6 +168,8 @@ fn cli_worker_events() -> Vec<WorkerEvent> {
         snapshot_generation: 0,
         ledger: Arc::new(WorkerLedger::new()),
         approver: Arc::new(SilentApprover),
+        flow_id: String::new(),
+        node_id: "node-0".to_string(),
     };
     let cancel = CancelToken::never();
     let mut events = Vec::new();
@@ -341,6 +343,7 @@ fn synthesize_turn_steps_matches_the_canonical_shape() {
 
 fn canned_task() -> WorkerTask {
     WorkerTask {
+        node_id: "node-0".to_string(),
         prompt: CANNED_TASK.to_string(),
         autonomy: nerve_runtime::DelegateAutonomy::ReadOnly,
         model: None,

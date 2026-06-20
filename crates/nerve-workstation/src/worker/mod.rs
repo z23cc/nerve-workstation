@@ -107,6 +107,14 @@ pub(crate) struct BudgetGrant {
 /// exec capability — so no new autonomy vocabulary is minted.
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerTask {
+    /// The engine's stable [`NodeId`](crate::flow::NodeId) for this dispatch, as a
+    /// string. This is the REPLAY key (a replay worker recovers its recorded tape by
+    /// node id, not by the rendered prompt) — so two distinct nodes that render the
+    /// SAME prompt (identical Parallel branch templates; a MapReduce map step that
+    /// omits `{{split}}`) never collide. The CLI worker also namespaces its approval
+    /// projection by it. Defaults to empty for the few callers (`steer_task`) that
+    /// build a throwaway task whose node id is supplied out of band.
+    pub(crate) node_id: String,
     pub(crate) prompt: String,
     pub(crate) autonomy: DelegateAutonomy,
     pub(crate) model: Option<String>,
@@ -178,6 +186,15 @@ pub(crate) struct WorkerContext {
     pub(crate) snapshot_generation: u64,
     pub(crate) ledger: Arc<WorkerLedger>,
     pub(crate) approver: Arc<dyn crate::delegate_proxy::DelegateApprover>,
+    /// The owning flow's id, used as the approval `session_id` so a CLI worker's
+    /// `can_use_tool` ask is keyed by `flow_id` — matching what `flow.respond`
+    /// resolves against ([`FlowProtocolApprover`](crate::session_manager::FlowProtocolApprover))
+    /// (finding F). Empty for the non-flow callers (parity/remote tests), which do
+    /// not route approvals through `flow.respond`.
+    pub(crate) flow_id: String,
+    /// This node's stable id, used to namespace the [`WorkerEvent::Approval`]
+    /// projection so two concurrent nodes in one flow never collide (finding F).
+    pub(crate) node_id: String,
 }
 
 /// A worker-port failure (distinct from a turn that merely reported `ok=false`).

@@ -277,6 +277,7 @@ mod tests {
         assert_eq!(worker.kind(), WorkerKind::Cli("remote"));
         assert_eq!(worker.capability(), RiskTier::Exec);
         let task = WorkerTask {
+            node_id: "node-0".into(),
             prompt: "investigate the bug".into(),
             autonomy: nerve_runtime::DelegateAutonomy::ReadOnly,
             model: None,
@@ -310,6 +311,7 @@ mod tests {
         assert_eq!(worker.kind(), WorkerKind::Cli("mcp"));
         assert_eq!(worker.capability(), RiskTier::Exec);
         let task = WorkerTask {
+            node_id: "node-0".into(),
             prompt: "summarize".into(),
             autonomy: nerve_runtime::DelegateAutonomy::ReadOnly,
             model: None,
@@ -337,6 +339,8 @@ mod tests {
             snapshot_generation: 0,
             ledger: Arc::new(super::super::WorkerLedger::new()),
             approver: Arc::new(DenyApprover),
+            flow_id: String::new(),
+            node_id: "node-0".to_string(),
         }
     }
 

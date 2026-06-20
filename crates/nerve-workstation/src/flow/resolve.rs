@@ -10,7 +10,6 @@ use crate::worker::{
     WorkerLedger,
 };
 use nerve_runtime::{Step, Strategy, WorkerRef, WorkflowDef};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{FlowOutcome, NodeId};
@@ -48,33 +47,30 @@ impl WorkerResolver for FactoryResolver {
 /// The REPLAY resolver (design §3): hands every node a [`ReplayWorker`] backed by a
 /// recorded tape, so the engine re-runs offline — no LLM/subprocess. Built from a
 /// recorded [`WorkerLedger`] (loaded from the [`FlowStore`](crate::flow_store) for
-/// `flow.replay`), which is SELF-CONTAINED: the prompt→node map is recovered from the
-/// tape's `Start` entries. The companion [`replay_generation_provider`] replays each
-/// node's recorded `snapshot_generation`, so the re-emitted tape is byte-identical
-/// even when the record run mutated files (design §5).
+/// `flow.replay`), which is SELF-CONTAINED: each replay worker recovers its node's
+/// tape by the engine-assigned stable [`NodeId`](crate::flow::NodeId), NOT by the
+/// rendered prompt (which can collide across distinct nodes). The companion
+/// [`replay_generation_provider`] replays each node's recorded `snapshot_generation`,
+/// so the re-emitted tape is byte-identical even when the record run mutated files
+/// (design §5).
 pub(crate) struct ReplayResolver {
     recorded: Arc<Vec<LedgerEntry>>,
-    prompt_to_node: Arc<BTreeMap<String, String>>,
 }
 
 impl ReplayResolver {
-    /// Build a replay resolver from a recorded ledger: snapshot its tape and recover
-    /// the rendered-prompt → node-id map from the `Start` entries.
+    /// Build a replay resolver from a recorded ledger by snapshotting its tape. Each
+    /// minted [`ReplayWorker`] resolves its node by `task.node_id` against this tape.
     #[must_use]
     pub(crate) fn from_ledger(recorded: &WorkerLedger) -> Self {
         Self {
             recorded: Arc::new(recorded.snapshot()),
-            prompt_to_node: Arc::new(recorded.prompt_to_node()),
         }
     }
 }
 
 impl WorkerResolver for ReplayResolver {
     fn resolve(&self, _worker_ref: &WorkerRef) -> Result<Box<dyn AgentWorker>, WorkerError> {
-        Ok(Box::new(ReplayWorker::new(
-            Arc::clone(&self.recorded),
-            Arc::clone(&self.prompt_to_node),
-        )))
+        Ok(Box::new(ReplayWorker::new(Arc::clone(&self.recorded))))
     }
 }
 

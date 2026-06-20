@@ -9,13 +9,11 @@
 //! the nondeterminism a flow has lives here; the loop in [`super`] stays a pure fold.
 
 use super::Driver;
-use crate::flow::resolve::{
-    failed_result, is_pipeline, provider_model, refused_result, step_for_node,
-};
+use crate::flow::resolve::{failed_result, is_pipeline, provider_model, step_for_node};
 use crate::flow::{FlowProgress, NodeId};
 use crate::worker::{
-    BudgetGrant, SpawnRefusal, TurnResult, WorkerContext, WorkerError, WorkerEvent, WorkerSession,
-    WorkerSlot, WorkerTask,
+    BudgetGrant, TurnResult, WorkerContext, WorkerError, WorkerEvent, WorkerSession, WorkerSlot,
+    WorkerTask,
 };
 use nerve_core::CancelToken;
 use nerve_runtime::{Step, WorkflowDef};
@@ -35,25 +33,14 @@ impl Driver<'_> {
         def: &WorkflowDef,
         node: &NodeId,
         step_index: usize,
+        slot: Option<WorkerSlot>,
         cancel: &CancelToken,
     ) -> NodeRun {
-        // Acquire a process-global worker slot for this turn's lifetime (C3b, the
-        // semaphore that bounds `max_workers` tree-wide). `partition_by_budget`
-        // already deterministically admitted this node; the atomic acquire here is
-        // the real bound — if a concurrent wave grabbed the last slot first, fold as
-        // a recorded refusal rather than over-spawning.
-        let slot = match &self.fleet {
-            Some(fleet) => match fleet.acquire() {
-                Ok(slot) => Some(slot),
-                Err(refusal) => {
-                    if let Some(observer) = self.observer {
-                        observer.spawn_refused(node.as_str(), refusal);
-                    }
-                    return NodeRun::refused(refusal);
-                }
-            },
-            None => None,
-        };
+        // The process-global worker slot (C3b, the semaphore that bounds
+        // `max_workers` tree-wide) was ALREADY acquired by `partition_by_budget` in
+        // declared order — admission is deterministic, never decided by a threaded
+        // `acquire()` race here (finding B). The slot rides along for this turn's
+        // lifetime and is released when the run is folded.
         let Some(step_def) = step_for_node(def, node) else {
             return NodeRun::failed(&format!("no step for node `{node}`"));
         };
@@ -162,6 +149,10 @@ impl Driver<'_> {
             }
         });
         WorkerTask {
+            // The stable NodeId the engine assigned this dispatch — the REPLAY key
+            // (so two distinct nodes that render an identical prompt never collide on
+            // the tape) and the CLI approval-projection namespace.
+            node_id: node.to_string(),
             prompt,
             autonomy: step_def.autonomy,
             model: provider_model(&step_def.worker),
@@ -203,6 +194,10 @@ impl Driver<'_> {
             snapshot_generation: self.pin_generation(def, node),
             ledger: Arc::clone(&self.ledger),
             approver: Arc::clone(&self.approver),
+            // Threaded so a CLI worker keys its approval by `flow_id` (finding F),
+            // namespacing the projection by this node id.
+            flow_id: self.flow_id.clone(),
+            node_id: node.to_string(),
         }
     }
 
@@ -274,17 +269,5 @@ impl NodeRun {
     /// A cancelled run with no session.
     pub(super) fn cancelled() -> Self {
         Self::failed("cancelled")
-    }
-
-    /// A run refused at a budget ceiling (design §8) — no session, no slot; folds as
-    /// the recorded refusal result.
-    pub(super) fn refused(refusal: SpawnRefusal) -> Self {
-        Self {
-            result: refused_result(refusal),
-            events: Vec::new(),
-            session: None,
-            slot: None,
-            start: None,
-        }
     }
 }

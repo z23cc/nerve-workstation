@@ -327,6 +327,129 @@ fn worker_ceiling_refuses_beyond_the_global_semaphore_cap() {
     );
 }
 
+/// Run a 4-branch parallel wave under `max_workers` = 2 with concurrency 4, returning
+/// the recorded ledger JSONL + the refused node ids (in observation order). Shared by
+/// the determinism + byte-identical replay assertions below (finding B).
+fn run_over_worker_ceiling() -> (String, Vec<String>) {
+    use crate::flow::FlowProgress;
+    let parallel = Strategy::Parallel {
+        branches: vec![
+            cli_step("w0"),
+            cli_step("w1"),
+            cli_step("w2"),
+            cli_step("w3"),
+        ],
+        join: Join::All,
+    };
+    let def = budgeted_def(parallel, spec(None, None, Some(2)), 2);
+    // Each branch blocks briefly so all four overlap, forcing the cap to bite.
+    let blocking = |text: &str| Script {
+        result: ok(text),
+        delay: std::time::Duration::from_millis(40),
+        steerable: false,
+    };
+    let scripts = Arc::new(BTreeMap::from([
+        ("w0".to_string(), blocking("W0")),
+        ("w1".to_string(), blocking("W1")),
+        ("w2".to_string(), blocking("W2")),
+        ("w3".to_string(), blocking("W3")),
+    ]));
+    let resolver = FakeResolver::new(Arc::clone(&scripts));
+    let ledger = Arc::new(WorkerLedger::new());
+    let budget = Arc::new(BudgetLedger::new(def.budget));
+    let fleet = FleetBudget::root(2, Some(2), None, None);
+    let observer = CaptureObserver::default();
+    let approver: Arc<dyn DelegateApprover> = Arc::new(NeverApprover);
+    // A no-op progress sink (events still buffer + record into the ledger).
+    let sink = |_p: FlowProgress| {};
+    let driver = Driver::new(&resolver, Arc::clone(&ledger), approver, None)
+        .with_concurrency(4)
+        .with_observer(&observer)
+        .with_progress(&sink)
+        .with_budget(Arc::clone(&budget), fleet);
+    let _ = driver.run(&def, &CancelToken::never());
+    let refused_nodes: Vec<String> = observer.refusals().into_iter().map(|(n, _)| n).collect();
+    (ledger.to_jsonl(), refused_nodes)
+}
+
+/// The def `run_over_worker_ceiling` records (the SAME def the replay must reuse, so
+/// admission is decided identically). A 4-branch parallel wave under max_workers = 2.
+fn worker_ceiling_def() -> WorkflowDef {
+    let parallel = Strategy::Parallel {
+        branches: vec![
+            cli_step("w0"),
+            cli_step("w1"),
+            cli_step("w2"),
+            cli_step("w3"),
+        ],
+        join: Join::All,
+    };
+    budgeted_def(parallel, spec(None, None, Some(2)), 2)
+}
+
+#[test]
+fn worker_ceiling_admission_is_deterministic_and_declared_order() {
+    // Finding B: when a wave exceeds the worker ceiling, WHICH branches are admitted
+    // vs refused must be a DETERMINISTIC function of declared order — not a threaded
+    // `acquire()` race. Under max_workers = 2, branches branch-0/branch-1 (the first
+    // two declared) are admitted and branch-2/branch-3 are refused, on EVERY run. Run
+    // twice and assert the refused set is identical AND is exactly the last two
+    // declared branches (by node id).
+    let (jsonl1, refused1) = run_over_worker_ceiling();
+    let (jsonl2, refused2) = run_over_worker_ceiling();
+    assert_eq!(
+        refused1, refused2,
+        "the refused branches are deterministic across runs"
+    );
+    assert_eq!(
+        refused1,
+        vec!["branch-2".to_string(), "branch-3".to_string()],
+        "admission is in declared order: the first 2 fit, the last 2 are refused"
+    );
+    // And the whole recorded tape is byte-identical run-to-run — the determinism the
+    // byte-identical replay gate depends on (the prior `acquire()` race broke this).
+    assert_eq!(
+        jsonl1, jsonl2,
+        "a wave over the worker ceiling records a byte-identical tape every run"
+    );
+}
+
+#[test]
+fn worker_ceiling_wave_replays_byte_identically() {
+    // The companion replay gate for finding B: RECORD a wave that overflows the worker
+    // ceiling, then REPLAY through the production resolver (WITH the same budget
+    // envelope reconstructed from the def, as `flow.replay` does) and assert the
+    // re-emitted tape is byte-identical to the recorded one. Deterministic admission is
+    // the precondition: a nondeterministic refusal cut would diverge under replay.
+    let (recorded_jsonl, _) = run_over_worker_ceiling();
+    let recorded = WorkerLedger::from_jsonl(&recorded_jsonl).expect("reconstruct recorded tape");
+
+    let def = worker_ceiling_def();
+    let resolver = crate::flow::ReplayResolver::from_ledger(&recorded);
+    let generation = crate::flow::replay_generation_provider(&recorded);
+    let replay_ledger = Arc::new(WorkerLedger::new());
+    let approver: Arc<dyn DelegateApprover> = Arc::new(NeverApprover);
+    // Reconstruct the budget the same way `flow_job::run_flow_replay` does, so the
+    // deterministic worker-ceiling refusals reproduce on replay.
+    let budget = Arc::new(BudgetLedger::new(def.budget));
+    let fleet = FleetBudget::root(
+        def.max_depth,
+        def.budget.max_workers,
+        budget.remaining_usd(),
+        budget.remaining_tokens(),
+    );
+    let _ = Driver::new(&resolver, Arc::clone(&replay_ledger), approver, None)
+        .with_concurrency(4)
+        .with_generation(&generation)
+        .with_budget(Arc::clone(&budget), fleet)
+        .run(&def, &CancelToken::never());
+    assert_eq!(
+        replay_ledger.to_jsonl(),
+        recorded_jsonl,
+        "a worker-ceiling wave replays byte-identically (deterministic admission + budget)"
+    );
+}
+
 // ---- 3. Monotone de-escalation through the driver -----------------------------
 
 #[test]

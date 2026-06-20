@@ -48,7 +48,7 @@ use std::time::Duration;
 /// steerable (so a `flow.steer` test can drive a follow-up turn). Keyed by the
 /// rendered prompt, which is unique per node in these tests.
 #[derive(Clone)]
-struct Script {
+pub(super) struct Script {
     result: TurnResult,
     delay: Duration,
     steerable: bool,
@@ -196,6 +196,77 @@ impl WorkerResolver for FakeResolver {
             captured: Arc::clone(&self.captured),
         }))
     }
+}
+
+/// A worker keyed by the engine's stable `NodeId` (`task.node_id`) instead of the
+/// rendered prompt, so a test can give two DISTINCT nodes that render an IDENTICAL
+/// prompt different scripted results — the case that exposes a prompt-keyed replay
+/// collision (finding A). Falls back to a clear failure for an unscripted node.
+struct NodeKeyedWorker {
+    scripts: Arc<BTreeMap<String, Script>>,
+}
+
+impl AgentWorker for NodeKeyedWorker {
+    fn kind(&self) -> WorkerKind {
+        WorkerKind::Cli("claude")
+    }
+    fn capability(&self) -> RiskTier {
+        RiskTier::ReadOnly
+    }
+    fn start(
+        &self,
+        task: &WorkerTask,
+        _ctx: &WorkerContext,
+        _cancel: &CancelToken,
+        on_event: &mut dyn FnMut(WorkerEvent),
+    ) -> Result<Box<dyn WorkerSession>, WorkerError> {
+        let script = self
+            .scripts
+            .get(&task.node_id)
+            .cloned()
+            .unwrap_or_else(|| Script {
+                result: fail(&format!("no script for node `{}`", task.node_id)),
+                delay: Duration::ZERO,
+                steerable: false,
+            });
+        if !script.delay.is_zero() {
+            std::thread::sleep(script.delay);
+        }
+        synthesize_turn_steps(1, &script.result, on_event);
+        Ok(Box::new(ScriptedSession {
+            last: script.result,
+            steerable: script.steerable,
+        }))
+    }
+}
+
+/// A resolver handing every node a [`NodeKeyedWorker`] over node-id-keyed scripts.
+struct NodeKeyedResolver {
+    scripts: Arc<BTreeMap<String, Script>>,
+}
+
+impl WorkerResolver for NodeKeyedResolver {
+    fn resolve(&self, _worker_ref: &WorkerRef) -> Result<Box<dyn AgentWorker>, WorkerError> {
+        Ok(Box::new(NodeKeyedWorker {
+            scripts: Arc::clone(&self.scripts),
+        }))
+    }
+}
+
+/// Record `def` through node-id-keyed scripts (so identical-prompt nodes can differ),
+/// returning the outcome + recorded ledger — the RECORD half of finding A's gate.
+pub(super) fn record_node_keyed(
+    def: &WorkflowDef,
+    scripts: BTreeMap<String, Script>,
+) -> (FlowOutcome, Arc<WorkerLedger>) {
+    let resolver = NodeKeyedResolver {
+        scripts: Arc::new(scripts),
+    };
+    let ledger = Arc::new(WorkerLedger::new());
+    let approver: Arc<dyn DelegateApprover> = Arc::new(NeverApprover);
+    let driver = Driver::new(&resolver, Arc::clone(&ledger), approver, None).with_concurrency(8);
+    let outcome = driver.run(def, &CancelToken::never());
+    (outcome, ledger)
 }
 
 // ---- Replay worker substrate --------------------------------------------------
