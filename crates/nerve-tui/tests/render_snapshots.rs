@@ -107,6 +107,15 @@ fn snapshot_diff_tool_cell() {
 }
 
 #[test]
+fn snapshot_delegate_block() {
+    let block = Block::Delegate {
+        agent: "codex".into(),
+        text: "Reading src/main.rs\nApplied patch to src/lib.rs\nAll tests passed".into(),
+    };
+    insta::assert_snapshot!(styled(&block, 50));
+}
+
+#[test]
 fn snapshot_reasoning_and_notice() {
     let reasoning = styled(&Block::Reasoning("considering the options".into()), 40);
     let warn = styled(

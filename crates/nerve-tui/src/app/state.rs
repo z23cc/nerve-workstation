@@ -65,6 +65,9 @@ pub enum Block {
     Reasoning(String),
     /// A tool call cell (running → ok/error, with framed output).
     Tool(ToolCall),
+    /// Streaming output from a delegated external agent (codex/claude/gemini),
+    /// coalesced per agent (dim, `⟳ delegating → <agent>` header).
+    Delegate { agent: String, text: String },
     /// A client-side notice (connection status, errors, hints).
     Notice { tone: Tone, text: String },
 }
@@ -115,6 +118,8 @@ pub struct State {
     assistant: Option<usize>,
     /// Index of the reasoning block currently being streamed into, if any.
     reasoning: Option<usize>,
+    /// Index of the delegate block currently being streamed into, if any.
+    delegate: Option<usize>,
 }
 
 impl State {
@@ -145,6 +150,7 @@ impl State {
             cost_usd: 0.0,
             assistant: None,
             reasoning: None,
+            delegate: None,
         }
     }
 
@@ -191,6 +197,7 @@ impl State {
         self.blocks.push(Block::Assistant(delta.to_string()));
         self.assistant = Some(self.blocks.len() - 1);
         self.reasoning = None;
+        self.delegate = None;
     }
 
     /// Append a streaming reasoning delta, coalescing into the current reasoning
@@ -208,6 +215,31 @@ impl State {
         self.blocks.push(Block::Reasoning(delta.to_string()));
         self.reasoning = Some(self.blocks.len() - 1);
         self.assistant = None;
+        self.delegate = None;
+    }
+
+    /// Append a streaming delegate progress delta, coalescing into the current
+    /// delegate block when it is for the same agent. Empty deltas are dropped. A
+    /// delta for a different agent (or after the stream was ended) opens a fresh
+    /// block, so each delegated agent gets its own growing transcript entry.
+    pub fn append_delegate(&mut self, agent: &str, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(index) = self.delegate
+            && let Some(Block::Delegate { agent: open, text }) = self.blocks.get_mut(index)
+            && open == agent
+        {
+            text.push_str(delta);
+            return;
+        }
+        self.blocks.push(Block::Delegate {
+            agent: agent.to_string(),
+            text: delta.to_string(),
+        });
+        self.delegate = Some(self.blocks.len() - 1);
+        self.assistant = None;
+        self.reasoning = None;
     }
 
     /// Start a tool cell (status: running). Ends the open text stream first, as
@@ -293,10 +325,11 @@ impl State {
         })
     }
 
-    /// End both streaming runs so the next delta starts a fresh block.
+    /// End all streaming runs so the next delta starts a fresh block.
     pub fn end_stream(&mut self) {
         self.assistant = None;
         self.reasoning = None;
+        self.delegate = None;
     }
 
     /// Advance the spinner frame (called on each tick while running).
@@ -365,6 +398,59 @@ mod tests {
         assert_eq!(cell.status, ToolStatus::Ok);
         assert_eq!(cell.output.as_deref(), Some("contents"));
         assert_eq!(cell.duration_ms, Some(12));
+    }
+
+    #[test]
+    fn append_delegate_coalesces_same_agent_then_splits_on_new_agent() {
+        let mut state = State::new("p", "m");
+        state.append_delegate("codex", "hel");
+        state.append_delegate("codex", "lo");
+        assert_eq!(
+            state.blocks,
+            vec![Block::Delegate {
+                agent: "codex".into(),
+                text: "hello".into(),
+            }]
+        );
+        // A different agent opens a fresh block.
+        state.append_delegate("claude", "hi");
+        assert_eq!(
+            state.blocks,
+            vec![
+                Block::Delegate {
+                    agent: "codex".into(),
+                    text: "hello".into(),
+                },
+                Block::Delegate {
+                    agent: "claude".into(),
+                    text: "hi".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn append_delegate_ignores_empty_and_ends_on_assistant() {
+        let mut state = State::new("p", "m");
+        state.append_delegate("codex", "");
+        assert!(state.blocks.is_empty());
+        state.append_delegate("codex", "out");
+        state.append_assistant("done"); // parent resumes → ends the delegate run
+        state.append_delegate("codex", "more"); // a fresh delegate block
+        assert_eq!(
+            state.blocks,
+            vec![
+                Block::Delegate {
+                    agent: "codex".into(),
+                    text: "out".into(),
+                },
+                Block::Assistant("done".into()),
+                Block::Delegate {
+                    agent: "codex".into(),
+                    text: "more".into(),
+                },
+            ]
+        );
     }
 
     #[test]

@@ -138,6 +138,7 @@ pub fn render_block(block: &Block, cols: usize, opts: RenderOptions) -> Vec<Line
         Block::Assistant(text) => render_markdown(&sanitize(text), cols),
         Block::Reasoning(text) => render_reasoning(text, cols),
         Block::Tool(tool) => render_tool(tool, cols, opts),
+        Block::Delegate { agent, text } => render_delegate(agent, text, cols),
         Block::Notice { tone, text } => render_notice(*tone, text, cols),
     }
 }
@@ -184,6 +185,33 @@ fn render_reasoning(text: &str, cols: usize) -> Vec<Line<'static>> {
         Line::from(spans)
     })
     .collect()
+}
+
+/// A delegate block: a magenta `⟳ delegating → <agent>` header over the streamed
+/// agent output (dim, `┊`-gutter), so a delegated run reads as a distinct,
+/// indented sub-transcript rather than the parent's own assistant text.
+fn render_delegate(agent: &str, text: &str, cols: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("⟳ delegating → ".to_string(), palette::magenta()),
+        Span::styled(
+            agent.to_string(),
+            palette::magenta().add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+    ])];
+    lines.extend(
+        wrap_styled(
+            &sanitize(text),
+            cols.saturating_sub(2).max(1),
+            palette::dim(),
+        )
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled("┊ ".to_string(), palette::magenta())];
+            spans.extend(line.spans);
+            Line::from(spans)
+        }),
+    );
+    lines
 }
 
 fn render_notice(tone: Tone, text: &str, cols: usize) -> Vec<Line<'static>> {
@@ -663,6 +691,35 @@ mod tests {
         );
         assert!(plain(&lines).contains("· thinking"));
         assert!(lines[0].spans[0].style == palette::dim());
+    }
+
+    #[test]
+    fn delegate_block_has_header_and_gutter() {
+        let lines = render_block(
+            &Block::Delegate {
+                agent: "codex".into(),
+                text: "applying patch\nrunning tests".into(),
+            },
+            40,
+            RenderOptions::default(),
+        );
+        let joined = plain(&lines);
+        assert!(joined.contains("⟳ delegating → codex"), "{joined}");
+        assert!(joined.contains("┊ applying patch"), "{joined}");
+        assert!(joined.contains("┊ running tests"), "{joined}");
+        // Header is magenta; the agent name is also bold.
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("delegating") && s.style == palette::magenta())
+        );
+        assert!(lines[0].spans.iter().any(|s| {
+            s.content.contains("codex")
+                && s.style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::BOLD)
+        }));
     }
 
     #[test]

@@ -28,6 +28,11 @@ pub(crate) struct ChatArgs {
     /// Named agent / skill definition to start the session with.
     #[arg(long)]
     agent: Option<String>,
+    /// Allow the chat agent to delegate to external agent CLIs (codex/claude/
+    /// gemini) via the `delegate_agent` tool. Off by default; each delegation is
+    /// still approval-gated. Forwarded to the spawned daemon as `--allow-delegate`.
+    #[arg(long = "allow-delegate")]
+    allow_delegate: bool,
     /// Engine binary used to spawn the daemon (defaults to this `nerve`).
     #[arg(long)]
     binary: Option<PathBuf>,
@@ -36,7 +41,7 @@ pub(crate) struct ChatArgs {
 /// Resolve provider/model (flag -> saved default -> picker), locate `nerve-tui`,
 /// and hand off to it. The engine binary is passed explicitly so the client
 /// spawns the matching daemon. Forwards `--binary`/`--provider`/`--model`/
-/// `--root`/`--agent` — exactly the flags `nerve-tui` accepts.
+/// `--root`/`--agent`/`--allow-delegate` — exactly the flags `nerve-tui` accepts.
 pub(crate) fn chat(args: ChatArgs) -> Result<()> {
     let (provider, model) = crate::runconfig::resolve(args.provider, args.model, true)?;
     let binary = locate_chat_binary();
@@ -58,6 +63,9 @@ pub(crate) fn chat(args: ChatArgs) -> Result<()> {
     }
     if let Some(agent) = &args.agent {
         command.arg("--agent").arg(agent);
+    }
+    if args.allow_delegate {
+        command.arg("--allow-delegate");
     }
     handoff(command, &binary)
 }

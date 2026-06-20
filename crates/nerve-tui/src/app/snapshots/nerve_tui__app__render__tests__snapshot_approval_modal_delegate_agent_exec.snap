@@ -1,0 +1,7 @@
+---
+source: crates/nerve-tui/src/app/render.rs
+expression: rendered
+---
+«yellow»⚠ allow  «bold»delegate_agent  «red»[exec]
+«dim»│ «dim»claude: refactor module (cwd packages/tui) [auto-edit]
+«bold»[a]llow once · «bold»[A]lways · «bold»[d]eny · «bold»[D]eny always · «dim»Esc cancel

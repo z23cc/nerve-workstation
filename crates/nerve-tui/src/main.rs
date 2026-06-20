@@ -3,11 +3,12 @@
 //! Subcommands:
 //!   nerve-tui smoke [--root PATH] [--binary PATH]   no-LLM round-trip
 //!   nerve-tui [--root PATH] [--binary PATH] [--provider P] [--model M] [--agent NAME]
-//!                                                   interactive shell
+//!             [--allow-delegate]                    interactive shell
 //!
 //! The shell flags mirror exactly what `nerve chat` hands its client binary
-//! (`--binary`/`--provider`/`--model`/`--root`/`--agent`), so `NERVE_CHAT_BIN`
-//! pointed at this binary drives it end-to-end (see `commands/chat.rs`).
+//! (`--binary`/`--provider`/`--model`/`--root`/`--agent`/`--allow-delegate`), so
+//! `NERVE_CHAT_BIN` pointed at this binary drives it end-to-end (see
+//! `commands/chat.rs`). `--allow-delegate` is forwarded onto the spawned daemon.
 //!
 //! Args are parsed by hand (no clap) to keep the dep surface small, mirroring
 //! the TS smoke parser; `--root` defaults to the current directory.
@@ -26,6 +27,8 @@ struct Args {
     provider: Option<String>,
     model: Option<String>,
     agent: Option<String>,
+    /// Enable external-agent delegation in the spawned daemon (`--allow-delegate`).
+    allow_delegate: bool,
 }
 
 #[tokio::main]
@@ -56,11 +59,16 @@ async fn run(raw: Vec<String>) -> Result<()> {
             let model = args.model.unwrap_or_else(|| "claude-opus-4-8".to_string());
             // Provider/model are session-level (carried in session.start by
             // app::run), NOT daemon flags — see DaemonSpec::command.
-            let spec = DaemonSpec::new(root);
-            let spec = match args.binary {
+            let mut spec = DaemonSpec::new(root);
+            spec = match args.binary {
                 Some(binary) => spec.with_binary(binary),
                 None => spec,
             };
+            // Delegation is a daemon capability lift (DA-2): forward the flag onto
+            // `nerve daemon --stdio …` so the spawned daemon enables it.
+            if args.allow_delegate {
+                spec = spec.with_extra_arg("--allow-delegate");
+            }
             app::run(spec, provider, model, args.agent).await
         }
     }
@@ -90,6 +98,7 @@ fn parse_args(raw: &[String]) -> Result<Args> {
             "--provider" => args.provider = Some(value(&mut iter, "--provider")?),
             "--model" => args.model = Some(value(&mut iter, "--model")?),
             "--agent" => args.agent = Some(value(&mut iter, "--agent")?),
+            "--allow-delegate" => args.allow_delegate = true,
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -123,6 +132,7 @@ fn print_usage() {
     println!(
         "usage:\n  \
          nerve-tui smoke [--root PATH] [--binary PATH]\n  \
-         nerve-tui [--root PATH] [--binary PATH] [--provider P] [--model M] [--agent NAME]"
+         nerve-tui [--root PATH] [--binary PATH] [--provider P] [--model M] [--agent NAME] \
+         [--allow-delegate]"
     );
 }

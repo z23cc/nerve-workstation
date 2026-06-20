@@ -36,6 +36,14 @@ impl DaemonSpec {
         self
     }
 
+    /// Append an extra arg passed through to `nerve daemon --stdio …` (e.g.
+    /// `--allow-delegate`, a daemon-level capability lift).
+    #[must_use]
+    pub fn with_extra_arg(mut self, arg: impl Into<String>) -> Self {
+        self.extra_args.push(arg.into());
+        self
+    }
+
     /// Build the `tokio` command: `nerve daemon --stdio --root <abs> [...]`.
     ///
     /// Provider/model are deliberately NOT passed here — `nerve daemon` does not
@@ -95,6 +103,40 @@ mod tests {
         assert!(args.contains(&"--stdio".to_string()));
         let root_pos = args.iter().position(|a| a == "--root").expect("root flag");
         assert_eq!(args[root_pos + 1], "/tmp/project");
+    }
+
+    #[test]
+    fn with_extra_arg_appends_allow_delegate_to_command() {
+        let spec = DaemonSpec::new(PathBuf::from("/tmp/project"))
+            .with_binary(PathBuf::from("nerve"))
+            .with_extra_arg("--allow-delegate");
+        let command = spec.command();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--allow-delegate".to_string()));
+        // It trails the standard daemon args (after `--root <path>`).
+        let delegate_pos = args
+            .iter()
+            .position(|a| a == "--allow-delegate")
+            .expect("delegate flag");
+        let root_pos = args.iter().position(|a| a == "--root").expect("root flag");
+        assert!(delegate_pos > root_pos);
+    }
+
+    #[test]
+    fn command_omits_allow_delegate_by_default() {
+        let spec =
+            DaemonSpec::new(PathBuf::from("/tmp/project")).with_binary(PathBuf::from("nerve"));
+        let command = spec.command();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|a| a == "--allow-delegate"));
     }
 
     #[test]

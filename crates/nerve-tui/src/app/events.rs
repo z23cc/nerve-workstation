@@ -49,6 +49,16 @@ pub fn apply_event(state: &mut State, event: &RuntimeEvent) -> bool {
             });
             true
         }
+        RuntimeEvent::DelegateProgress { agent, text, .. } => {
+            // Stream the delegated agent's stdout/stderr into a coalescing
+            // "delegate" block (one growing entry per agent), distinct from the
+            // main assistant text. Empty chunks no-op and skip a redraw.
+            if text.is_empty() {
+                return false;
+            }
+            state.append_delegate(agent, text);
+            true
+        }
         RuntimeEvent::SessionAgent { event, .. } => apply_agent_event(state, event),
         RuntimeEvent::JobFailed { error, .. } => {
             // A second message racing an in-flight turn: the genuine turn is still
@@ -229,6 +239,38 @@ mod tests {
                     text: String::new(),
                 },
             ),
+        );
+        assert!(!redraw);
+        assert!(state.blocks.is_empty());
+    }
+
+    #[test]
+    fn delegate_progress_appends_and_coalesces_into_delegate_block() {
+        let mut state = State::new("p", "m");
+        apply_event(
+            &mut state,
+            &RuntimeEvent::delegate_progress("j", "codex", "look"),
+        );
+        let redraw = apply_event(
+            &mut state,
+            &RuntimeEvent::delegate_progress("j", "codex", "ing…"),
+        );
+        assert!(redraw);
+        assert_eq!(
+            state.blocks,
+            vec![Block::Delegate {
+                agent: "codex".to_string(),
+                text: "looking…".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_delegate_progress_does_not_push_or_redraw() {
+        let mut state = State::new("p", "m");
+        let redraw = apply_event(
+            &mut state,
+            &RuntimeEvent::delegate_progress("j", "codex", ""),
         );
         assert!(!redraw);
         assert!(state.blocks.is_empty());

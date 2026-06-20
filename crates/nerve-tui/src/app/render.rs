@@ -720,6 +720,41 @@ mod tests {
     }
 
     #[test]
+    fn approval_modal_renders_delegate_agent_exec_with_preview() {
+        // DA-3: the chat agent's `delegate_agent` call surfaces as an exec-tier
+        // approval; the preview is `<agent>: <task> (cwd ..) [autonomy]`.
+        let state = approving(
+            "delegate_agent",
+            RiskTier::Exec,
+            r#"{"agent":"codex","task":"add tests"}"#,
+            "codex: add tests (cwd .) [read-only]",
+        );
+        let lines = approval_lines(state.approval.as_ref().unwrap(), 80);
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("⚠ allow"), "{text}");
+        assert!(text.contains("delegate_agent"), "{text}");
+        assert!(text.contains("[exec]"), "{text}"); // exec-tier badge
+        assert!(
+            text.contains("│ codex: add tests (cwd .) [read-only]"),
+            "{text}"
+        );
+        assert!(text.contains("[a]llow once"), "{text}");
+    }
+
+    #[test]
+    fn snapshot_approval_modal_delegate_agent_exec() {
+        let state = approving(
+            "delegate_agent",
+            RiskTier::Exec,
+            r#"{"agent":"claude","task":"refactor"}"#,
+            "claude: refactor module (cwd packages/tui) [auto-edit]",
+        );
+        let lines = approval_lines(state.approval.as_ref().unwrap(), 80);
+        let rendered = lines.iter().map(styled_line).collect::<Vec<_>>().join("\n");
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
     fn renders_into_test_backend_with_header_and_prompt() {
         let text = buffer_text(&sample(), 60, 12);
         assert!(text.contains("Nerve"), "{text}");

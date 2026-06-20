@@ -1,0 +1,8 @@
+---
+source: crates/nerve-tui/tests/render_snapshots.rs
+expression: "styled(&block, 50)"
+---
+«magenta»⟳ delegating → «magenta+bold»codex
+«magenta»┊ «dim»Reading src/main.rs
+«magenta»┊ «dim»Applied patch to src/lib.rs
+«magenta»┊ «dim»All tests passed
