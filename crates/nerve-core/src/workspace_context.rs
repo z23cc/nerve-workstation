@@ -4,6 +4,7 @@ use crate::{
     codemap::FileCodeStructure,
     models::{CatalogEntry, NerveError},
     port::CatalogProvider,
+    recipe::MetaPrompt,
     selection::{LineRange, Selection, SelectionKey, SelectionMode},
     snapshot::CatalogSnapshot,
     token::count_tokens,
@@ -19,14 +20,30 @@ pub enum WorkspaceContextInclude {
     FileMap,
     Contents,
     Tokens,
+    #[serde(rename = "git-diff")]
+    GitDiff,
+    #[serde(rename = "meta-prompts")]
+    MetaPrompts,
 }
 
 /// Request for the `workspace_context` snapshot tool.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct WorkspaceContextRequest {
     #[serde(default)]
     pub include: Vec<WorkspaceContextInclude>,
     pub instructions: Option<String>,
+    /// A named recipe (standard|plan|review|diff|manual). When set (and not
+    /// `manual`) it fixes the section set, overriding `include`.
+    #[serde(default)]
+    pub recipe: Option<String>,
+    /// Working-tree diff text to render in the `<git_diff>` section. The caller
+    /// supplies it (e.g. from the `git` tool); the kernel never runs git.
+    #[serde(default)]
+    pub git_diff: Option<String>,
+    /// Reusable instruction blocks, rendered as numbered `<meta prompt>` sections.
+    /// When empty, a recipe's default meta-prompts (Plan/Review) are used.
+    #[serde(default)]
+    pub meta_prompts: Vec<MetaPrompt>,
 }
 
 /// Structured response for `workspace_context`.
@@ -48,6 +65,8 @@ pub struct WorkspaceContextTokenBreakdown {
     pub file_map_tokens: usize,
     pub instructions_tokens: usize,
     pub contents_tokens: usize,
+    pub git_diff_tokens: usize,
+    pub meta_prompts_tokens: usize,
     pub files: Vec<WorkspaceContextFileTokens>,
 }
 
@@ -137,8 +156,6 @@ pub(crate) fn workspace_context_for_selection_cached<P: CatalogProvider>(
     } else {
         0
     };
-    let instructions = request.instructions.as_deref().map(render_instructions);
-    let instructions_tokens = instructions.as_deref().map_or(0, count_tokens);
 
     let mut file_tokens = Vec::new();
     let mut rendered_files = Vec::new();
@@ -155,15 +172,43 @@ pub(crate) fn workspace_context_for_selection_cached<P: CatalogProvider>(
         0
     };
 
+    // git_diff section: caller-supplied text only — the kernel never runs git.
+    let git_diff = include
+        .git_diff
+        .then(|| request.git_diff.as_deref())
+        .flatten()
+        .filter(|diff| !diff.trim().is_empty())
+        .map(render_git_diff);
+    let git_diff_tokens = git_diff.as_deref().map_or(0, count_tokens);
+
+    // meta-prompts: caller-supplied, else the named recipe's defaults.
+    let meta_prompts = include
+        .meta_prompts
+        .then(|| resolve_meta_prompts(request))
+        .unwrap_or_default();
+    let meta_prompts_text = (!meta_prompts.is_empty()).then(|| render_meta_prompts(&meta_prompts));
+    let meta_prompts_tokens = meta_prompts_text.as_deref().map_or(0, count_tokens);
+
+    let instructions = request.instructions.as_deref().map(render_instructions);
+    let instructions_tokens = instructions.as_deref().map_or(0, count_tokens);
+
+    // Ordered sections: file_map, file_contents, git_diff, meta_prompts,
+    // instructions (mirrors RepoPrompt's section order — instructions last).
     let mut sections = Vec::new();
     if include.file_map {
         sections.push(file_map);
     }
-    if let Some(instructions) = instructions {
-        sections.push(instructions);
-    }
     if include.contents && !contents_text.is_empty() {
         sections.push(contents_text);
+    }
+    if let Some(git_diff) = git_diff {
+        sections.push(git_diff);
+    }
+    if let Some(meta_prompts_text) = meta_prompts_text {
+        sections.push(meta_prompts_text);
+    }
+    if let Some(instructions) = instructions {
+        sections.push(instructions);
     }
 
     let context = sections.join("\n\n");
@@ -175,6 +220,8 @@ pub(crate) fn workspace_context_for_selection_cached<P: CatalogProvider>(
             file_map_tokens,
             instructions_tokens,
             contents_tokens,
+            git_diff_tokens,
+            meta_prompts_tokens,
             files: file_tokens,
         },
     };
@@ -199,21 +246,44 @@ struct IncludeSet {
     file_map: bool,
     contents: bool,
     tokens: bool,
+    git_diff: bool,
+    meta_prompts: bool,
 }
 
 impl IncludeSet {
     fn from_request(request: &WorkspaceContextRequest) -> Self {
+        use WorkspaceContextInclude::{Contents, FileMap, GitDiff, MetaPrompts, Tokens};
+        // A named recipe (except `manual`) fixes the section set, overriding `include`.
+        if let Some(recipe) = request
+            .recipe
+            .as_deref()
+            .filter(|name| *name != "manual")
+            .and_then(crate::recipe::recipe_by_name)
+        {
+            let has = |section| recipe.sections.contains(&section);
+            return Self {
+                file_map: has(FileMap),
+                contents: has(Contents),
+                git_diff: has(GitDiff),
+                meta_prompts: has(MetaPrompts),
+                tokens: has(Tokens),
+            };
+        }
         if request.include.is_empty() {
             return Self {
                 file_map: true,
                 contents: true,
                 tokens: false,
+                git_diff: false,
+                meta_prompts: false,
             };
         }
         Self {
-            file_map: request.include.contains(&WorkspaceContextInclude::FileMap),
-            contents: request.include.contains(&WorkspaceContextInclude::Contents),
-            tokens: request.include.contains(&WorkspaceContextInclude::Tokens),
+            file_map: request.include.contains(&FileMap),
+            contents: request.include.contains(&Contents),
+            tokens: request.include.contains(&Tokens),
+            git_diff: request.include.contains(&GitDiff),
+            meta_prompts: request.include.contains(&MetaPrompts),
         }
     }
 }
@@ -273,6 +343,50 @@ fn render_file_map(files: &[SelectedFile<'_>]) -> String {
 
 fn render_instructions(instructions: &str) -> String {
     format!("<instructions>\n{instructions}\n</instructions>")
+}
+
+/// Render the caller-supplied working-tree diff as a `<git_diff>` section.
+fn render_git_diff(diff: &str) -> String {
+    format!("<git_diff>\n{}\n</git_diff>", diff.trim_end())
+}
+
+/// Render reusable instruction blocks as numbered `<meta prompt N="title">` sections.
+fn render_meta_prompts(prompts: &[MetaPrompt]) -> String {
+    prompts
+        .iter()
+        .enumerate()
+        .map(|(i, prompt)| {
+            let n = i + 1;
+            format!(
+                "<meta prompt {n}=\"{title}\">\n{body}\n</meta prompt {n}>",
+                title = prompt.title,
+                body = prompt.body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Caller-supplied meta-prompts, or the named recipe's defaults when none given.
+fn resolve_meta_prompts(request: &WorkspaceContextRequest) -> Vec<MetaPrompt> {
+    if !request.meta_prompts.is_empty() {
+        return request.meta_prompts.clone();
+    }
+    request
+        .recipe
+        .as_deref()
+        .and_then(crate::recipe::recipe_by_name)
+        .map(|recipe| {
+            recipe
+                .meta_prompts
+                .iter()
+                .map(|(title, body)| MetaPrompt {
+                    title: (*title).to_string(),
+                    body: (*body).to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn render_selected_file<P: CatalogProvider>(
@@ -529,6 +643,7 @@ mod tests {
             &WorkspaceContextRequest {
                 include: Vec::new(),
                 instructions: Some("Use this context.".to_string()),
+                ..Default::default()
             },
         )
         .expect("workspace context");
@@ -560,12 +675,57 @@ mod tests {
             &WorkspaceContextRequest {
                 include: vec![WorkspaceContextInclude::FileMap],
                 instructions: None,
+                ..Default::default()
             },
         )
         .expect("workspace context");
 
         assert!(response.context.contains("<file_map>"));
         assert!(!response.context.contains("<file path="));
+        assert_eq!(response.tokens.contents_tokens, 0);
+    }
+
+    #[test]
+    fn recipe_review_assembles_git_diff_and_default_meta_prompt() {
+        let (provider, snapshot) = provider_with_selection();
+        let response = workspace_context(
+            &provider,
+            &snapshot,
+            &WorkspaceContextRequest {
+                recipe: Some("review".to_string()),
+                git_diff: Some("diff --git a/full.txt b/full.txt\n+added line".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("workspace context");
+
+        // review = file_map + contents + git_diff + meta_prompts (default Review).
+        assert!(response.context.contains("<file_map>"));
+        assert!(response.context.contains("<git_diff>"));
+        assert!(response.context.contains("diff --git"));
+        assert!(response.context.contains("<meta prompt 1=\"Review\">"));
+        assert!(response.tokens.git_diff_tokens > 0);
+        assert!(response.tokens.meta_prompts_tokens > 0);
+    }
+
+    #[test]
+    fn recipe_diff_is_git_only() {
+        let (provider, snapshot) = provider_with_selection();
+        let response = workspace_context(
+            &provider,
+            &snapshot,
+            &WorkspaceContextRequest {
+                recipe: Some("diff".to_string()),
+                git_diff: Some("diff --git a/x b/x\n+y".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("workspace context");
+
+        assert!(response.context.contains("<git_diff>"));
+        assert!(!response.context.contains("<file_map>"));
+        assert!(!response.context.contains("<meta prompt"));
+        assert_eq!(response.tokens.file_map_tokens, 0);
         assert_eq!(response.tokens.contents_tokens, 0);
     }
 }

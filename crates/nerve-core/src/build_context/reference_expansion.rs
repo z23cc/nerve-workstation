@@ -173,6 +173,7 @@ fn try_add_codemap<P: CatalogProvider>(
                 WorkspaceContextInclude::Contents,
             ],
             instructions: None,
+            ..Default::default()
         },
         render_cache,
     )?;

@@ -8,6 +8,8 @@ expression: response
     "file_map_tokens": 37,
     "instructions_tokens": 12,
     "contents_tokens": 158,
+    "git_diff_tokens": 0,
+    "meta_prompts_tokens": 0,
     "files": [
       {
         "root_id": "root-0",

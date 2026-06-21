@@ -167,6 +167,7 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
                 WorkspaceContextInclude::Contents,
             ],
             instructions: None,
+            ..Default::default()
         },
     )?;
     if selection.files.is_empty() && workspace.tokens.total_tokens > request.token_budget {
@@ -416,6 +417,7 @@ fn allocate_selection<P: CatalogProvider>(
                         WorkspaceContextInclude::Contents,
                     ],
                     instructions: None,
+                    ..Default::default()
                 },
                 render_cache,
             )?;

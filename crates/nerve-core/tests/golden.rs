@@ -324,6 +324,7 @@ fn golden_workspace_context() {
                 WorkspaceContextInclude::Contents,
             ],
             instructions: Some("Answer from selected files only.".to_string()),
+            ..Default::default()
         },
     )
     .expect("workspace context");
@@ -372,6 +373,7 @@ fn golden_workspace_context_rebased_slice_after_edit() {
         &WorkspaceContextRequest {
             include: vec![WorkspaceContextInclude::Contents],
             instructions: None,
+            ..Default::default()
         },
     )
     .expect("workspace context");

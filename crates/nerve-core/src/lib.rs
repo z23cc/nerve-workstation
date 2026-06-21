@@ -14,6 +14,7 @@ pub mod navigate;
 pub mod port;
 pub(crate) mod ranking;
 pub mod read;
+pub mod recipe;
 pub mod repomap;
 pub mod search;
 pub mod security;

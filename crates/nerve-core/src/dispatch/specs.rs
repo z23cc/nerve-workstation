@@ -120,19 +120,37 @@ pub fn tool_specs() -> Value {
         }),
         json!({
             "name": "workspace_context",
-            "description": "Assemble the current persistent selection into context text with token breakdowns.",
+            "description": "Assemble the current persistent selection into context text with token breakdowns. A named recipe (standard|plan|review|diff|manual) fixes the section set.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "workspace": workspace_schema(),
+                    "recipe": {
+                        "type": "string",
+                        "enum": ["standard", "plan", "review", "diff", "manual"],
+                        "description": "Named context recipe; fixes the section set (overrides `include`)."
+                    },
                     "include": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["file-map", "contents", "tokens"] },
-                        "description": "Optional text sections to include. Empty means file-map and contents."
+                        "items": { "type": "string", "enum": ["file-map", "contents", "tokens", "git-diff", "meta-prompts"] },
+                        "description": "Sections to include when no recipe is set. Empty means file-map and contents."
                     },
                     "instructions": {
                         "type": "string",
-                        "description": "Optional notes/instructions to include in the context snapshot."
+                        "description": "Optional notes/instructions appended as the last section."
+                    },
+                    "git_diff": {
+                        "type": "string",
+                        "description": "Working-tree diff text for the git_diff section. The caller supplies it (e.g. from the git tool); the kernel never runs git."
+                    },
+                    "meta_prompts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["title", "body"],
+                            "properties": { "title": { "type": "string" }, "body": { "type": "string" } }
+                        },
+                        "description": "Reusable instruction blocks rendered as numbered meta-prompt sections (else a recipe's defaults)."
                     }
                 }
             }
