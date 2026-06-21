@@ -976,3 +976,34 @@ summary:focus-visible {
 }
 
 .plan-empty { padding: 10px 12px; color: var(--faint); font-size: 12px; }
+
+/* ── Visual polish (G12) ──────────────────────────────────────────────────── */
+/* A more substantial, balanced composer + a guided, less-empty hero. */
+.composer-box { padding: 14px 14px 10px; box-shadow: 0 2px 16px rgba(0, 0, 0, 0.06); }
+.composer-box .input { min-height: 52px; font-size: 14.5px; }
+.composer-box .input::placeholder { color: var(--faint); }
+
+.hero { gap: 18px; padding-bottom: 16vh; }
+.hero-title { font-size: 28px; letter-spacing: -0.02em; }
+
+.hero-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.hero-chip {
+  padding: 6px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.hero-chip:hover { background: var(--hover); color: var(--fg); }
+
+/* The Projects row dot was an empty-checkbox-looking square — make it a real dot. */
+.project-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  border: 0;
+  opacity: 0.6;
+}

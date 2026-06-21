@@ -426,6 +426,11 @@ pub fn App() -> impl IntoView {
                         <div class="hero">
                             <h1 class="hero-title">"What should we build?"</h1>
                             <div class="hero-composer">{composer()}</div>
+                            <div class="hero-chips">
+                                <button class="hero-chip" on:click=move |_| input.set("Explain how this repository is organized.".into())>"Explain this repo"</button>
+                                <button class="hero-chip" on:click=move |_| input.set("Make a step-by-step plan for the next change.".into())>"Make a plan"</button>
+                                <button class="hero-chip" on:click=move |_| input.set("Find and fix a bug in this codebase.".into())>"Find a bug"</button>
+                            </div>
                         </div>
                     }.into_any()
                 } else {
