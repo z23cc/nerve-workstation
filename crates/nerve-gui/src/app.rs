@@ -196,6 +196,15 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Pick a model from the curated catalog: set its provider + model, then apply.
+    let pick_model = move |m: String| {
+        if let Some(prov) = crate::data::provider_for(&m) {
+            provider.set(prov.to_string());
+        }
+        model.set(m);
+        apply_model();
+    };
+
     // Switch the live session's approval posture (always_ask|write|yolo). Takes
     // effect from the next gate decision; the chosen mode is also seeded on
     // session.start in `ensure_session`.
@@ -373,11 +382,23 @@ pub fn App() -> impl IntoView {
                                 <span>{move || format!("{} · {}", provider.get(), model.get())}</span>
                             </summary>
                             <div class="model-popover">
-                                <label>"Provider"<input id="provider" name="provider" class="pick-in" prop:value=move || provider.get()
-                                    on:input=move |ev| provider.set(event_target_value(&ev)) title="provider" /></label>
-                                <label>"Model"<input id="model" name="model" class="pick-in wide" prop:value=move || model.get()
-                                    on:input=move |ev| model.set(event_target_value(&ev)) title="model" /></label>
-                                <button class="pick-apply" on:click=move |_| apply_model()>"Apply"</button>
+                                <label>"Model"
+                                    <select id="model" name="model" class="pick-in wide"
+                                        prop:value=move || model.get()
+                                        on:change=move |ev| pick_model(event_target_value(&ev))>
+                                        {crate::data::MODELS.iter().map(|(prov, mdl)| view! {
+                                            <option value=*mdl>{format!("{prov} · {mdl}")}</option>
+                                        }).collect_view()}
+                                    </select>
+                                </label>
+                                <details class="custom-model">
+                                    <summary>"Custom provider / model"</summary>
+                                    <label>"Provider"<input id="provider" name="provider" class="pick-in" prop:value=move || provider.get()
+                                        on:input=move |ev| provider.set(event_target_value(&ev)) title="provider" /></label>
+                                    <label>"Model"<input id="model-custom" name="model-custom" class="pick-in wide" prop:value=move || model.get()
+                                        on:input=move |ev| model.set(event_target_value(&ev)) title="model" /></label>
+                                    <button class="pick-apply" on:click=move |_| apply_model()>"Apply"</button>
+                                </details>
                             </div>
                         </details>
                         <button class="icon-btn" title="Task pane" on:click=toggle_inspector>"⊞"</button>
