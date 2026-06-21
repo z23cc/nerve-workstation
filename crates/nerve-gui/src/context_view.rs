@@ -59,14 +59,20 @@ pub fn ContextView(token: StoredValue<Option<String>>) -> impl IntoView {
         });
     };
 
-    // Reload the (selection-aware) file list for the current filter.
+    // Reload the (selection-aware) file list for the current filter. A generation
+    // counter drops stale, out-of-order responses (per-keystroke fetches racing).
+    let load_gen = StoredValue::new(0u32);
     let load_files = move || {
         let Some(tok) = token.get_value() else { return };
         let query = filter.get_untracked();
+        let generation = load_gen.get_value() + 1;
+        load_gen.set_value(generation);
         leptos::task::spawn_local(async move {
             let (rows, trunc) = list_files(&tok, &query, FILE_LIMIT).await;
-            files.set(rows);
-            truncated.set(trunc);
+            if load_gen.get_value() == generation {
+                files.set(rows);
+                truncated.set(trunc);
+            }
         });
     };
 

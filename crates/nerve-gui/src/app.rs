@@ -12,7 +12,7 @@
 use crate::context_view::ContextView;
 use crate::events::route_event;
 use crate::render::render_turn;
-use crate::rpc::{cancel_job, daemon_token, open_events, start_job, start_job_get_id};
+use crate::rpc::{cancel_job, daemon_token, new_job_id, open_events, start_job, start_job_with_id};
 use leptos::prelude::*;
 use serde_json::json;
 
@@ -147,6 +147,12 @@ pub fn App() -> impl IntoView {
         error.set(None);
         let idx = active.get_untracked();
         let existing = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()));
+        let is_start = existing.is_none();
+        // Install routing ids BEFORE the RPC: for delegate.start the daemon emits
+        // DelegateProgress/ApprovalRequested keyed by this id concurrently with the
+        // start round-trip, so the chat must already own it — otherwise turn-1 text
+        // and approvals route to nobody. Also lets Stop target the turn immediately.
+        let turn_id = new_job_id();
         chats.update(|cs| {
             if let Some(c) = cs.get_mut(idx) {
                 if c.turns.is_empty() {
@@ -155,6 +161,10 @@ pub fn App() -> impl IntoView {
                 c.turns.push(Turn::user(text.clone()));
                 c.turns.push(Turn::assistant_streaming());
                 c.streaming = true;
+                c.turn_job = Some(turn_id.clone());
+                if is_start {
+                    c.session = Some(turn_id.clone());
+                }
             }
         });
         let (ag, au, md) = (
@@ -163,27 +173,31 @@ pub fn App() -> impl IntoView {
             model.get_untracked(),
         );
         leptos::task::spawn_local(async move {
-            let outcome = match existing {
-                // Follow-up: steer the live delegate session.
-                Some(sid) => match start_job_get_id(
-                    &tok,
-                    json!({"kind": "delegate.steer", "session_id": sid, "message": text}),
-                )
-                .await
-                {
-                    Ok(turn_job) => {
-                        set_turn_job(chats, idx, turn_job);
-                        Ok(())
+            let cmd = match &existing {
+                Some(sid) => json!({"kind": "delegate.steer", "session_id": sid, "message": text}),
+                None => {
+                    let mut cmd = json!({"kind": "delegate.start", "agent": ag, "task": text, "autonomy": au});
+                    if !md.is_empty() {
+                        cmd["model"] = json!(md);
                     }
-                    Err(err) => Err(format!("delegate.steer: {err}")),
-                },
-                // First message: start a delegate session (task = the message).
-                None => start_delegate(&tok, chats, idx, &ag, &au, &md, &text)
-                    .await
-                    .map(|_| ()),
+                    cmd
+                }
             };
-            if let Err(err) = outcome {
-                fail_chat(chats, idx, error, err);
+            if let Err(err) = start_job_with_id(&tok, &turn_id, cmd).await {
+                // Roll back the optimistic session on a failed start.
+                if is_start {
+                    chats.update(|cs| {
+                        if let Some(c) = cs.get_mut(idx) {
+                            c.session = None;
+                        }
+                    });
+                }
+                let verb = if is_start {
+                    "delegate.start"
+                } else {
+                    "delegate.steer"
+                };
+                fail_chat(chats, idx, error, format!("{verb}: {err}"));
             }
         });
     };
@@ -209,6 +223,33 @@ pub fn App() -> impl IntoView {
         active.set(idx);
         input.set(String::new());
         error.set(None);
+    };
+
+    // Close a chat: end its delegate session in the daemon (best effort — without
+    // this, every thread leaks a parked CLI child), remove it, fix `active`. Keeps
+    // at least one chat.
+    let close_chat = move |idx: usize, session: Option<String>| {
+        if let (Some(tok), Some(sid)) = (token.get_value(), session) {
+            leptos::task::spawn_local(async move {
+                let _ = start_job(&tok, json!({"kind": "delegate.close", "session_id": sid})).await;
+            });
+        }
+        chats.update(|cs| {
+            if cs.len() > 1 {
+                cs.remove(idx);
+            } else {
+                cs[0] = Chat::new();
+            }
+        });
+        let len = chats.with_untracked(|cs| cs.len());
+        active.update(|a| {
+            if idx < *a {
+                *a = a.saturating_sub(1);
+            }
+            if *a >= len {
+                *a = len.saturating_sub(1);
+            }
+        });
     };
 
     // Inspector (Plan/Files/Changes): Files + Changes load real data from the
@@ -331,11 +372,16 @@ pub fn App() -> impl IntoView {
                             let cls = if i == cur { "rail-row on" } else { "rail-row" };
                             let live = c.session.is_some();
                             let title = c.title;
+                            let session = c.session.clone();
                             view! {
-                                <button class=cls on:click=move |_| active.set(i)>
-                                    <span class="rail-dot" class:live=live></span>
-                                    <span class="rail-title">{title}</span>
-                                </button>
+                                <div class=cls>
+                                    <button class="rail-pick" on:click=move |_| active.set(i)>
+                                        <span class="rail-dot" class:live=live></span>
+                                        <span class="rail-title">{title}</span>
+                                    </button>
+                                    <button class="rail-close" title="Close thread"
+                                        on:click=move |_| close_chat(i, session.clone())>"×"</button>
+                                </div>
                             }
                         }).collect_view()
                     }}
@@ -372,6 +418,7 @@ pub fn App() -> impl IntoView {
                         <button class="icon-btn" title="Task pane" on:click=toggle_inspector>"⊞"</button>
                     </div>
                 </div>
+                {move || error.get().map(|e| view! { <div class="shell-error">{e}</div> })}
                 {move || if mode.get() == "context" {
                     view! { <ContextView token=token/> }.into_any()
                 } else if empty.get() {
@@ -386,7 +433,6 @@ pub fn App() -> impl IntoView {
                         <div class="transcript">
                             {move || chats.with(|cs| cs.get(active.get()).map(|c| c.turns.clone()).unwrap_or_default())
                                 .into_iter().map(render_turn).collect_view()}
-                            {move || error.get().map(|e| view! { <div class="turn-error">{e}</div> })}
                         </div>
                         <div class="composer-dock">{composer()}</div>
                     }.into_any()
@@ -477,48 +523,6 @@ fn respond(
             "decision": decision,
         });
         let _ = start_job(&tok, cmd).await;
-    });
-}
-
-/// Start a delegate session for the chat: `delegate.start` carries the first
-/// message as the task; its job id becomes the session id (and the turn-1 job).
-#[allow(clippy::too_many_arguments)] // reason: small leaf helper; args are delegate.start inputs
-async fn start_delegate(
-    token: &str,
-    chats: RwSignal<Vec<Chat>>,
-    idx: usize,
-    agent: &str,
-    autonomy: &str,
-    model: &str,
-    task: &str,
-) -> Result<String, String> {
-    let mut cmd = json!({
-        "kind": "delegate.start",
-        "agent": agent,
-        "task": task,
-        "autonomy": autonomy,
-    });
-    if !model.is_empty() {
-        cmd["model"] = json!(model);
-    }
-    let id = start_job_get_id(token, cmd)
-        .await
-        .map_err(|err| format!("delegate.start: {err}"))?;
-    chats.update(|cs| {
-        if let Some(c) = cs.get_mut(idx) {
-            c.session = Some(id.clone());
-            c.turn_job = Some(id.clone());
-        }
-    });
-    Ok(id)
-}
-
-/// Record the in-flight turn's job id (for Stop / cancellation).
-fn set_turn_job(chats: RwSignal<Vec<Chat>>, idx: usize, job: String) {
-    chats.update(|cs| {
-        if let Some(c) = cs.get_mut(idx) {
-            c.turn_job = Some(job);
-        }
     });
 }
 

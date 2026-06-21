@@ -112,19 +112,24 @@ pub async fn start_job(token: &str, command: Value) -> Result<Value, String> {
     .await
 }
 
-/// Start a job and return its client-generated `job_id` (without awaiting the
-/// job). Used for `delegate.start`, whose job PARKS as a live session — the
-/// returned id is the delegate session id used for `delegate.steer`/`close` and
-/// is the id `DelegateProgress`/`SessionIdle` events are keyed by.
-pub async fn start_job_get_id(token: &str, command: Value) -> Result<String, String> {
-    let job_id = next_job_id();
+/// A fresh client-side job id, exposed so a caller can install routing/session
+/// state for a job BEFORE issuing the start RPC — for `delegate.start`, events
+/// (`DelegateProgress` / `ApprovalRequested` / `SessionIdle`) keyed by this id
+/// can arrive concurrently with, or before, the RPC round-trip resolves.
+pub fn new_job_id() -> String {
+    next_job_id()
+}
+
+/// Start a job under a caller-supplied `job_id` (see [`new_job_id`]); does not
+/// await completion (the delegate.start job PARKS as a live session).
+pub async fn start_job_with_id(token: &str, job_id: &str, command: Value) -> Result<(), String> {
     rpc_call::<Value>(
         token,
         "runtime/jobs/start",
         json!({ "job_id": job_id, "command": command }),
     )
     .await?;
-    Ok(job_id)
+    Ok(())
 }
 
 /// Request cancellation of a running job (`runtime/jobs/cancel`). Used to stop a
@@ -147,7 +152,9 @@ pub async fn start_job_await(token: &str, command: Value) -> Result<Value, Strin
         json!({ "job_id": job_id, "command": command }),
     )
     .await?;
-    for _ in 0..200 {
+    // ~72s ceiling (600 * 120ms) — generous for heavy snapshot assembly while
+    // still bounding a job that never reaches a terminal state.
+    for _ in 0..600 {
         let got = rpc_call::<Value>(token, "runtime/jobs/get", json!({ "job_id": job_id })).await?;
         let job = got.get("job").cloned().unwrap_or(Value::Null);
         match job.get("status").and_then(Value::as_str).unwrap_or("") {

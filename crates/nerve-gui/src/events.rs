@@ -13,17 +13,19 @@ pub(crate) fn route_event(
     approval: RwSignal<Option<ApprovalReq>>,
 ) {
     match event {
-        RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, |c| {
-            c.streaming = false;
-            c.turn_job = None;
-            if let Some(turn) = c.turns.last_mut() {
-                turn.streaming = false;
-            }
+        RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, end_turn),
+        RuntimeEvent::SessionClosed { session_id } => with_session(chats, &session_id, end_turn),
+        // A turn's job reaching a terminal state ends the turn — keyed by the
+        // turn's job id (start job for turn 1, or the steer job). Without these,
+        // only SessionIdle clears `streaming`, so any server-side failure (CLI
+        // crash, missing/unauthenticated CLI, cancelled steer) wedges the chat
+        // spinning forever with the composer locked to Stop.
+        RuntimeEvent::JobFailed { job_id, error } => with_turn_job(chats, &job_id, |c| {
+            end_turn(c);
+            append_assistant_text(c, &format!("\n\n⚠ {}", error.message));
         }),
-        RuntimeEvent::SessionClosed { session_id } => with_session(chats, &session_id, |c| {
-            c.streaming = false;
-            c.turn_job = None;
-        }),
+        RuntimeEvent::JobCancelled { job_id } => with_turn_job(chats, &job_id, end_turn),
+        RuntimeEvent::JobCompleted { job_id } => with_turn_job(chats, &job_id, end_turn),
         RuntimeEvent::SessionAgent { session_id, event } => {
             with_session(chats, &session_id, |c| apply_agent_event(event, c));
         }
@@ -82,6 +84,27 @@ fn with_session(chats: RwSignal<Vec<Chat>>, session_id: &str, f: impl FnOnce(&mu
             f(c);
         }
     });
+}
+
+/// Apply `f` to the chat whose in-flight turn job matches `job_id`, if any.
+fn with_turn_job(chats: RwSignal<Vec<Chat>>, job_id: &str, f: impl FnOnce(&mut Chat)) {
+    chats.update(|cs| {
+        if let Some(c) = cs
+            .iter_mut()
+            .find(|c| c.turn_job.as_deref() == Some(job_id))
+        {
+            f(c);
+        }
+    });
+}
+
+/// Mark a chat's in-flight turn finished: stop streaming + drop the turn job.
+fn end_turn(chat: &mut Chat) {
+    chat.streaming = false;
+    chat.turn_job = None;
+    if let Some(turn) = chat.turns.last_mut() {
+        turn.streaming = false;
+    }
 }
 
 /// Fold a single `AgentEventKind` into the chat's current (streaming) assistant turn.
