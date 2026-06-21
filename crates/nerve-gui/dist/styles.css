@@ -757,3 +757,37 @@ summary:focus-visible {
   .pick-in.wide { flex: 1; min-width: 0; width: auto; }
   .turn.user .bubble { max-width: 90%; }
 }
+
+/* Composer controls (G7 wiring): approval + effort selects as pills. */
+.access-pill,
+.effort {
+  min-height: 26px;
+  padding: 3px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.access-pill { color: var(--warn); }
+.access-pill:hover,
+.effort:hover { background: var(--hover); }
+.effort-model { color: var(--muted); font-size: 12px; }
+
+/* Inspector Files/Changes content + Plan empty state (G7 wiring). */
+.inspector-body { overflow: auto; }
+
+.inspector-pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.plan-empty { padding: 10px 12px; color: var(--faint); font-size: 12px; }

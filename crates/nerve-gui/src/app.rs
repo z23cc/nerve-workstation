@@ -7,10 +7,10 @@
 //! the single protocol authority), with an approval modal (`session.respond`).
 //! Styling is a Codex-inspired native desktop surface, no proprietary assets.
 
+use crate::events::route_event;
 use crate::render::render_turn;
 use crate::rpc::{daemon_token, open_events, start_job, start_job_await};
 use leptos::prelude::*;
-use nerve_proto::{AgentEventKind, RuntimeEvent};
 use serde_json::json;
 
 const DEFAULT_PROVIDER: &str = "claude";
@@ -48,7 +48,7 @@ impl Turn {
             streaming: false,
         }
     }
-    fn assistant_streaming() -> Self {
+    pub(crate) fn assistant_streaming() -> Self {
         Self {
             role: Role::Assistant,
             text: String::new(),
@@ -61,11 +61,11 @@ impl Turn {
 
 /// One conversation in the sidebar list (in-memory for this browser session).
 #[derive(Clone)]
-struct Chat {
-    title: String,
-    session: Option<String>,
-    turns: Vec<Turn>,
-    streaming: bool,
+pub(crate) struct Chat {
+    pub(crate) title: String,
+    pub(crate) session: Option<String>,
+    pub(crate) turns: Vec<Turn>,
+    pub(crate) streaming: bool,
 }
 
 impl Chat {
@@ -82,12 +82,12 @@ impl Chat {
 /// A pending tool-permission decision (carries its own session_id so the reply
 /// targets the right chat even if the user has switched conversations).
 #[derive(Clone)]
-struct ApprovalReq {
-    session_id: String,
-    request_id: String,
-    tool: String,
-    preview: String,
-    tier: String,
+pub(crate) struct ApprovalReq {
+    pub(crate) session_id: String,
+    pub(crate) request_id: String,
+    pub(crate) tool: String,
+    pub(crate) preview: String,
+    pub(crate) tier: String,
 }
 
 #[component]
@@ -101,15 +101,31 @@ pub fn App() -> impl IntoView {
     let provider = RwSignal::new(DEFAULT_PROVIDER.to_string());
     let model = RwSignal::new(DEFAULT_MODEL.to_string());
     let inspector_open = RwSignal::new(false);
+    // Live context facts shown in the chrome (fetched from the daemon's tools).
+    let workspace = RwSignal::new("workspace".to_string());
+    let branch = RwSignal::new("—".to_string());
+    // Session controls: approval posture (always_ask|write|yolo; daemon default
+    // yolo = "Full access") and reasoning effort (applied on the next session).
+    let mode = RwSignal::new("yolo".to_string());
+    let effort = RwSignal::new("high".to_string());
 
     Effect::new(move |_| {
-        if let Some(tok) = token.get_value() {
-            let _ = open_events(&tok, move |event| route_event(event, chats, approval));
-        } else {
+        let Some(tok) = token.get_value() else {
             error.set(Some(
                 "no daemon token — open the daemon's URL (or append #token=…)".into(),
             ));
-        }
+            return;
+        };
+        let _ = open_events(&tok, move |event| route_event(event, chats, approval));
+        // Populate the context pills + sidebar from real workspace + git facts.
+        leptos::task::spawn_local(async move {
+            if let Some((name, _root)) = crate::data::fetch_workspace(&tok).await {
+                workspace.set(name);
+            }
+            if let Some(b) = crate::data::fetch_branch(&tok).await {
+                branch.set(b);
+            }
+        });
     });
 
     // Whether the active chat is mid-turn (drives Send⇄Stop).
@@ -135,8 +151,9 @@ pub fn App() -> impl IntoView {
             }
         });
         let (prov, mdl) = (provider.get_untracked(), model.get_untracked());
+        let (md, ef) = (mode.get_untracked(), effort.get_untracked());
         leptos::task::spawn_local(async move {
-            let session_id = match ensure_session(&tok, chats, idx, &prov, &mdl).await {
+            let session_id = match ensure_session(&tok, chats, idx, &prov, &mdl, &md, &ef).await {
                 Ok(id) => id,
                 Err(err) => return fail_chat(chats, idx, error, err),
             };
@@ -179,6 +196,47 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Switch the live session's approval posture (always_ask|write|yolo). Takes
+    // effect from the next gate decision; the chosen mode is also seeded on
+    // session.start in `ensure_session`.
+    let apply_mode = move |new_mode: String| {
+        mode.set(new_mode.clone());
+        let Some(tok) = token.get_value() else { return };
+        let idx = active.get_untracked();
+        let Some(sid) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
+        else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            let _ = start_job(
+                &tok,
+                json!({"kind": "session.set_mode", "session_id": sid, "mode": new_mode}),
+            )
+            .await;
+        });
+    };
+
+    // Inspector (Plan/Files/Changes): Files + Changes load real data from the
+    // daemon's snapshot-backed tools; Plan shows the active turn's tool calls.
+    let inspector_tab = RwSignal::new("changes");
+    let inspector_data = RwSignal::new(String::new());
+    let load_tab = move |tab: &'static str| {
+        inspector_tab.set(tab);
+        if tab == "plan" {
+            return;
+        }
+        let Some(tok) = token.get_value() else { return };
+        inspector_data.set("loading…".into());
+        leptos::task::spawn_local(async move {
+            let text = match tab {
+                "files" => crate::data::fetch_file_tree(&tok).await,
+                "changes" => crate::data::fetch_diff(&tok).await,
+                _ => None,
+            };
+            inspector_data.set(text.unwrap_or_else(|| "—".into()));
+        });
+    };
+
     let new_chat = move |_| {
         let mut idx = 0;
         chats.update(|cs| {
@@ -190,7 +248,13 @@ pub fn App() -> impl IntoView {
         error.set(None);
     };
 
-    let toggle_inspector = move |_| inspector_open.update(|open| *open = !*open);
+    let toggle_inspector = move |_| {
+        let opening = !inspector_open.get_untracked();
+        inspector_open.set(opening);
+        if opening {
+            load_tab(inspector_tab.get_untracked());
+        }
+    };
 
     // Only flips when the active chat goes empty↔non-empty, so the composer is not
     // re-created (and the textarea does not lose focus) on every streaming delta.
@@ -225,10 +289,28 @@ pub fn App() -> impl IntoView {
                         placeholder="Ask Nerve to build…"
                     ></textarea>
                     <div class="composer-tools">
-                        <button class="tool-btn" title="Attach context">"+"</button>
-                        <span class="access-pill" title="Approval mode">"Full access"</span>
+                        <select
+                            class="access-pill"
+                            title="Approval mode"
+                            prop:value=move || mode.get()
+                            on:change=move |ev| apply_mode(event_target_value(&ev))
+                        >
+                            <option value="yolo">"Full access"</option>
+                            <option value="write">"Auto-edit"</option>
+                            <option value="always_ask">"Read-only"</option>
+                        </select>
                         <span class="tool-spacer"></span>
-                        <span class="effort">{move || format!("{} · high", model.get())}</span>
+                        <span class="effort-model">{move || model.get()}</span>
+                        <select
+                            class="effort"
+                            title="Reasoning effort (applies to a new thread)"
+                            prop:value=move || effort.get()
+                            on:change=move |ev| effort.set(event_target_value(&ev))
+                        >
+                            <option value="high">"high"</option>
+                            <option value="medium">"medium"</option>
+                            <option value="low">"low"</option>
+                        </select>
                         {move || if active_busy() {
                             view! { <button class="send stop" title="Stop" on:click=move |_| stop()>"■"</button> }.into_any()
                         } else {
@@ -237,9 +319,9 @@ pub fn App() -> impl IntoView {
                     </div>
                 </div>
                 <div class="context-pills">
-                    <span class="ctx-pill">"⌂ nerve-workstation"</span>
+                    <span class="ctx-pill">"⌂ "{move || workspace.get()}</span>
                     <span class="ctx-pill">"Local"</span>
-                    <span class="ctx-pill">"⎇ main"</span>
+                    <span class="ctx-pill">"⎇ "{move || branch.get()}</span>
                 </div>
             </div>
         }
@@ -252,14 +334,8 @@ pub fn App() -> impl IntoView {
                 <button class="newchat" title="New thread" on:click=new_chat>
                     <span class="plus">"+"</span>"New thread"
                 </button>
-                <div class="nav">
-                    <div class="nav-row on"><span class="nav-icon">"☰"</span><span>"Threads"</span></div>
-                    <div class="nav-row"><span class="nav-icon">"◌"</span><span>"Chats"</span></div>
-                    <div class="nav-row"><span class="nav-icon">"⌁"</span><span>"Automations"</span></div>
-                    <div class="nav-row"><span class="nav-icon">"✦"</span><span>"Skills"</span></div>
-                </div>
                 <div class="rail-label">"Projects"</div>
-                <div class="project-row"><span class="project-dot"></span><span>"nerve-workstation"</span></div>
+                <div class="project-row"><span class="project-dot"></span><span>{move || workspace.get()}</span></div>
                 <div class="rail-label">"Threads"</div>
                 <div class="rail">
                     {move || {
@@ -328,18 +404,32 @@ pub fn App() -> impl IntoView {
             {move || inspector_open.get().then(|| view! {
                 <aside class="inspector">
                     <div class="inspector-head">
-                        <span class="inspector-title">"Plan"</span>
-                        <span class="inspector-chip">"Local"</span>
+                        <span class="inspector-title">"Inspector"</span>
+                        <span class="inspector-chip">"⎇ "{move || branch.get()}</span>
                     </div>
                     <div class="inspector-tabs">
-                        <button class="inspector-tab on">"Plan"</button>
-                        <button class="inspector-tab">"Files"</button>
-                        <button class="inspector-tab">"Changes"</button>
+                        <button class="inspector-tab" class:on=move || inspector_tab.get() == "plan"
+                            on:click=move |_| load_tab("plan")>"Plan"</button>
+                        <button class="inspector-tab" class:on=move || inspector_tab.get() == "files"
+                            on:click=move |_| load_tab("files")>"Files"</button>
+                        <button class="inspector-tab" class:on=move || inspector_tab.get() == "changes"
+                            on:click=move |_| load_tab("changes")>"Changes"</button>
                     </div>
                     <div class="inspector-body">
-                        <div class="plan-step done"><span></span><p>"Read workspace context"</p></div>
-                        <div class="plan-step on"><span></span><p>"Work in the active thread"</p></div>
-                        <div class="plan-step"><span></span><p>"Review generated changes"</p></div>
+                        {move || if inspector_tab.get() == "plan" {
+                            let tools = chats.with(|cs| cs.get(active.get())
+                                .and_then(|c| c.turns.last().map(|t| t.tools.clone()))
+                                .unwrap_or_default());
+                            if tools.is_empty() {
+                                view! { <div class="plan-empty">"No tool activity in this thread yet."</div> }.into_any()
+                            } else {
+                                tools.into_iter().map(|t| view! {
+                                    <div class="plan-step done"><span></span><p>{t.tool}</p></div>
+                                }).collect_view().into_any()
+                            }
+                        } else {
+                            view! { <pre class="inspector-pre">{move || inspector_data.get()}</pre> }.into_any()
+                        }}
                     </div>
                 </aside>
             })}
@@ -399,17 +489,25 @@ fn respond(
 }
 
 /// Return the chat's live session id, starting one (`session.start`) if needed.
+#[allow(clippy::too_many_arguments)] // reason: small leaf helper; args are all session.start inputs
 async fn ensure_session(
     token: &str,
     chats: RwSignal<Vec<Chat>>,
     idx: usize,
     provider: &str,
     model: &str,
+    mode: &str,
+    effort: &str,
 ) -> Result<String, String> {
     if let Some(id) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone())) {
         return Ok(id);
     }
-    let cmd = json!({"kind": "session.start", "provider": provider, "model": model});
+    let cmd = json!({
+        "kind": "session.start",
+        "provider": provider,
+        "model": model,
+        "reasoning_effort": effort,
+    });
     let result = start_job_await(token, cmd)
         .await
         .map_err(|err| format!("session.start: {err}"))?;
@@ -423,6 +521,14 @@ async fn ensure_session(
             c.session = Some(id.clone());
         }
     });
+    // Seed the approval posture when it differs from the daemon default (yolo).
+    if mode != "yolo" {
+        let _ = start_job(
+            token,
+            json!({"kind": "session.set_mode", "session_id": id, "mode": mode}),
+        )
+        .await;
+    }
     Ok(id)
 }
 
@@ -442,107 +548,6 @@ fn fail_chat(
         }
     });
     error.set(Some(message));
-}
-
-/// Route one `RuntimeEvent` from the SSE stream into the chat owning its session.
-fn route_event(
-    event: RuntimeEvent,
-    chats: RwSignal<Vec<Chat>>,
-    approval: RwSignal<Option<ApprovalReq>>,
-) {
-    match event {
-        RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, |c| {
-            c.streaming = false;
-            if let Some(turn) = c.turns.last_mut() {
-                turn.streaming = false;
-            }
-        }),
-        RuntimeEvent::SessionClosed { session_id } => {
-            with_session(chats, &session_id, |c| c.streaming = false)
-        }
-        RuntimeEvent::SessionAgent { session_id, event } => {
-            with_session(chats, &session_id, |c| apply_agent_event(event, c));
-        }
-        RuntimeEvent::ApprovalRequested {
-            session_id,
-            request_id,
-            tool,
-            preview,
-            tier,
-            ..
-        } => {
-            // Only surface approvals for a session we own.
-            if chats.with_untracked(|cs| {
-                cs.iter()
-                    .any(|c| c.session.as_deref() == Some(session_id.as_str()))
-            }) {
-                approval.set(Some(ApprovalReq {
-                    session_id,
-                    request_id,
-                    tool,
-                    preview,
-                    tier: format!("{tier:?}"),
-                }));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Apply `f` to the chat whose session matches `session_id`, if any.
-fn with_session(chats: RwSignal<Vec<Chat>>, session_id: &str, f: impl FnOnce(&mut Chat)) {
-    chats.update(|cs| {
-        if let Some(c) = cs
-            .iter_mut()
-            .find(|c| c.session.as_deref() == Some(session_id))
-        {
-            f(c);
-        }
-    });
-}
-
-/// Fold a single `AgentEventKind` into the chat's current (streaming) assistant turn.
-fn apply_agent_event(event: AgentEventKind, chat: &mut Chat) {
-    let needs_turn =
-        !matches!(chat.turns.last(), Some(t) if t.role == Role::Assistant && t.streaming);
-    if needs_turn {
-        chat.turns.push(Turn::assistant_streaming());
-    }
-    let Some(turn) = chat.turns.last_mut() else {
-        return;
-    };
-    match event {
-        AgentEventKind::Message { text } => turn.text.push_str(&text),
-        AgentEventKind::Reasoning { text } => turn.reasoning.push_str(&text),
-        AgentEventKind::ToolStarted { tool, .. } => turn.tools.push(ToolCard {
-            tool,
-            ok: None,
-            output: String::new(),
-        }),
-        AgentEventKind::ToolFinished { tool, ok, output } => {
-            match turn
-                .tools
-                .iter_mut()
-                .rev()
-                .find(|card| card.tool == tool && card.ok.is_none())
-            {
-                Some(card) => {
-                    card.ok = Some(ok);
-                    card.output = output;
-                }
-                None => turn.tools.push(ToolCard {
-                    tool,
-                    ok: Some(ok),
-                    output,
-                }),
-            }
-        }
-        AgentEventKind::Interrupted { .. } => {
-            turn.streaming = false;
-            chat.streaming = false;
-        }
-        AgentEventKind::TurnStarted { .. } | AgentEventKind::Usage { .. } => {}
-    }
 }
 
 /// A short sidebar title from the first user message.
