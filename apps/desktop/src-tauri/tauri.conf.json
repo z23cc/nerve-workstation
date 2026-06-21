@@ -25,6 +25,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/nerve"],
     "iOS": {
       "minimumSystemVersion": "13.0",
       "infoPlist": "Info.ios.plist"

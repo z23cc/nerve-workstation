@@ -167,3 +167,18 @@ apps/desktop/
         ├── daemon.rs       # local spawn or remote URL attach + cleanup
         └── config.rs       # root/remote URL resolution + persistence
 ```
+
+## Build a standalone desktop app (.app)
+
+The Tauri shell bundles the `nerve` binary as a sidecar so the packaged app is
+self-contained. Before `tauri build`, copy the release binary to the sidecar path:
+
+```bash
+cargo build --release -p nerve-workstation --bin nerve
+mkdir -p apps/desktop/src-tauri/binaries
+cp target/release/nerve "apps/desktop/src-tauri/binaries/nerve-$(rustc -vV | sed -n 's/host: //p')"
+( cd apps/desktop && bun run tauri build --bundles app )
+# → apps/desktop/src-tauri/target/release/bundle/macos/Nerve Workstation.app
+```
+
+The app spawns its bundled `nerve daemon` and opens the Leptos GUI at `/`.

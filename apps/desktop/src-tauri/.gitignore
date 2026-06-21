@@ -1,2 +1,5 @@
 /target/
 /gen/schemas/
+
+# Tauri sidecar (copied from the workspace release build before )
+binaries/
