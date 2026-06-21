@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 pub const AGENTS: &[(&str, &str)] = &[
     ("claude", "Claude Code"),
     ("codex", "Codex"),
-    ("gemini", "Gemini"),
+    // gemini is one-shot (not a parked/steerable session), so it does not fit the
+    // steerable-chat model yet — omitted until one-shot turns are handled.
 ];
 
 /// The human label for an agent id (falls back to the id).
