@@ -8,7 +8,7 @@
 //! Styling is a Codex-inspired native desktop surface, no proprietary assets.
 
 use crate::render::render_turn;
-use crate::rpc::{daemon_token, open_events, start_job};
+use crate::rpc::{daemon_token, open_events, start_job, start_job_await};
 use leptos::prelude::*;
 use nerve_proto::{AgentEventKind, RuntimeEvent};
 use serde_json::json;
@@ -410,13 +410,11 @@ async fn ensure_session(
         return Ok(id);
     }
     let cmd = json!({"kind": "session.start", "provider": provider, "model": model});
-    let result = start_job(token, cmd)
+    let result = start_job_await(token, cmd)
         .await
         .map_err(|err| format!("session.start: {err}"))?;
     let id = result
-        .get("job")
-        .and_then(|j| j.get("result"))
-        .and_then(|r| r.get("session_id"))
+        .get("session_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| "session.start returned no session_id".to_string())?;

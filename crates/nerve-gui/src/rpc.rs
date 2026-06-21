@@ -112,6 +112,43 @@ pub async fn start_job(token: &str, command: Value) -> Result<Value, String> {
     .await
 }
 
+/// Start a job and poll `runtime/jobs/get` until it reaches a terminal state,
+/// returning the job's `result` value. Used for short request/response jobs like
+/// `session.start` whose payload (e.g. `session_id`) is only populated once the
+/// job COMPLETES — the initial `jobs/start` response carries `result: null,
+/// status: "running"`, so reading the id from it always failed.
+pub async fn start_job_await(token: &str, command: Value) -> Result<Value, String> {
+    let job_id = next_job_id();
+    rpc_call::<Value>(
+        token,
+        "runtime/jobs/start",
+        json!({ "job_id": job_id, "command": command }),
+    )
+    .await?;
+    for _ in 0..200 {
+        let got = rpc_call::<Value>(token, "runtime/jobs/get", json!({ "job_id": job_id })).await?;
+        let job = got.get("job").cloned().unwrap_or(Value::Null);
+        match job.get("status").and_then(Value::as_str).unwrap_or("") {
+            "completed" => return Ok(job.get("result").cloned().unwrap_or(Value::Null)),
+            "failed" | "cancelled" => return Err(job_error(&job)),
+            _ => gloo_timers::future::TimeoutFuture::new(120).await,
+        }
+    }
+    Err("job did not complete in time".to_string())
+}
+
+/// Human-readable error from a terminal job (string or stringified object).
+fn job_error(job: &Value) -> String {
+    job.get("error")
+        .filter(|e| !e.is_null())
+        .map(|e| {
+            e.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| e.to_string())
+        })
+        .unwrap_or_else(|| "job did not complete".to_string())
+}
+
 /// Open the `/events` SSE stream and invoke `on_event` for each decoded
 /// [`RuntimeEvent`]. The token rides the URL query (an `EventSource` cannot set
 /// headers — same as the legacy gui.html). The `EventSource` + its closure are
