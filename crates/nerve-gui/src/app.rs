@@ -107,6 +107,8 @@ pub fn App() -> impl IntoView {
     // passed to delegate.start (full = no prompts, edit, read_only = plan).
     let agent = RwSignal::new(DEFAULT_AGENT.to_string());
     let autonomy = RwSignal::new("full".to_string());
+    // Optional model override passed to delegate.start (empty = the CLI's default).
+    let model = RwSignal::new(String::new());
     let inspector_open = RwSignal::new(false);
     let workspace = RwSignal::new("workspace".to_string());
     let branch = RwSignal::new("—".to_string());
@@ -152,7 +154,11 @@ pub fn App() -> impl IntoView {
                 c.streaming = true;
             }
         });
-        let (ag, au) = (agent.get_untracked(), autonomy.get_untracked());
+        let (ag, au, md) = (
+            agent.get_untracked(),
+            autonomy.get_untracked(),
+            model.get_untracked(),
+        );
         leptos::task::spawn_local(async move {
             let outcome = match existing {
                 // Follow-up: steer the live delegate session.
@@ -169,7 +175,7 @@ pub fn App() -> impl IntoView {
                     Err(err) => Err(format!("delegate.steer: {err}")),
                 },
                 // First message: start a delegate session (task = the message).
-                None => start_delegate(&tok, chats, idx, &ag, &au, &text)
+                None => start_delegate(&tok, chats, idx, &ag, &au, &md, &text)
                     .await
                     .map(|_| ()),
             };
@@ -265,9 +271,20 @@ pub fn App() -> impl IntoView {
                             <option value="read_only">"Read-only"</option>
                         </select>
                         <span class="tool-spacer"></span>
-                        <span class="effort-model">
-                            {move || crate::data::agent_label(&agent.get()).to_string()}
-                        </span>
+                        <select
+                            class="effort"
+                            title="Model"
+                            prop:value=move || model.get()
+                            on:change=move |ev| model.set(event_target_value(&ev))
+                        >
+                            {move || {
+                                let ag = agent.get();
+                                crate::data::AGENT_MODELS.iter()
+                                    .filter(move |(a, _, _)| *a == ag)
+                                    .map(|(_, id, label)| view! { <option value=*id>{*label}</option> })
+                                    .collect_view()
+                            }}
+                        </select>
                         {move || if active_busy() {
                             view! { <button class="send stop" title="Stop" on:click=move |_| stop()>"■"</button> }.into_any()
                         } else {
@@ -339,7 +356,7 @@ pub fn App() -> impl IntoView {
                             class="model-pill"
                             title="Agent CLI"
                             prop:value=move || agent.get()
-                            on:change=move |ev| agent.set(event_target_value(&ev))
+                            on:change=move |ev| { agent.set(event_target_value(&ev)); model.set(String::new()); }
                         >
                             {crate::data::AGENTS.iter().map(|(id, label)| view! {
                                 <option value=*id>{*label}</option>
@@ -456,20 +473,25 @@ fn respond(
 
 /// Start a delegate session for the chat: `delegate.start` carries the first
 /// message as the task; its job id becomes the session id (and the turn-1 job).
+#[allow(clippy::too_many_arguments)] // reason: small leaf helper; args are delegate.start inputs
 async fn start_delegate(
     token: &str,
     chats: RwSignal<Vec<Chat>>,
     idx: usize,
     agent: &str,
     autonomy: &str,
+    model: &str,
     task: &str,
 ) -> Result<String, String> {
-    let cmd = json!({
+    let mut cmd = json!({
         "kind": "delegate.start",
         "agent": agent,
         "task": task,
         "autonomy": autonomy,
     });
+    if !model.is_empty() {
+        cmd["model"] = json!(model);
+    }
     let id = start_job_get_id(token, cmd)
         .await
         .map_err(|err| format!("delegate.start: {err}"))?;

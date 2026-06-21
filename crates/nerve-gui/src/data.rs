@@ -26,6 +26,33 @@ pub fn agent_label(id: &str) -> &str {
         .unwrap_or(id)
 }
 
+/// Per-agent model catalog `(agent, model-id, label)`, modeled on RepoPrompt CE's
+/// AgentModel list. `model-id == ""` means "the CLI's own configured default"
+/// (delegate.start sends no `model`). Passed verbatim to the CLI (`claude --model`
+/// / codex thread-start `model`), which accepts any string — keep current.
+/// (Codex reasoning-effort levels are encoded in the model string upstream; Nerve's
+/// codex thread-start has no effort field yet, so base models are offered for now.)
+pub const AGENT_MODELS: &[(&str, &str, &str)] = &[
+    ("claude", "", "Default"),
+    ("claude", "sonnet", "Sonnet (latest)"),
+    ("claude", "opus", "Opus (latest)"),
+    ("claude", "opus[1m]", "Opus (latest, 1M)"),
+    ("claude", "haiku", "Haiku (latest)"),
+    ("claude", "claude-sonnet-4-6", "Sonnet 4.6"),
+    ("claude", "claude-opus-4-7", "Opus 4.7"),
+    ("claude", "claude-haiku-4-5", "Haiku 4.5"),
+    ("claude", "claude-fable-5", "Fable 5"),
+    // Codex models carry the reasoning effort as a suffix (RepoPrompt encoding);
+    // Nerve's codex thread-start splits it into model + model_reasoning_effort.
+    ("codex", "", "Default"),
+    ("codex", "gpt-5.5-low", "GPT-5.5 Low"),
+    ("codex", "gpt-5.5-medium", "GPT-5.5 Medium"),
+    ("codex", "gpt-5.5-high", "GPT-5.5 High"),
+    ("codex", "gpt-5.5-xhigh", "GPT-5.5 XHigh"),
+    ("codex", "gpt-5.3-codex-medium", "GPT-5.3 Codex Medium"),
+    ("codex", "gpt-5.3-codex-high", "GPT-5.3 Codex High"),
+];
+
 /// Run one `tool.call` job to completion; return its `structuredContent` object.
 pub async fn tool_job(token: &str, name: &str, arguments: Value) -> Result<Value, String> {
     let result = start_job_await(

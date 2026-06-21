@@ -173,9 +173,28 @@ pub(super) fn thread_start_params(
         params["approvalsReviewer"] = json!("user");
     }
     if let Some(model) = model {
-        params["model"] = json!(model);
+        // The app-server wants base model + reasoning effort as SEPARATE fields;
+        // an overridden `model` with no effort stalls the turn. Accept
+        // RepoPrompt-style effort-suffixed ids (`gpt-5.5-xhigh`) and split them.
+        let (base, effort) = split_model_effort(model);
+        params["model"] = json!(base);
+        if let Some(effort) = effort {
+            params["model_reasoning_effort"] = json!(effort);
+        }
     }
     params
+}
+
+/// Split a model id into `(base, reasoning_effort)`, recognizing a trailing
+/// `-low|-medium|-high|-xhigh` suffix (RepoPrompt's codex model encoding). A bare
+/// id returns `(id, None)`.
+fn split_model_effort(model: &str) -> (&str, Option<&str>) {
+    for effort in ["xhigh", "high", "medium", "low"] {
+        if let Some(base) = model.strip_suffix(effort).and_then(|s| s.strip_suffix('-')) {
+            return (base, Some(effort));
+        }
+    }
+    (model, None)
 }
 
 /// Map autonomy → codex sandbox (the autonomy-mode equivalent of the DA-2 one-shot
