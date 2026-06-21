@@ -132,6 +132,9 @@ where
             | RuntimeCommand::FlowRespond { .. } => Err(RuntimeError::adapter(
                 "flow commands are executed by the host flow engine, not the core runtime",
             )),
+            RuntimeCommand::WorkspaceReveal { .. } => Err(RuntimeError::adapter(
+                "workspace.reveal is executed by the host daemon, not the core runtime",
+            )),
         }
     }
 }

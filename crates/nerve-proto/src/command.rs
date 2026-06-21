@@ -34,6 +34,7 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "flow.list",
     "flow.close",
     "flow.respond",
+    "workspace.reveal",
 ];
 
 /// Transport-neutral command understood by human-facing runtime adapters.
@@ -264,6 +265,17 @@ pub enum RuntimeCommand {
         request_id: String,
         decision: SessionApprovalDecision,
     },
+    /// Reveal a served workspace root in the OS file manager (macOS Finder /
+    /// Windows Explorer / Linux `xdg-open`). Pure protocol vocabulary: the host
+    /// daemon runs the platform opener on the resolved root; `nerve-core` has no
+    /// process knowledge. `workspace` selects which root when more than one is
+    /// registered (defaults to the first). This is the GUI's "open location"
+    /// affordance — clients reach it over `/rpc`, never via native IPC.
+    #[serde(rename = "workspace.reveal")]
+    WorkspaceReveal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+    },
 }
 
 /// The workflow a [`RuntimeCommand::FlowStart`] runs: either an **inline**
@@ -444,6 +456,7 @@ impl RuntimeCommand {
             Self::FlowList => "flow.list",
             Self::FlowClose { .. } => "flow.close",
             Self::FlowRespond { .. } => "flow.respond",
+            Self::WorkspaceReveal { .. } => "workspace.reveal",
         }
     }
 
@@ -476,7 +489,8 @@ impl RuntimeCommand {
             | Self::FlowGet { .. }
             | Self::FlowList
             | Self::FlowClose { .. }
-            | Self::FlowRespond { .. } => None,
+            | Self::FlowRespond { .. }
+            | Self::WorkspaceReveal { .. } => None,
         }
     }
 }
@@ -889,5 +903,29 @@ mod tests {
             serde_json::to_value(DenyAlways).unwrap(),
             serde_json::json!("deny_always")
         );
+    }
+
+    #[test]
+    fn workspace_reveal_round_trips() {
+        let bare: RuntimeCommand =
+            serde_json::from_value(serde_json::json!({ "kind": "workspace.reveal" }))
+                .expect("parse workspace.reveal");
+        assert_eq!(bare.name(), "workspace.reveal");
+        assert_eq!(bare.tool_name(), None);
+        match bare {
+            RuntimeCommand::WorkspaceReveal { workspace } => assert_eq!(workspace, None),
+            other => panic!("unexpected: {}", other.name()),
+        }
+        let with: RuntimeCommand = serde_json::from_value(
+            serde_json::json!({ "kind": "workspace.reveal", "workspace": "main" }),
+        )
+        .expect("parse with workspace");
+        match with {
+            RuntimeCommand::WorkspaceReveal { workspace } => {
+                assert_eq!(workspace.as_deref(), Some("main"));
+            }
+            other => panic!("unexpected: {}", other.name()),
+        }
+        assert!(RUNTIME_COMMAND_NAMES.contains(&"workspace.reveal"));
     }
 }

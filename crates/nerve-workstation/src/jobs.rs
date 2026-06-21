@@ -435,8 +435,11 @@ impl JobManager {
                 message,
             } => self.run_delegate_steer(&session_id, &message, token),
             RuntimeCommand::DelegateClose { session_id } => self.run_delegate_close(&session_id),
+            RuntimeCommand::WorkspaceReveal { workspace } => {
+                self.run_workspace_reveal(workspace.as_deref())
+            }
             _ => Err(nerve_runtime::RuntimeError::adapter(
-                "expected a delegate.* command",
+                "expected a delegate.* or workspace.* command",
             )),
         }
     }
@@ -861,6 +864,35 @@ impl JobManager {
             })
     }
 
+    /// Reveal a served workspace root in the OS file manager (`workspace.reveal`).
+    /// `workspace` selects which root when more than one is registered (single-root
+    /// today). Resolves the root, then spawns the platform opener (macOS `open` /
+    /// Windows `explorer` / Linux `xdg-open`) — a host side-effect, kept out of the
+    /// pure engine.
+    fn run_workspace_reveal(
+        &self,
+        workspace: Option<&str>,
+    ) -> Result<Value, nerve_runtime::RuntimeError> {
+        let root = self
+            .runtime
+            .resolver()
+            .resolve_workspace(workspace)
+            .ok()
+            .and_then(|ws| ws.roots().first().map(|root| root.path.clone()))
+            .ok_or_else(|| {
+                nerve_runtime::RuntimeError::adapter(
+                    "workspace.reveal requires a served workspace root (start the daemon with --root)",
+                )
+            })?;
+        std::process::Command::new(workspace_opener())
+            .arg(&root)
+            .spawn()
+            .map_err(|err| {
+                nerve_runtime::RuntimeError::adapter(format!("reveal {}: {err}", root.display()))
+            })?;
+        Ok(json!({ "revealed": root.to_string_lossy() }))
+    }
+
     /// Spawn the delegated CLI through the streaming launcher, forwarding progress
     /// and parsing the stream into a [`DelegateOutcome`].
     #[allow(clippy::too_many_arguments)] // reason: one cohesive spawn call; splitting the
@@ -1080,12 +1112,27 @@ enum Executor {
 /// hard gate. Adding a new variant breaks this match at COMPILE time, forcing an
 /// explicit executor decision rather than letting the command fall through to the
 /// core hub by default. Do not add a wildcard arm.
+/// The OS file-manager opener for the current platform (used by `workspace.reveal`).
+fn workspace_opener() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    }
+}
+
 fn executor_for(command: &RuntimeCommand) -> Executor {
     match command {
         RuntimeCommand::AgentRun { .. } => Executor::AgentRun,
         RuntimeCommand::DelegateStart { .. }
         | RuntimeCommand::DelegateSteer { .. }
-        | RuntimeCommand::DelegateClose { .. } => Executor::Delegate,
+        | RuntimeCommand::DelegateClose { .. }
+        // workspace.reveal is a host side-effect (open the root in the OS file
+        // manager); it rides the delegate executor, which already owns the served
+        // workspace root and host-process actions.
+        | RuntimeCommand::WorkspaceReveal { .. } => Executor::Delegate,
         RuntimeCommand::SessionStart { .. }
         | RuntimeCommand::SessionMessage { .. }
         | RuntimeCommand::SessionInterrupt { .. }
@@ -1160,7 +1207,7 @@ mod command_executor_partition {
     /// an executor decision in `every_runtime_command_has_exactly_one_executor`.
     fn representative(name: &str) -> RuntimeCommand {
         let fields: Value = match name {
-            "ping" | "tool.list" | "session.list" | "flow.list" => json!({}),
+            "ping" | "tool.list" | "session.list" | "flow.list" | "workspace.reveal" => json!({}),
             "tool.call" => json!({ "name": "file_search" }),
             "agent.run" => json!({ "provider": "p", "model": "m", "task": "t" }),
             "session.start" => json!({ "provider": "p", "model": "m" }),

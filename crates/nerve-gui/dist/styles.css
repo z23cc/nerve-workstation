@@ -747,6 +747,9 @@ summary:focus-visible {
 }
 
 .ctx-pill:hover { background: var(--hover); color: var(--fg); }
+/* The workspace pill doubles as the "open location" affordance (workspace.reveal). */
+.ctx-pill-act { -webkit-appearance: none; appearance: none; cursor: pointer; }
+.ctx-pill-act:active { background: var(--active); }
 
 .modal-scrim {
   position: fixed;

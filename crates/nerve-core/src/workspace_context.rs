@@ -175,17 +175,18 @@ pub(crate) fn workspace_context_for_selection_cached<P: CatalogProvider>(
     // git_diff section: caller-supplied text only — the kernel never runs git.
     let git_diff = include
         .git_diff
-        .then(|| request.git_diff.as_deref())
+        .then_some(request.git_diff.as_deref())
         .flatten()
         .filter(|diff| !diff.trim().is_empty())
         .map(render_git_diff);
     let git_diff_tokens = git_diff.as_deref().map_or(0, count_tokens);
 
     // meta-prompts: caller-supplied, else the named recipe's defaults.
-    let meta_prompts = include
-        .meta_prompts
-        .then(|| resolve_meta_prompts(request))
-        .unwrap_or_default();
+    let meta_prompts = if include.meta_prompts {
+        resolve_meta_prompts(request)
+    } else {
+        Vec::new()
+    };
     let meta_prompts_text = (!meta_prompts.is_empty()).then(|| render_meta_prompts(&meta_prompts));
     let meta_prompts_tokens = meta_prompts_text.as_deref().map_or(0, count_tokens);
 

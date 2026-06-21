@@ -1477,6 +1477,27 @@
             "request_id"
           ],
           "type": "object"
+        },
+        {
+          "description": "Reveal a served workspace root in the OS file manager (macOS Finder / Windows Explorer / Linux `xdg-open`). Pure protocol vocabulary: the host daemon runs the platform opener on the resolved root; `nerve-core` has no process knowledge. `workspace` selects which root when more than one is registered (defaults to the first). This is the GUI's \"open location\" affordance — clients reach it over `/rpc`, never via native IPC.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "workspace.reveal"
+              ],
+              "type": "string"
+            },
+            "workspace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
         }
       ]
     },

@@ -284,6 +284,16 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    // Reveal the served workspace root in the OS file manager. Goes through the
+    // runtime protocol (workspace.reveal), never native IPC — the daemon runs the
+    // platform opener.
+    let reveal = move || {
+        let Some(tok) = token.get_value() else { return };
+        leptos::task::spawn_local(async move {
+            let _ = start_job(&tok, json!({ "kind": "workspace.reveal" })).await;
+        });
+    };
+
     // The composer: a large rounded box (textarea + an inline tool row) with
     // context pills beneath. Reused as the centered hero (empty state) and the
     // docked bar (active conversation). Copy closure → usable in both branches.
@@ -341,7 +351,8 @@ pub fn App() -> impl IntoView {
                     </div>
                 </div>
                 <div class="context-pills">
-                    <span class="ctx-pill">"📁 "{move || workspace.get()}</span>
+                    <button class="ctx-pill ctx-pill-act" title="Reveal in Finder"
+                        on:click=move |_| reveal()>"📁 "{move || workspace.get()}</button>
                     <span class="ctx-pill">{move || crate::data::agent_label(&agent.get()).to_string()}</span>
                     <span class="ctx-pill">"⎇ "{move || branch.get()}</span>
                 </div>
