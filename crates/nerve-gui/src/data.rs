@@ -175,3 +175,34 @@ pub async fn fetch_diff(token: &str) -> Option<String> {
         out.to_string()
     })
 }
+
+/// One file row for the clickable picker (from `list_files`).
+#[derive(Clone, serde::Deserialize)]
+pub struct FileRow {
+    pub path: String,
+    pub display_path: String,
+    pub selected: bool,
+}
+
+/// Structured, selection-aware file list for the picker; returns `(rows, truncated)`.
+pub async fn list_files(token: &str, query: &str, limit: usize) -> (Vec<FileRow>, bool) {
+    let mut args = json!({ "limit": limit });
+    if !query.is_empty() {
+        args["query"] = json!(query);
+    }
+    match tool_job(token, "list_files", args).await {
+        Ok(sc) => {
+            let rows = sc
+                .get("files")
+                .cloned()
+                .and_then(|f| serde_json::from_value::<Vec<FileRow>>(f).ok())
+                .unwrap_or_default();
+            let truncated = sc
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            (rows, truncated)
+        }
+        Err(_) => (Vec::new(), false),
+    }
+}

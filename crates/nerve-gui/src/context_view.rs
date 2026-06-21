@@ -1,10 +1,10 @@
-//! The Context view: assemble a token-budgeted context from the workspace
-//! selection using a named recipe, then copy/export it — the RepoPrompt-style
-//! "build context for an LLM" surface. All deterministic work lives in the
-//! engine (`workspace_context` + recipes); this is a thin client over
-//! `tool.call` (manage_selection / workspace_context / git).
+//! The Context view: pick files from a clickable tree, assemble a token-budgeted
+//! context with a named recipe, then copy/export it — the RepoPrompt-style "build
+//! context for an LLM" surface. All deterministic work lives in the engine
+//! (`list_files` / `manage_selection` / `workspace_context` + recipes); this is a
+//! thin client over `tool.call`.
 
-use crate::data::{fetch_context, fetch_diff, selection_op};
+use crate::data::{FileRow, fetch_context, fetch_diff, list_files, selection_op};
 use leptos::prelude::*;
 
 const RECIPES: &[(&str, &str)] = &[
@@ -15,6 +15,8 @@ const RECIPES: &[(&str, &str)] = &[
     ("manual", "Manual"),
 ];
 
+const FILE_LIMIT: usize = 1500;
+
 /// The token breakdown returned under `workspace_context` `structuredContent.tokens`.
 #[derive(Clone, Default, serde::Deserialize)]
 struct Budget {
@@ -24,25 +26,18 @@ struct Budget {
     git_diff_tokens: usize,
     meta_prompts_tokens: usize,
     instructions_tokens: usize,
-    #[serde(default)]
-    files: Vec<BudgetFile>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct BudgetFile {
-    display_path: String,
-    token_count: usize,
-    mode: String,
 }
 
 #[component]
 pub fn ContextView(token: StoredValue<Option<String>>) -> impl IntoView {
     let recipe = RwSignal::new("standard".to_string());
-    let add_path = RwSignal::new(String::new());
+    let filter = RwSignal::new(String::new());
+    let files = RwSignal::new(Vec::<FileRow>::new());
+    let truncated = RwSignal::new(false);
     let context_text = RwSignal::new(String::new());
     let budget = RwSignal::new(Budget::default());
 
-    // Re-assemble: fetch the diff for recipes that need it, then the context.
+    // Re-assemble the context: fetch the diff for recipes that need it, then render.
     let refresh = move || {
         let Some(tok) = token.get_value() else { return };
         let rec = recipe.get_untracked();
@@ -64,29 +59,33 @@ pub fn ContextView(token: StoredValue<Option<String>>) -> impl IntoView {
         });
     };
 
-    // Re-assemble whenever the recipe changes (and once on mount).
+    // Reload the (selection-aware) file list for the current filter.
+    let load_files = move || {
+        let Some(tok) = token.get_value() else { return };
+        let query = filter.get_untracked();
+        leptos::task::spawn_local(async move {
+            let (rows, trunc) = list_files(&tok, &query, FILE_LIMIT).await;
+            files.set(rows);
+            truncated.set(trunc);
+        });
+    };
+
     Effect::new(move |_| {
         let _ = recipe.get();
         refresh();
     });
+    Effect::new(move |_| {
+        let _ = filter.get();
+        load_files();
+    });
 
-    let add = move || {
+    // Toggle a file's selection, then refresh the list state + the budget.
+    let toggle = move |path: String, selected: bool| {
         let Some(tok) = token.get_value() else { return };
-        let path = add_path.get_untracked().trim().to_string();
-        if path.is_empty() {
-            return;
-        }
-        add_path.set(String::new());
+        let op = if selected { "remove" } else { "add" };
         leptos::task::spawn_local(async move {
-            let _ = selection_op(&tok, "add", vec![path]).await;
-            refresh();
-        });
-    };
-
-    let remove = move |path: String| {
-        let Some(tok) = token.get_value() else { return };
-        leptos::task::spawn_local(async move {
-            let _ = selection_op(&tok, "remove", vec![path]).await;
+            let _ = selection_op(&tok, op, vec![path]).await;
+            load_files();
             refresh();
         });
     };
@@ -108,49 +107,48 @@ pub fn ContextView(token: StoredValue<Option<String>>) -> impl IntoView {
                 </select>
             </div>
 
-            <div class="ctx-add">
-                <input class="ctx-add-in" placeholder="add a file path…"
-                    prop:value=move || add_path.get()
-                    on:input=move |ev| add_path.set(event_target_value(&ev))
-                    on:keydown=move |ev| if ev.key() == "Enter" { ev.prevent_default(); add(); } />
-                <button class="ctx-add-btn" on:click=move |_| add()>"Add"</button>
+            <input class="ctx-add-in" placeholder="filter files…"
+                prop:value=move || filter.get()
+                on:input=move |ev| filter.set(event_target_value(&ev)) />
+
+            <div class="ctx-tree">
+                {move || {
+                    let rows = files.get();
+                    if rows.is_empty() {
+                        view! { <div class="ctx-empty">"No files match."</div> }.into_any()
+                    } else {
+                        rows.into_iter().map(|f| {
+                            let path = f.path.clone();
+                            let sel = f.selected;
+                            view! {
+                                <button class="ctx-row" class:on=sel
+                                    on:click=move |_| toggle(path.clone(), sel)>
+                                    <span class="ctx-check">{if sel { "☑" } else { "☐" }}</span>
+                                    <span class="ctx-row-path">{f.display_path}</span>
+                                </button>
+                            }
+                        }).collect_view().into_any()
+                    }
+                }}
+                {move || truncated.get().then(|| view! {
+                    <div class="ctx-trunc">"…more files — narrow the filter"</div>
+                })}
             </div>
 
             <div class="ctx-budget">
-                {move || {
-                    let b = budget.get();
-                    view! {
-                        <div class="ctx-total">{move || budget.get().total_tokens}" tokens"</div>
-                        <div class="ctx-bars">
+                <div class="ctx-total">{move || budget.get().total_tokens}" tokens"</div>
+                <div class="ctx-bars">
+                    {move || {
+                        let b = budget.get();
+                        view! {
                             <Bar label="files" n=b.contents_tokens total=b.total_tokens/>
                             <Bar label="map" n=b.file_map_tokens total=b.total_tokens/>
                             <Bar label="diff" n=b.git_diff_tokens total=b.total_tokens/>
                             <Bar label="meta" n=b.meta_prompts_tokens total=b.total_tokens/>
                             <Bar label="instr" n=b.instructions_tokens total=b.total_tokens/>
-                        </div>
-                    }
-                }}
-            </div>
-
-            <div class="ctx-files">
-                {move || {
-                    let files = budget.get().files;
-                    if files.is_empty() {
-                        view! { <div class="ctx-empty">"No files selected — add paths above."</div> }.into_any()
-                    } else {
-                        files.into_iter().map(|f| {
-                            let path = f.display_path.clone();
-                            view! {
-                                <div class="ctx-file">
-                                    <span class="ctx-file-path">{f.display_path}</span>
-                                    <span class="ctx-file-mode">{f.mode}</span>
-                                    <span class="ctx-file-tok">{f.token_count}</span>
-                                    <button class="ctx-file-rm" title="Remove" on:click=move |_| remove(path.clone())>"×"</button>
-                                </div>
-                            }
-                        }).collect_view().into_any()
-                    }
-                }}
+                        }
+                    }}
+                </div>
             </div>
 
             <div class="ctx-preview-head">
