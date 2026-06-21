@@ -60,6 +60,9 @@ fn start_local_and_attach(app: &AppHandle) -> Result<(), String> {
         .arg(format!("127.0.0.1:{port}"))
         .arg("--root")
         .arg(&root)
+        // The GUI chat backend is the local agent CLIs (claude / codex / gemini)
+        // over the delegate path, so the managed daemon must allow delegation.
+        .arg("--allow-delegate")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()

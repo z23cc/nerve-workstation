@@ -701,6 +701,11 @@ impl JobManager {
         }
         let session_id = driver.session_id().unwrap_or(job_id).to_string();
         let result = turn.to_json(agent, &session_id);
+        // Turn 1 finished; the live session is now idle (parked) and ready to
+        // steer. Signal idle keyed by the JOB id (the client's delegate session
+        // id) so a client can stop its turn spinner — symmetric with session.*
+        // turns, which have no other turn-end event while the start job parks.
+        (self.emit)(RuntimeEvent::session_idle(job_id.to_string()));
         // Register and park: the session stays live for `delegate.steer` until a
         // `delegate.close` (or cancel) wakes this thread to tear it down.
         let handle = self.live_sessions.register(job_id, driver);
@@ -809,6 +814,9 @@ impl JobManager {
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
+        // Steer turn finished; the session is idle again — signal it (keyed by the
+        // session/job id) so a client can stop its turn spinner.
+        (self.emit)(RuntimeEvent::session_idle(session_id.to_string()));
         Ok(turn.to_json(agent, session_id))
     }
 
