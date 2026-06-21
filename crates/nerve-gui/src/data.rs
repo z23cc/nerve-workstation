@@ -7,36 +7,22 @@
 use crate::rpc::start_job_await;
 use serde_json::{Value, json};
 
-/// Curated `(provider, model)` catalog for the model picker. No provider API
-/// enumerates models, so this is the source of the dropdown; the free-text field
-/// still reaches any model not listed here. Provider names are the canonical
-/// `--provider` ids (claude / chatgpt / xai) that `session.start`/`set_model`
-/// accept. Keep current; the engine accepts any string regardless.
-pub const MODELS: &[(&str, &str)] = &[
-    // Anthropic
-    ("claude", "claude-opus-4-8"),
-    ("claude", "claude-opus-4-8[1m]"),
-    ("claude", "claude-sonnet-4-6"),
-    ("claude", "claude-haiku-4-5"),
-    ("claude", "claude-fable-5"),
-    // OpenAI
-    ("chatgpt", "gpt-5.5"),
-    ("chatgpt", "gpt-5"),
-    ("chatgpt", "gpt-5-mini"),
-    ("chatgpt", "gpt-4.1"),
-    ("chatgpt", "gpt-4o"),
-    // xAI
-    ("xai", "grok-4.3"),
-    ("xai", "grok-4-fast"),
-    ("xai", "grok-3"),
+/// The local agent CLIs the GUI drives over the delegate path: `(id, label)`.
+/// `id` is the catalog name `delegate.start` accepts (claude / codex / gemini);
+/// each runs the user's logged-in CLI, which owns its own model/credentials.
+pub const AGENTS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("codex", "Codex"),
+    ("gemini", "Gemini"),
 ];
 
-/// The canonical provider id for a catalog `model`, if listed.
-pub fn provider_for(model: &str) -> Option<&'static str> {
-    MODELS
+/// The human label for an agent id (falls back to the id).
+pub fn agent_label(id: &str) -> &str {
+    AGENTS
         .iter()
-        .find(|(_, m)| *m == model)
-        .map(|(provider, _)| *provider)
+        .find(|(a, _)| *a == id)
+        .map(|(_, label)| *label)
+        .unwrap_or(id)
 }
 
 /// Run one `tool.call` job to completion; return its `structuredContent` object.

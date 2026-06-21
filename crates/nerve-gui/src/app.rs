@@ -1,20 +1,21 @@
-//! Chat surface + approvals + model picker + a sidebar conversation list.
+//! Chat surface + approvals + agent picker + a sidebar conversation list.
 //!
-//! In-memory multi-chat: the sidebar lists the conversations started this
-//! browser session; switching swaps the active transcript + session. Each chat
-//! drives the `session.*` family over `/rpc` + `/events`, streaming assistant
-//! turns from the SSE stream (deserialized into the EXACT `nerve_proto` types —
-//! the single protocol authority), with an approval modal (`session.respond`).
-//! Styling is a Codex-inspired native desktop surface, no proprietary assets.
+//! The chat backend is the local agent CLIs (claude = Claude Code, codex =
+//! Codex, gemini) over the DELEGATE path — not the in-process subscription
+//! providers. Each conversation drives `delegate.start` (first message, the job
+//! id becomes the live session id), then `delegate.steer` (follow-ups), with
+//! `delegate.close` to end it. Replies stream as `DelegateProgress` text chunks
+//! and a turn ends on `SessionIdle` (emitted by the daemon at delegate turn-end);
+//! tool-permission requests surface as `ApprovalRequested` → the approval modal
+//! (`session.respond`). Styling is a Codex-inspired native desktop surface.
 
 use crate::events::route_event;
 use crate::render::render_turn;
-use crate::rpc::{daemon_token, open_events, start_job, start_job_await};
+use crate::rpc::{cancel_job, daemon_token, open_events, start_job, start_job_get_id};
 use leptos::prelude::*;
 use serde_json::json;
 
-const DEFAULT_PROVIDER: &str = "claude";
-const DEFAULT_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_AGENT: &str = "claude";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -60,10 +61,13 @@ impl Turn {
 }
 
 /// One conversation in the sidebar list (in-memory for this browser session).
+/// `session` is the delegate session id (the `delegate.start` job id); `turn_job`
+/// is the in-flight turn's job id (start or steer), used to cancel/stop it.
 #[derive(Clone)]
 pub(crate) struct Chat {
     pub(crate) title: String,
     pub(crate) session: Option<String>,
+    pub(crate) turn_job: Option<String>,
     pub(crate) turns: Vec<Turn>,
     pub(crate) streaming: bool,
 }
@@ -73,6 +77,7 @@ impl Chat {
         Self {
             title: "New thread".into(),
             session: None,
+            turn_job: None,
             turns: Vec::new(),
             streaming: false,
         }
@@ -98,16 +103,13 @@ pub fn App() -> impl IntoView {
     let input = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
     let approval = RwSignal::new(None::<ApprovalReq>);
-    let provider = RwSignal::new(DEFAULT_PROVIDER.to_string());
-    let model = RwSignal::new(DEFAULT_MODEL.to_string());
+    // The local CLI to drive (claude / codex / gemini) + the autonomy posture
+    // passed to delegate.start (full = no prompts, edit, read_only = plan).
+    let agent = RwSignal::new(DEFAULT_AGENT.to_string());
+    let autonomy = RwSignal::new("full".to_string());
     let inspector_open = RwSignal::new(false);
-    // Live context facts shown in the chrome (fetched from the daemon's tools).
     let workspace = RwSignal::new("workspace".to_string());
     let branch = RwSignal::new("—".to_string());
-    // Session controls: approval posture (always_ask|write|yolo; daemon default
-    // yolo = "Full access") and reasoning effort (applied on the next session).
-    let mode = RwSignal::new("yolo".to_string());
-    let effort = RwSignal::new("high".to_string());
 
     Effect::new(move |_| {
         let Some(tok) = token.get_value() else {
@@ -117,7 +119,6 @@ pub fn App() -> impl IntoView {
             return;
         };
         let _ = open_events(&tok, move |event| route_event(event, chats, approval));
-        // Populate the context pills + sidebar from real workspace + git facts.
         leptos::task::spawn_local(async move {
             if let Some((name, _root)) = crate::data::fetch_workspace(&tok).await {
                 workspace.set(name);
@@ -140,6 +141,7 @@ pub fn App() -> impl IntoView {
         input.set(String::new());
         error.set(None);
         let idx = active.get_untracked();
+        let existing = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()));
         chats.update(|cs| {
             if let Some(c) = cs.get_mut(idx) {
                 if c.turns.is_empty() {
@@ -150,16 +152,29 @@ pub fn App() -> impl IntoView {
                 c.streaming = true;
             }
         });
-        let (prov, mdl) = (provider.get_untracked(), model.get_untracked());
-        let (md, ef) = (mode.get_untracked(), effort.get_untracked());
+        let (ag, au) = (agent.get_untracked(), autonomy.get_untracked());
         leptos::task::spawn_local(async move {
-            let session_id = match ensure_session(&tok, chats, idx, &prov, &mdl, &md, &ef).await {
-                Ok(id) => id,
-                Err(err) => return fail_chat(chats, idx, error, err),
+            let outcome = match existing {
+                // Follow-up: steer the live delegate session.
+                Some(sid) => match start_job_get_id(
+                    &tok,
+                    json!({"kind": "delegate.steer", "session_id": sid, "message": text}),
+                )
+                .await
+                {
+                    Ok(turn_job) => {
+                        set_turn_job(chats, idx, turn_job);
+                        Ok(())
+                    }
+                    Err(err) => Err(format!("delegate.steer: {err}")),
+                },
+                // First message: start a delegate session (task = the message).
+                None => start_delegate(&tok, chats, idx, &ag, &au, &text)
+                    .await
+                    .map(|_| ()),
             };
-            let cmd = json!({"kind": "session.message", "session_id": session_id, "text": text});
-            if let Err(err) = start_job(&tok, cmd).await {
-                fail_chat(chats, idx, error, format!("session.message: {err}"));
+            if let Err(err) = outcome {
+                fail_chat(chats, idx, error, err);
             }
         });
     };
@@ -167,62 +182,24 @@ pub fn App() -> impl IntoView {
     let stop = move || {
         let Some(tok) = token.get_value() else { return };
         let idx = active.get_untracked();
-        let Some(session_id) =
-            chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
+        let Some(job) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.turn_job.clone()))
         else {
             return;
         };
         leptos::task::spawn_local(async move {
-            let _ = start_job(
-                &tok,
-                json!({"kind": "session.interrupt", "session_id": session_id}),
-            )
-            .await;
+            let _ = cancel_job(&tok, &job).await;
         });
     };
 
-    let apply_model = move || {
-        let Some(tok) = token.get_value() else { return };
-        let idx = active.get_untracked();
-        let Some(session_id) =
-            chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
-        else {
-            return;
-        };
-        let (prov, mdl) = (provider.get_untracked(), model.get_untracked());
-        leptos::task::spawn_local(async move {
-            let cmd = json!({"kind": "session.set_model", "session_id": session_id, "provider": prov, "model": mdl});
-            let _ = start_job(&tok, cmd).await;
+    let new_chat = move |_| {
+        let mut idx = 0;
+        chats.update(|cs| {
+            cs.push(Chat::new());
+            idx = cs.len() - 1;
         });
-    };
-
-    // Pick a model from the curated catalog: set its provider + model, then apply.
-    let pick_model = move |m: String| {
-        if let Some(prov) = crate::data::provider_for(&m) {
-            provider.set(prov.to_string());
-        }
-        model.set(m);
-        apply_model();
-    };
-
-    // Switch the live session's approval posture (always_ask|write|yolo). Takes
-    // effect from the next gate decision; the chosen mode is also seeded on
-    // session.start in `ensure_session`.
-    let apply_mode = move |new_mode: String| {
-        mode.set(new_mode.clone());
-        let Some(tok) = token.get_value() else { return };
-        let idx = active.get_untracked();
-        let Some(sid) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
-        else {
-            return;
-        };
-        leptos::task::spawn_local(async move {
-            let _ = start_job(
-                &tok,
-                json!({"kind": "session.set_mode", "session_id": sid, "mode": new_mode}),
-            )
-            .await;
-        });
+        active.set(idx);
+        input.set(String::new());
+        error.set(None);
     };
 
     // Inspector (Plan/Files/Changes): Files + Changes load real data from the
@@ -246,17 +223,6 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let new_chat = move |_| {
-        let mut idx = 0;
-        chats.update(|cs| {
-            cs.push(Chat::new());
-            idx = cs.len() - 1;
-        });
-        active.set(idx);
-        input.set(String::new());
-        error.set(None);
-    };
-
     let toggle_inspector = move |_| {
         let opening = !inspector_open.get_untracked();
         inspector_open.set(opening);
@@ -265,19 +231,9 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    // Only flips when the active chat goes empty↔non-empty, so the composer is not
-    // re-created (and the textarea does not lose focus) on every streaming delta.
-    let empty = Memo::new(move |_| {
-        chats.with(|cs| {
-            cs.get(active.get())
-                .map(|c| c.turns.is_empty())
-                .unwrap_or(true)
-        })
-    });
-
-    // The Codex-style composer: a large rounded box (textarea + an inline tool row)
-    // with context pills beneath. Reused as the centered hero (empty state) and as
-    // the docked bar (active conversation). Copy closure → usable in both branches.
+    // The composer: a large rounded box (textarea + an inline tool row) with
+    // context pills beneath. Reused as the centered hero (empty state) and the
+    // docked bar (active conversation). Copy closure → usable in both branches.
     let composer = move || {
         view! {
             <div class="composer-stack">
@@ -295,31 +251,23 @@ pub fn App() -> impl IntoView {
                                 send();
                             }
                         }
-                        placeholder="Ask Nerve to build…"
+                        placeholder="Ask the agent to build…"
                     ></textarea>
                     <div class="composer-tools">
                         <select
                             class="access-pill"
-                            title="Approval mode"
-                            prop:value=move || mode.get()
-                            on:change=move |ev| apply_mode(event_target_value(&ev))
+                            title="Autonomy"
+                            prop:value=move || autonomy.get()
+                            on:change=move |ev| autonomy.set(event_target_value(&ev))
                         >
-                            <option value="yolo">"Full access"</option>
-                            <option value="write">"Auto-edit"</option>
-                            <option value="always_ask">"Read-only"</option>
+                            <option value="full">"Full access"</option>
+                            <option value="edit">"Auto-edit"</option>
+                            <option value="read_only">"Read-only"</option>
                         </select>
                         <span class="tool-spacer"></span>
-                        <span class="effort-model">{move || model.get()}</span>
-                        <select
-                            class="effort"
-                            title="Reasoning effort (applies to a new thread)"
-                            prop:value=move || effort.get()
-                            on:change=move |ev| effort.set(event_target_value(&ev))
-                        >
-                            <option value="high">"high"</option>
-                            <option value="medium">"medium"</option>
-                            <option value="low">"low"</option>
-                        </select>
+                        <span class="effort-model">
+                            {move || crate::data::agent_label(&agent.get()).to_string()}
+                        </span>
                         {move || if active_busy() {
                             view! { <button class="send stop" title="Stop" on:click=move |_| stop()>"■"</button> }.into_any()
                         } else {
@@ -329,12 +277,22 @@ pub fn App() -> impl IntoView {
                 </div>
                 <div class="context-pills">
                     <span class="ctx-pill">"⌂ "{move || workspace.get()}</span>
-                    <span class="ctx-pill">"Local"</span>
+                    <span class="ctx-pill">{move || crate::data::agent_label(&agent.get()).to_string()}</span>
                     <span class="ctx-pill">"⎇ "{move || branch.get()}</span>
                 </div>
             </div>
         }
     };
+
+    // Only flips when the active chat goes empty↔non-empty, so the composer is
+    // not re-created (losing focus) on every streaming delta.
+    let empty = Memo::new(move |_| {
+        chats.with(|cs| {
+            cs.get(active.get())
+                .map(|c| c.turns.is_empty())
+                .unwrap_or(true)
+        })
+    });
 
     view! {
         <div id="nerve-shell" class:with-inspector=move || inspector_open.get()>
@@ -345,7 +303,7 @@ pub fn App() -> impl IntoView {
                 </button>
                 <div class="rail-label">"Projects"</div>
                 <div class="project-row"><span class="project-dot"></span><span>{move || workspace.get()}</span></div>
-                <div class="rail-label">"Threads"</div>
+                <div class="rail-label">"Conversations"</div>
                 <div class="rail">
                     {move || {
                         let cur = active.get();
@@ -377,30 +335,16 @@ pub fn App() -> impl IntoView {
                         {move || chats.with(|cs| cs.get(active.get()).map(|c| c.title.clone()).unwrap_or_default())}
                     </div>
                     <div class="picker">
-                        <details class="model-menu">
-                            <summary class="model-pill">
-                                <span>{move || format!("{} · {}", provider.get(), model.get())}</span>
-                            </summary>
-                            <div class="model-popover">
-                                <label>"Model"
-                                    <select id="model" name="model" class="pick-in wide"
-                                        prop:value=move || model.get()
-                                        on:change=move |ev| pick_model(event_target_value(&ev))>
-                                        {crate::data::MODELS.iter().map(|(prov, mdl)| view! {
-                                            <option value=*mdl>{format!("{prov} · {mdl}")}</option>
-                                        }).collect_view()}
-                                    </select>
-                                </label>
-                                <details class="custom-model">
-                                    <summary>"Custom provider / model"</summary>
-                                    <label>"Provider"<input id="provider" name="provider" class="pick-in" prop:value=move || provider.get()
-                                        on:input=move |ev| provider.set(event_target_value(&ev)) title="provider" /></label>
-                                    <label>"Model"<input id="model-custom" name="model-custom" class="pick-in wide" prop:value=move || model.get()
-                                        on:input=move |ev| model.set(event_target_value(&ev)) title="model" /></label>
-                                    <button class="pick-apply" on:click=move |_| apply_model()>"Apply"</button>
-                                </details>
-                            </div>
-                        </details>
+                        <select
+                            class="model-pill"
+                            title="Agent CLI"
+                            prop:value=move || agent.get()
+                            on:change=move |ev| agent.set(event_target_value(&ev))
+                        >
+                            {crate::data::AGENTS.iter().map(|(id, label)| view! {
+                                <option value=*id>{*label}</option>
+                            }).collect_view()}
+                        </select>
                         <button class="icon-btn" title="Task pane" on:click=toggle_inspector>"⊞"</button>
                     </div>
                 </div>
@@ -487,7 +431,8 @@ fn ApprovalModal(
     }
 }
 
-/// Send a `session.respond` decision (to the approval's own session) and clear the modal.
+/// Send a `session.respond` decision (delegate approvals share the same hub) and
+/// clear the modal.
 fn respond(
     token: StoredValue<Option<String>>,
     approval: RwSignal<Option<ApprovalReq>>,
@@ -509,48 +454,41 @@ fn respond(
     });
 }
 
-/// Return the chat's live session id, starting one (`session.start`) if needed.
-#[allow(clippy::too_many_arguments)] // reason: small leaf helper; args are all session.start inputs
-async fn ensure_session(
+/// Start a delegate session for the chat: `delegate.start` carries the first
+/// message as the task; its job id becomes the session id (and the turn-1 job).
+async fn start_delegate(
     token: &str,
     chats: RwSignal<Vec<Chat>>,
     idx: usize,
-    provider: &str,
-    model: &str,
-    mode: &str,
-    effort: &str,
+    agent: &str,
+    autonomy: &str,
+    task: &str,
 ) -> Result<String, String> {
-    if let Some(id) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone())) {
-        return Ok(id);
-    }
     let cmd = json!({
-        "kind": "session.start",
-        "provider": provider,
-        "model": model,
-        "reasoning_effort": effort,
+        "kind": "delegate.start",
+        "agent": agent,
+        "task": task,
+        "autonomy": autonomy,
     });
-    let result = start_job_await(token, cmd)
+    let id = start_job_get_id(token, cmd)
         .await
-        .map_err(|err| format!("session.start: {err}"))?;
-    let id = result
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| "session.start returned no session_id".to_string())?;
+        .map_err(|err| format!("delegate.start: {err}"))?;
     chats.update(|cs| {
         if let Some(c) = cs.get_mut(idx) {
             c.session = Some(id.clone());
+            c.turn_job = Some(id.clone());
         }
     });
-    // Seed the approval posture when it differs from the daemon default (yolo).
-    if mode != "yolo" {
-        let _ = start_job(
-            token,
-            json!({"kind": "session.set_mode", "session_id": id, "mode": mode}),
-        )
-        .await;
-    }
     Ok(id)
+}
+
+/// Record the in-flight turn's job id (for Stop / cancellation).
+fn set_turn_job(chats: RwSignal<Vec<Chat>>, idx: usize, job: String) {
+    chats.update(|cs| {
+        if let Some(c) = cs.get_mut(idx) {
+            c.turn_job = Some(job);
+        }
+    });
 }
 
 /// Mark the chat's in-flight turn failed and surface the error.
@@ -563,6 +501,7 @@ fn fail_chat(
     chats.update(|cs| {
         if let Some(c) = cs.get_mut(idx) {
             c.streaming = false;
+            c.turn_job = None;
             if let Some(turn) = c.turns.last_mut() {
                 turn.streaming = false;
             }

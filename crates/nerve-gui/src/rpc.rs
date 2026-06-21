@@ -112,6 +112,28 @@ pub async fn start_job(token: &str, command: Value) -> Result<Value, String> {
     .await
 }
 
+/// Start a job and return its client-generated `job_id` (without awaiting the
+/// job). Used for `delegate.start`, whose job PARKS as a live session — the
+/// returned id is the delegate session id used for `delegate.steer`/`close` and
+/// is the id `DelegateProgress`/`SessionIdle` events are keyed by.
+pub async fn start_job_get_id(token: &str, command: Value) -> Result<String, String> {
+    let job_id = next_job_id();
+    rpc_call::<Value>(
+        token,
+        "runtime/jobs/start",
+        json!({ "job_id": job_id, "command": command }),
+    )
+    .await?;
+    Ok(job_id)
+}
+
+/// Request cancellation of a running job (`runtime/jobs/cancel`). Used to stop a
+/// delegate turn (the turn's job id).
+pub async fn cancel_job(token: &str, job_id: &str) -> Result<(), String> {
+    rpc_call::<Value>(token, "runtime/jobs/cancel", json!({ "job_id": job_id })).await?;
+    Ok(())
+}
+
 /// Start a job and poll `runtime/jobs/get` until it reaches a terminal state,
 /// returning the job's `result` value. Used for short request/response jobs like
 /// `session.start` whose payload (e.g. `session_id`) is only populated once the

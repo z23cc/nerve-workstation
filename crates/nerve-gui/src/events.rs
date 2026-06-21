@@ -15,15 +15,22 @@ pub(crate) fn route_event(
     match event {
         RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, |c| {
             c.streaming = false;
+            c.turn_job = None;
             if let Some(turn) = c.turns.last_mut() {
                 turn.streaming = false;
             }
         }),
-        RuntimeEvent::SessionClosed { session_id } => {
-            with_session(chats, &session_id, |c| c.streaming = false)
-        }
+        RuntimeEvent::SessionClosed { session_id } => with_session(chats, &session_id, |c| {
+            c.streaming = false;
+            c.turn_job = None;
+        }),
         RuntimeEvent::SessionAgent { session_id, event } => {
             with_session(chats, &session_id, |c| apply_agent_event(event, c));
+        }
+        // The delegate path (local CLIs) streams raw assistant text chunks keyed by
+        // the delegate session/job id — coalesce them into the streaming turn.
+        RuntimeEvent::DelegateProgress { job_id, text, .. } => {
+            with_session(chats, &job_id, |c| append_assistant_text(c, &text));
         }
         RuntimeEvent::ApprovalRequested {
             session_id,
@@ -48,6 +55,20 @@ pub(crate) fn route_event(
             }
         }
         _ => {}
+    }
+}
+
+/// Append streamed assistant `text` to the chat's current streaming turn, opening
+/// one if the last turn is not a live assistant turn. Shared by the delegate
+/// stream (`DelegateProgress`) and the structured `Message` agent event.
+pub(crate) fn append_assistant_text(chat: &mut Chat, text: &str) {
+    let needs_turn =
+        !matches!(chat.turns.last(), Some(t) if t.role == Role::Assistant && t.streaming);
+    if needs_turn {
+        chat.turns.push(Turn::assistant_streaming());
+    }
+    if let Some(turn) = chat.turns.last_mut() {
+        turn.text.push_str(text);
     }
 }
 
