@@ -66,6 +66,59 @@ pub async fn tool_job(token: &str, name: &str, arguments: Value) -> Result<Value
         .ok_or_else(|| format!("{name}: no structuredContent"))
 }
 
+/// Run one `tool.call` and return BOTH the assembled `content[0].text` and the
+/// `structuredContent` (some tools, like `workspace_context`, put the rendered
+/// text in `content` and only the breakdown in `structuredContent`).
+pub async fn tool_job_full(
+    token: &str,
+    name: &str,
+    arguments: Value,
+) -> Result<(String, Value), String> {
+    let result = start_job_await(
+        token,
+        json!({ "kind": "tool.call", "name": name, "arguments": arguments }),
+    )
+    .await?;
+    let text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let structured = result
+        .get("structuredContent")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok((text, structured))
+}
+
+/// Assemble context for a recipe; returns `(rendered text, token-breakdown JSON)`.
+pub async fn fetch_context(
+    token: &str,
+    recipe: &str,
+    git_diff: Option<String>,
+) -> Option<(String, Value)> {
+    let mut args = json!({ "recipe": recipe });
+    if let Some(diff) = git_diff {
+        args["git_diff"] = json!(diff);
+    }
+    tool_job_full(token, "workspace_context", args).await.ok()
+}
+
+/// Run a `manage_selection` op (get/add/remove/clear); returns its
+/// `structuredContent` (the selection summary with per-file token counts).
+pub async fn selection_op(token: &str, op: &str, paths: Vec<String>) -> Option<Value> {
+    tool_job(
+        token,
+        "manage_selection",
+        json!({ "op": op, "paths": paths }),
+    )
+    .await
+    .ok()
+}
+
 /// The default workspace name + first root, via `manage_workspaces {op:get}`.
 pub async fn fetch_workspace(token: &str) -> Option<(String, String)> {
     let sc = tool_job(

@@ -12,6 +12,7 @@
 //! final Codex styling is G4. The browser entry point lives in `main.rs`.
 
 pub mod app;
+pub(crate) mod context_view;
 pub(crate) mod data;
 pub(crate) mod events;
 pub(crate) mod render;

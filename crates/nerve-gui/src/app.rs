@@ -9,6 +9,7 @@
 //! tool-permission requests surface as `ApprovalRequested` → the approval modal
 //! (`session.respond`). Styling is a Codex-inspired native desktop surface.
 
+use crate::context_view::ContextView;
 use crate::events::route_event;
 use crate::render::render_turn;
 use crate::rpc::{cancel_job, daemon_token, open_events, start_job, start_job_get_id};
@@ -110,6 +111,8 @@ pub fn App() -> impl IntoView {
     // Optional model override passed to delegate.start (empty = the CLI's default).
     let model = RwSignal::new(String::new());
     let inspector_open = RwSignal::new(false);
+    // Top-level surface: the delegate chat, or the Context builder.
+    let mode = RwSignal::new("chat");
     let workspace = RwSignal::new("workspace".to_string());
     let branch = RwSignal::new("—".to_string());
 
@@ -362,10 +365,16 @@ pub fn App() -> impl IntoView {
                                 <option value=*id>{*label}</option>
                             }).collect_view()}
                         </select>
+                        <button class="mode-toggle" title="Context builder"
+                            on:click=move |_| mode.update(|m| *m = if *m == "context" { "chat" } else { "context" })>
+                            {move || if mode.get() == "context" { "← Chat" } else { "Context" }}
+                        </button>
                         <button class="icon-btn" title="Task pane" on:click=toggle_inspector>"⊞"</button>
                     </div>
                 </div>
-                {move || if empty.get() {
+                {move || if mode.get() == "context" {
+                    view! { <ContextView token=token/> }.into_any()
+                } else if empty.get() {
                     view! {
                         <div class="hero">
                             <h1 class="hero-title">"What should we build?"</h1>
