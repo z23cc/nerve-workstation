@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod codemap;
 pub mod dispatch;
 pub mod edit;
+pub mod list_files;
 pub mod models;
 pub mod navigate;
 pub mod port;

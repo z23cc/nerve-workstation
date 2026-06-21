@@ -119,6 +119,18 @@ pub fn tool_specs() -> Value {
             }
         }),
         json!({
+            "name": "list_files",
+            "description": "List the workspace's files as structured rows (root-relative path, display path, selected) for a clickable file picker/tree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "query": { "type": "string", "description": "Case-insensitive substring filter over the root-relative path." },
+                    "limit": { "type": "integer", "description": "Maximum rows to return (default 4000)." }
+                }
+            }
+        }),
+        json!({
             "name": "workspace_context",
             "description": "Assemble the current persistent selection into context text with token breakdowns. A named recipe (standard|plan|review|diff|manual) fixes the section set.",
             "inputSchema": {

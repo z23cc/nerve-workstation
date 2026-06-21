@@ -13,6 +13,7 @@ where
 {
     match name {
         "manage_selection" => handle_manage_selection(provider, arguments, cancel),
+        "list_files" => handle_list_files(provider, arguments, cancel),
         "workspace_context" => handle_workspace_context(provider, arguments, cancel),
         "build_context" => handle_build_context(provider, arguments, cancel),
         "file_search" => handle_file_search(provider, arguments, cancel),
@@ -48,6 +49,22 @@ where
     let snapshot = provider.snapshot_arc_cancellable(cancel)?;
     cancel.check_cancelled()?;
     let response = manage_selection(provider, &snapshot, &args)?;
+    cancel.check_cancelled()?;
+    tool_response(serde_json::to_value(response)?)
+}
+
+fn handle_list_files<P>(
+    provider: &P,
+    arguments: Value,
+    cancel: &CancelToken,
+) -> Result<Value, DispatchError>
+where
+    P: DispatchProvider,
+{
+    let args: crate::list_files::ListFilesRequest = serde_json::from_value(arguments)?;
+    let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+    cancel.check_cancelled()?;
+    let response = crate::list_files::list_files(provider, &snapshot, &args)?;
     cancel.check_cancelled()?;
     tool_response(serde_json::to_value(response)?)
 }
