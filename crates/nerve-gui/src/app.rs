@@ -5,8 +5,9 @@
 //! drives the `session.*` family over `/rpc` + `/events`, streaming assistant
 //! turns from the SSE stream (deserialized into the EXACT `nerve_proto` types —
 //! the single protocol authority), with an approval modal (`session.respond`).
-//! Original styling — a refined dark chat aesthetic, no proprietary assets.
+//! Styling is a Codex-inspired native desktop surface, no proprietary assets.
 
+use crate::render::render_turn;
 use crate::rpc::{daemon_token, open_events, start_job};
 use leptos::prelude::*;
 use nerve_proto::{AgentEventKind, RuntimeEvent};
@@ -16,33 +17,45 @@ const DEFAULT_PROVIDER: &str = "claude";
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Role {
+pub(crate) enum Role {
     User,
     Assistant,
 }
 
 #[derive(Clone)]
-struct ToolCard {
-    tool: String,
-    ok: Option<bool>,
-    output: String,
+pub(crate) struct ToolCard {
+    pub(crate) tool: String,
+    pub(crate) ok: Option<bool>,
+    pub(crate) output: String,
 }
 
 #[derive(Clone)]
-struct Turn {
-    role: Role,
-    text: String,
-    reasoning: String,
-    tools: Vec<ToolCard>,
-    streaming: bool,
+pub(crate) struct Turn {
+    pub(crate) role: Role,
+    pub(crate) text: String,
+    pub(crate) reasoning: String,
+    pub(crate) tools: Vec<ToolCard>,
+    pub(crate) streaming: bool,
 }
 
 impl Turn {
     fn user(text: String) -> Self {
-        Self { role: Role::User, text, reasoning: String::new(), tools: Vec::new(), streaming: false }
+        Self {
+            role: Role::User,
+            text,
+            reasoning: String::new(),
+            tools: Vec::new(),
+            streaming: false,
+        }
     }
     fn assistant_streaming() -> Self {
-        Self { role: Role::Assistant, text: String::new(), reasoning: String::new(), tools: Vec::new(), streaming: true }
+        Self {
+            role: Role::Assistant,
+            text: String::new(),
+            reasoning: String::new(),
+            tools: Vec::new(),
+            streaming: true,
+        }
     }
 }
 
@@ -57,7 +70,12 @@ struct Chat {
 
 impl Chat {
     fn new() -> Self {
-        Self { title: "New chat".into(), session: None, turns: Vec::new(), streaming: false }
+        Self {
+            title: "New thread".into(),
+            session: None,
+            turns: Vec::new(),
+            streaming: false,
+        }
     }
 }
 
@@ -82,12 +100,15 @@ pub fn App() -> impl IntoView {
     let approval = RwSignal::new(None::<ApprovalReq>);
     let provider = RwSignal::new(DEFAULT_PROVIDER.to_string());
     let model = RwSignal::new(DEFAULT_MODEL.to_string());
+    let inspector_open = RwSignal::new(false);
 
     Effect::new(move |_| {
         if let Some(tok) = token.get_value() {
             let _ = open_events(&tok, move |event| route_event(event, chats, approval));
         } else {
-            error.set(Some("no daemon token — open the daemon's URL (or append #token=…)".into()));
+            error.set(Some(
+                "no daemon token — open the daemon's URL (or append #token=…)".into(),
+            ));
         }
     });
 
@@ -129,19 +150,25 @@ pub fn App() -> impl IntoView {
     let stop = move || {
         let Some(tok) = token.get_value() else { return };
         let idx = active.get_untracked();
-        let Some(session_id) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
+        let Some(session_id) =
+            chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
         else {
             return;
         };
         leptos::task::spawn_local(async move {
-            let _ = start_job(&tok, json!({"kind": "session.interrupt", "session_id": session_id})).await;
+            let _ = start_job(
+                &tok,
+                json!({"kind": "session.interrupt", "session_id": session_id}),
+            )
+            .await;
         });
     };
 
     let apply_model = move || {
         let Some(tok) = token.get_value() else { return };
         let idx = active.get_untracked();
-        let Some(session_id) = chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
+        let Some(session_id) =
+            chats.with_untracked(|cs| cs.get(idx).and_then(|c| c.session.clone()))
         else {
             return;
         };
@@ -163,14 +190,77 @@ pub fn App() -> impl IntoView {
         error.set(None);
     };
 
+    let toggle_inspector = move |_| inspector_open.update(|open| *open = !*open);
+
+    // Only flips when the active chat goes empty↔non-empty, so the composer is not
+    // re-created (and the textarea does not lose focus) on every streaming delta.
+    let empty = Memo::new(move |_| {
+        chats.with(|cs| {
+            cs.get(active.get())
+                .map(|c| c.turns.is_empty())
+                .unwrap_or(true)
+        })
+    });
+
+    // The Codex-style composer: a large rounded box (textarea + an inline tool row)
+    // with context pills beneath. Reused as the centered hero (empty state) and as
+    // the docked bar (active conversation). Copy closure → usable in both branches.
+    let composer = move || {
+        view! {
+            <div class="composer-stack">
+                <div class="composer-box">
+                    <textarea
+                        id="message"
+                        name="message"
+                        class="input"
+                        rows="1"
+                        prop:value=move || input.get()
+                        on:input=move |ev| input.set(event_target_value(&ev))
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" && !ev.shift_key() {
+                                ev.prevent_default();
+                                send();
+                            }
+                        }
+                        placeholder="Ask Nerve to build…"
+                    ></textarea>
+                    <div class="composer-tools">
+                        <button class="tool-btn" title="Attach context">"+"</button>
+                        <span class="access-pill" title="Approval mode">"Full access"</span>
+                        <span class="tool-spacer"></span>
+                        <span class="effort">{move || format!("{} · high", model.get())}</span>
+                        {move || if active_busy() {
+                            view! { <button class="send stop" title="Stop" on:click=move |_| stop()>"■"</button> }.into_any()
+                        } else {
+                            view! { <button class="send" title="Send" on:click=move |_| send()>"↑"</button> }.into_any()
+                        }}
+                    </div>
+                </div>
+                <div class="context-pills">
+                    <span class="ctx-pill">"⌂ nerve-workstation"</span>
+                    <span class="ctx-pill">"Local"</span>
+                    <span class="ctx-pill">"⎇ main"</span>
+                </div>
+            </div>
+        }
+    };
+
     view! {
-        <div id="nerve-shell">
+        <div id="nerve-shell" class:with-inspector=move || inspector_open.get()>
             <aside class="sidebar">
-                <div class="brand"><span class="spark">"◆"</span>" Nerve"</div>
-                <button class="newchat" on:click=new_chat>
-                    <span class="plus">"＋"</span>" New chat"
+                <div class="brand"><span class="spark">"N"</span><span>"Nerve"</span></div>
+                <button class="newchat" title="New thread" on:click=new_chat>
+                    <span class="plus">"+"</span>"New thread"
                 </button>
-                <div class="rail-label">"Conversations"</div>
+                <div class="nav">
+                    <div class="nav-row on"><span class="nav-icon">"☰"</span><span>"Threads"</span></div>
+                    <div class="nav-row"><span class="nav-icon">"◌"</span><span>"Chats"</span></div>
+                    <div class="nav-row"><span class="nav-icon">"⌁"</span><span>"Automations"</span></div>
+                    <div class="nav-row"><span class="nav-icon">"✦"</span><span>"Skills"</span></div>
+                </div>
+                <div class="rail-label">"Projects"</div>
+                <div class="project-row"><span class="project-dot"></span><span>"nerve-workstation"</span></div>
+                <div class="rail-label">"Threads"</div>
                 <div class="rail">
                     {move || {
                         let cur = active.get();
@@ -190,9 +280,9 @@ pub fn App() -> impl IntoView {
                 <div class="spacer"></div>
                 <div class="status-row">
                     {move || if active_busy() {
-                        view! { <span class="dot busy"></span>"streaming" }.into_any()
+                        view! { <span class="dot busy"></span>"running" }.into_any()
                     } else {
-                        view! { <span class="dot idle"></span>"protocol v4" }.into_any()
+                        view! { <span class="dot idle"></span>"runtime v4" }.into_any()
                     }}
                 </div>
             </aside>
@@ -202,54 +292,57 @@ pub fn App() -> impl IntoView {
                         {move || chats.with(|cs| cs.get(active.get()).map(|c| c.title.clone()).unwrap_or_default())}
                     </div>
                     <div class="picker">
-                        <input class="pick-in" prop:value=move || provider.get()
-                            on:input=move |ev| provider.set(event_target_value(&ev)) title="provider" />
-                        <span class="pick-sep">"/"</span>
-                        <input class="pick-in wide" prop:value=move || model.get()
-                            on:input=move |ev| model.set(event_target_value(&ev)) title="model" />
-                        <button class="pick-apply" title="apply to live session (session.set_model)"
-                            on:click=move |_| apply_model()>"set"</button>
+                        <details class="model-menu">
+                            <summary class="model-pill">
+                                <span>{move || format!("{} · {}", provider.get(), model.get())}</span>
+                            </summary>
+                            <div class="model-popover">
+                                <label>"Provider"<input id="provider" name="provider" class="pick-in" prop:value=move || provider.get()
+                                    on:input=move |ev| provider.set(event_target_value(&ev)) title="provider" /></label>
+                                <label>"Model"<input id="model" name="model" class="pick-in wide" prop:value=move || model.get()
+                                    on:input=move |ev| model.set(event_target_value(&ev)) title="model" /></label>
+                                <button class="pick-apply" on:click=move |_| apply_model()>"Apply"</button>
+                            </div>
+                        </details>
+                        <button class="icon-btn" title="Task pane" on:click=toggle_inspector>"⊞"</button>
                     </div>
                 </div>
-                <div class="transcript">
-                    {move || {
-                        let turns = chats.with(|cs| cs.get(active.get()).map(|c| c.turns.clone()).unwrap_or_default());
-                        if turns.is_empty() {
-                            view! { <div class="empty">
-                                <div class="empty-spark">"◆"</div>
-                                <div class="empty-title">"Nerve"</div>
-                                <div class="empty-sub">"Ask anything — the agent runs over the runtime protocol."</div>
-                            </div> }.into_any()
-                        } else {
-                            turns.into_iter().map(render_turn).collect_view().into_any()
-                        }
-                    }}
-                    {move || error.get().map(|e| view! { <div class="turn-error">{e}</div> })}
-                </div>
-                <div class="composer">
-                    <div class="composer-inner">
-                        <textarea
-                            class="input"
-                            rows="1"
-                            prop:value=move || input.get()
-                            on:input=move |ev| input.set(event_target_value(&ev))
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" && !ev.shift_key() {
-                                    ev.prevent_default();
-                                    send();
-                                }
-                            }
-                            placeholder="Message Nerve…"
-                        ></textarea>
-                        {move || if active_busy() {
-                            view! { <button class="send stop" title="Stop" on:click=move |_| stop()>"■"</button> }.into_any()
-                        } else {
-                            view! { <button class="send" title="Send" on:click=move |_| send()>"↑"</button> }.into_any()
-                        }}
-                    </div>
-                    <div class="composer-hint">"Enter to send · Shift+Enter for a newline"</div>
-                </div>
+                {move || if empty.get() {
+                    view! {
+                        <div class="hero">
+                            <h1 class="hero-title">"What should we build?"</h1>
+                            <div class="hero-composer">{composer()}</div>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! {
+                        <div class="transcript">
+                            {move || chats.with(|cs| cs.get(active.get()).map(|c| c.turns.clone()).unwrap_or_default())
+                                .into_iter().map(render_turn).collect_view()}
+                            {move || error.get().map(|e| view! { <div class="turn-error">{e}</div> })}
+                        </div>
+                        <div class="composer-dock">{composer()}</div>
+                    }.into_any()
+                }}
             </main>
+            {move || inspector_open.get().then(|| view! {
+                <aside class="inspector">
+                    <div class="inspector-head">
+                        <span class="inspector-title">"Plan"</span>
+                        <span class="inspector-chip">"Local"</span>
+                    </div>
+                    <div class="inspector-tabs">
+                        <button class="inspector-tab on">"Plan"</button>
+                        <button class="inspector-tab">"Files"</button>
+                        <button class="inspector-tab">"Changes"</button>
+                    </div>
+                    <div class="inspector-body">
+                        <div class="plan-step done"><span></span><p>"Read workspace context"</p></div>
+                        <div class="plan-step on"><span></span><p>"Work in the active thread"</p></div>
+                        <div class="plan-step"><span></span><p>"Review generated changes"</p></div>
+                    </div>
+                </aside>
+            })}
             {move || approval.get().map(|req| view! {
                 <ApprovalModal req=req token=token approval=approval />
             })}
@@ -317,7 +410,9 @@ async fn ensure_session(
         return Ok(id);
     }
     let cmd = json!({"kind": "session.start", "provider": provider, "model": model});
-    let result = start_job(token, cmd).await.map_err(|err| format!("session.start: {err}"))?;
+    let result = start_job(token, cmd)
+        .await
+        .map_err(|err| format!("session.start: {err}"))?;
     let id = result
         .get("job")
         .and_then(|j| j.get("result"))
@@ -334,7 +429,12 @@ async fn ensure_session(
 }
 
 /// Mark the chat's in-flight turn failed and surface the error.
-fn fail_chat(chats: RwSignal<Vec<Chat>>, idx: usize, error: RwSignal<Option<String>>, message: String) {
+fn fail_chat(
+    chats: RwSignal<Vec<Chat>>,
+    idx: usize,
+    error: RwSignal<Option<String>>,
+    message: String,
+) {
     chats.update(|cs| {
         if let Some(c) = cs.get_mut(idx) {
             c.streaming = false;
@@ -347,7 +447,11 @@ fn fail_chat(chats: RwSignal<Vec<Chat>>, idx: usize, error: RwSignal<Option<Stri
 }
 
 /// Route one `RuntimeEvent` from the SSE stream into the chat owning its session.
-fn route_event(event: RuntimeEvent, chats: RwSignal<Vec<Chat>>, approval: RwSignal<Option<ApprovalReq>>) {
+fn route_event(
+    event: RuntimeEvent,
+    chats: RwSignal<Vec<Chat>>,
+    approval: RwSignal<Option<ApprovalReq>>,
+) {
     match event {
         RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, |c| {
             c.streaming = false;
@@ -355,13 +459,25 @@ fn route_event(event: RuntimeEvent, chats: RwSignal<Vec<Chat>>, approval: RwSign
                 turn.streaming = false;
             }
         }),
-        RuntimeEvent::SessionClosed { session_id } => with_session(chats, &session_id, |c| c.streaming = false),
+        RuntimeEvent::SessionClosed { session_id } => {
+            with_session(chats, &session_id, |c| c.streaming = false)
+        }
         RuntimeEvent::SessionAgent { session_id, event } => {
             with_session(chats, &session_id, |c| apply_agent_event(event, c));
         }
-        RuntimeEvent::ApprovalRequested { session_id, request_id, tool, preview, tier, .. } => {
+        RuntimeEvent::ApprovalRequested {
+            session_id,
+            request_id,
+            tool,
+            preview,
+            tier,
+            ..
+        } => {
             // Only surface approvals for a session we own.
-            if chats.with_untracked(|cs| cs.iter().any(|c| c.session.as_deref() == Some(session_id.as_str()))) {
+            if chats.with_untracked(|cs| {
+                cs.iter()
+                    .any(|c| c.session.as_deref() == Some(session_id.as_str()))
+            }) {
                 approval.set(Some(ApprovalReq {
                     session_id,
                     request_id,
@@ -378,7 +494,10 @@ fn route_event(event: RuntimeEvent, chats: RwSignal<Vec<Chat>>, approval: RwSign
 /// Apply `f` to the chat whose session matches `session_id`, if any.
 fn with_session(chats: RwSignal<Vec<Chat>>, session_id: &str, f: impl FnOnce(&mut Chat)) {
     chats.update(|cs| {
-        if let Some(c) = cs.iter_mut().find(|c| c.session.as_deref() == Some(session_id)) {
+        if let Some(c) = cs
+            .iter_mut()
+            .find(|c| c.session.as_deref() == Some(session_id))
+        {
             f(c);
         }
     });
@@ -386,22 +505,38 @@ fn with_session(chats: RwSignal<Vec<Chat>>, session_id: &str, f: impl FnOnce(&mu
 
 /// Fold a single `AgentEventKind` into the chat's current (streaming) assistant turn.
 fn apply_agent_event(event: AgentEventKind, chat: &mut Chat) {
-    let needs_turn = !matches!(chat.turns.last(), Some(t) if t.role == Role::Assistant && t.streaming);
+    let needs_turn =
+        !matches!(chat.turns.last(), Some(t) if t.role == Role::Assistant && t.streaming);
     if needs_turn {
         chat.turns.push(Turn::assistant_streaming());
     }
-    let Some(turn) = chat.turns.last_mut() else { return };
+    let Some(turn) = chat.turns.last_mut() else {
+        return;
+    };
     match event {
         AgentEventKind::Message { text } => turn.text.push_str(&text),
         AgentEventKind::Reasoning { text } => turn.reasoning.push_str(&text),
-        AgentEventKind::ToolStarted { tool, .. } => turn.tools.push(ToolCard { tool, ok: None, output: String::new() }),
+        AgentEventKind::ToolStarted { tool, .. } => turn.tools.push(ToolCard {
+            tool,
+            ok: None,
+            output: String::new(),
+        }),
         AgentEventKind::ToolFinished { tool, ok, output } => {
-            match turn.tools.iter_mut().rev().find(|card| card.tool == tool && card.ok.is_none()) {
+            match turn
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|card| card.tool == tool && card.ok.is_none())
+            {
                 Some(card) => {
                     card.ok = Some(ok);
                     card.output = output;
                 }
-                None => turn.tools.push(ToolCard { tool, ok: Some(ok), output }),
+                None => turn.tools.push(ToolCard {
+                    tool,
+                    ok: Some(ok),
+                    output,
+                }),
             }
         }
         AgentEventKind::Interrupted { .. } => {
@@ -420,74 +555,8 @@ fn truncate_title(text: &str) -> String {
         title.push('…');
     }
     if title.is_empty() {
-        "New chat".into()
+        "New thread".into()
     } else {
         title
     }
-}
-
-fn render_turn(turn: Turn) -> AnyView {
-    match turn.role {
-        Role::User => view! {
-            <div class="turn user"><div class="bubble">{turn.text}</div></div>
-        }
-        .into_any(),
-        Role::Assistant => {
-            let html = markdown_to_html(&turn.text);
-            let reasoning = turn.reasoning.clone();
-            let tools = turn.tools.clone();
-            let streaming = turn.streaming;
-            view! {
-                <div class="turn assistant">
-                    {(!reasoning.is_empty()).then(|| view! {
-                        <details class="reasoning">
-                            <summary>"reasoning"</summary>
-                            <pre>{reasoning}</pre>
-                        </details>
-                    })}
-                    <div class="md" inner_html=html></div>
-                    {tools.into_iter().map(render_tool).collect_view()}
-                    {streaming.then(|| view! { <span class="cursor">"▋"</span> })}
-                </div>
-            }
-            .into_any()
-        }
-    }
-}
-
-fn render_tool(card: ToolCard) -> AnyView {
-    let status = match card.ok {
-        None => "run",
-        Some(true) => "ok",
-        Some(false) => "err",
-    };
-    let badge = match card.ok {
-        None => "running",
-        Some(true) => "ok",
-        Some(false) => "error",
-    };
-    view! {
-        <div class=format!("tool {status}")>
-            <div class="tool-head">
-                <span class="tool-name">{card.tool}</span>
-                <span class="tool-badge">{badge}</span>
-            </div>
-            {(!card.output.is_empty()).then(|| view! { <pre class="tool-out">{card.output}</pre> })}
-        </div>
-    }
-    .into_any()
-}
-
-/// Markdown → sanitized HTML: raw inline/block HTML in model output is downgraded
-/// to escaped text (no script injection); code is escaped by the writer.
-fn markdown_to_html(src: &str) -> String {
-    use pulldown_cmark::{Event, Options, Parser, html};
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
-    let parser = Parser::new_ext(src, options).map(|event| match event {
-        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
-        other => other,
-    });
-    let mut out = String::new();
-    html::push_html(&mut out, parser);
-    out
 }
