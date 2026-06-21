@@ -45,12 +45,12 @@ pub const AGENT_MODELS: &[(&str, &str, &str)] = &[
     // Codex models carry the reasoning effort as a suffix (RepoPrompt encoding);
     // Nerve's codex thread-start splits it into model + model_reasoning_effort.
     ("codex", "", "Default"),
-    ("codex", "gpt-5.5-low", "GPT-5.5 Low"),
-    ("codex", "gpt-5.5-medium", "GPT-5.5 Medium"),
-    ("codex", "gpt-5.5-high", "GPT-5.5 High"),
-    ("codex", "gpt-5.5-xhigh", "GPT-5.5 XHigh"),
-    ("codex", "gpt-5.3-codex-medium", "GPT-5.3 Codex Medium"),
-    ("codex", "gpt-5.3-codex-high", "GPT-5.3 Codex High"),
+    ("codex", "gpt-5.5-low", "5.5 · Low"),
+    ("codex", "gpt-5.5-medium", "5.5 · Medium"),
+    ("codex", "gpt-5.5-high", "5.5 · High"),
+    ("codex", "gpt-5.5-xhigh", "5.5 · XHigh"),
+    ("codex", "gpt-5.3-codex-medium", "5.3 · Medium"),
+    ("codex", "gpt-5.3-codex-high", "5.3 · High"),
 ];
 
 /// Run one `tool.call` job to completion; return its `structuredContent` object.

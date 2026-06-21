@@ -304,6 +304,7 @@ pub fn App() -> impl IntoView {
                         placeholder="Ask the agent to build…"
                     ></textarea>
                     <div class="composer-tools">
+                        <button class="tool-btn" title="Attach — coming soon" disabled>"+"</button>
                         <select
                             class="access-pill"
                             title="Autonomy"
@@ -337,7 +338,7 @@ pub fn App() -> impl IntoView {
                     </div>
                 </div>
                 <div class="context-pills">
-                    <span class="ctx-pill">"⌂ "{move || workspace.get()}</span>
+                    <span class="ctx-pill">"📁 "{move || workspace.get()}</span>
                     <span class="ctx-pill">{move || crate::data::agent_label(&agent.get()).to_string()}</span>
                     <span class="ctx-pill">"⎇ "{move || branch.get()}</span>
                 </div>
@@ -397,9 +398,6 @@ pub fn App() -> impl IntoView {
             </aside>
             <main class="main chat">
                 <div class="topbar">
-                    <div class="topbar-title">
-                        {move || chats.with(|cs| cs.get(active.get()).map(|c| c.title.clone()).unwrap_or_default())}
-                    </div>
                     <div class="picker">
                         <select
                             class="model-pill"
