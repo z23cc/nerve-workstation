@@ -17,3 +17,5 @@ pub(crate) mod data;
 pub(crate) mod events;
 pub(crate) mod render;
 pub mod rpc;
+pub(crate) mod settings;
+pub(crate) mod sidebar;

@@ -37,6 +37,11 @@ web-sys = { version = "0.3", features = [
   "MessageEvent",
   "Navigator",
   "Clipboard",
+  # Theme (data-theme on <html>) + settings persistence (localStorage).
+  "Document",
+  "Element",
+  "Storage",
+  "MediaQueryList",
 ] }
 console_error_panic_hook = "0.1"
 # Markdown rendering for assistant turns (wasm-safe; html output only).

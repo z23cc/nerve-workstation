@@ -41,8 +41,39 @@
   --inspector-width: 340px;
 }
 
+/* Dark theme. Applied two ways: an EXPLICIT override (data-theme='dark', set by
+   the settings picker), and the SYSTEM default (no explicit light/dark override
+   while the OS prefers dark — this tracks the OS live with no JS listener). The
+   var block is duplicated because a media query cannot share a top-level
+   selector list. "system" clears data-theme so this media rule governs. */
+:root[data-theme='dark'] {
+  --bg: #131312;
+  --surface: #1d1d1b;
+  --surface-2: #242422;
+  --sidebar: #161615;
+  --hover: #2a2a27;
+  --active: #343431;
+  --border: #2c2c29;
+  --border-soft: #232321;
+  --fg: #f0f0ed;
+  --muted: #b6b4ad;
+  --faint: #85837c;
+  --accent: #f0f0ed;
+  --accent-ink: #151515;
+  --focus: #6fa1ff;
+  --ok: #5fbf87;
+  --warn: #d39b38;
+  --amber: #d39b38;
+  --amber-bg: rgba(211, 155, 56, 0.12);
+  --amber-border: rgba(211, 155, 56, 0.32);
+  --err: #ff7b72;
+  --code: #1a1a18;
+  --code-border: #2c2c29;
+  --user-msg: #242422;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']):not([data-theme='dark']) {
     --bg: #131312;
     --surface: #1d1d1b;
     --surface-2: #242422;
@@ -1022,4 +1053,113 @@ summary:focus-visible {
   background: var(--faint);
   border: 0;
   opacity: 0.6;
+}
+
+/* ── Search · timestamps · settings (G14) ─────────────────────────────────── */
+/* Sidebar conversation search (a quiet pill between New thread and Projects). */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.sidebar-search:focus-within { border-color: var(--focus); }
+.search-ic { flex: 0 0 auto; color: var(--faint); font-size: 13px; }
+.search-in {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  color: var(--fg);
+  font-size: 13px;
+}
+.search-in::placeholder { color: var(--faint); }
+.search-in::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search-clear {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: var(--faint);
+  font-size: 14px;
+  cursor: pointer;
+}
+.sidebar-search.has-text .search-clear { display: inline-flex; }
+.search-clear:hover { background: var(--hover); color: var(--fg); }
+
+/* Per-conversation relative timestamp; hidden on hover so the × takes the slot. */
+.rail-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.rail-row:hover .rail-time { display: none; }
+.rail-empty { padding: 14px 8px; color: var(--faint); font-size: 13px; text-align: center; }
+
+/* Settings entry row (a flat nav-row button pinned above the status row). */
+.settings-row {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.settings-row .nav-icon { font-size: 13px; }
+
+/* Segmented picker (settings). */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.seg-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 26px;
+  padding: 4px 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.seg-btn:hover { color: var(--fg); }
+.seg-btn.on { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
+
+/* Settings modal: a wider card with a column of labeled sections. */
+.settings-modal { width: min(560px, 92vw); }
+.set-body { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 14px; }
+.set-section { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.set-text { min-width: 0; }
+.set-title { margin: 0; font-size: 14px; font-weight: 600; }
+.set-desc { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.set-control { flex: 0 0 auto; }
+.set-div { margin: 12px 0; border: 0; border-top: 1px solid var(--border-soft); }
+.set-select {
+  min-height: 30px;
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 12.5px;
+  cursor: pointer;
 }

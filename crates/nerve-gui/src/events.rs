@@ -41,12 +41,12 @@ pub(crate) fn route_event(
             preview,
             tier,
             ..
-        } => {
+        }
             // Only surface approvals for a session we own.
             if chats.with_untracked(|cs| {
                 cs.iter()
                     .any(|c| c.session.as_deref() == Some(session_id.as_str()))
-            }) {
+            }) => {
                 approval.set(Some(ApprovalReq {
                     session_id,
                     request_id,
@@ -55,7 +55,6 @@ pub(crate) fn route_event(
                     tier: format!("{tier:?}"),
                 }));
             }
-        }
         _ => {}
     }
 }

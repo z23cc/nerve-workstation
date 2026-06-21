@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Nerve Console (Leptos)</title>
     <link rel="icon" href="data:," />
+    <script>
+      // Apply the persisted theme BEFORE first paint to avoid a flash. Mirrors
+      // crate::settings::apply_theme: explicit light/dark set a data-theme
+      // override; "system" (or missing) clears it so the CSS media query governs.
+      (function () {
+        try {
+          var s = JSON.parse(localStorage.getItem("nerve.settings") || "{}");
+          var t = s.theme || "system";
+          var el = document.documentElement;
+          if (t === "light" || t === "dark") el.setAttribute("data-theme", t);
+          else el.removeAttribute("data-theme");
+        } catch (e) {}
+      })();
+    </script>
     <!-- data-wasm-opt="0": trunk's bundled wasm-opt fails in this env; the
          release rustc build already shrinks the wasm well below the debug size. -->
     <link data-trunk rel="rust" data-type="main" data-wasm-opt="0" />

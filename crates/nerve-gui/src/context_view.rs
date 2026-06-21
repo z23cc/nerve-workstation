@@ -4,6 +4,10 @@
 //! (`list_files` / `manage_selection` / `workspace_context` + recipes); this is a
 //! thin client over `tool.call`.
 
+// View-heavy component; see app.rs for why too_many_lines is allowed at module
+// scope (the `#[component]` macro drops a fn-level allow).
+#![allow(clippy::too_many_lines)]
+
 use crate::data::{FileRow, fetch_context, fetch_diff, list_files, selection_op};
 use leptos::prelude::*;
 
@@ -168,7 +172,7 @@ pub fn ContextView(token: StoredValue<Option<String>>) -> impl IntoView {
 
 #[component]
 fn Bar(label: &'static str, n: usize, total: usize) -> impl IntoView {
-    let pct = if total > 0 { (n * 100) / total } else { 0 };
+    let pct = (n * 100).checked_div(total).unwrap_or(0);
     view! {
         <div class="ctx-bar-row">
             <span class="ctx-bar-label">{label}</span>

@@ -9,14 +9,21 @@
 //! tool-permission requests surface as `ApprovalRequested` → the approval modal
 //! (`session.respond`). Styling is a Codex-inspired native desktop surface.
 
+// The Leptos root component compiles to one large declarative view tree; the
+// workspace-wide `too_many_lines` deny is a poor fit for a view fn (the real
+// logic lives in data.rs / rpc.rs / events.rs / the engine). Applied at module
+// scope because the `#[component]` macro does not forward a fn-level allow to
+// the function it generates.
+#![allow(clippy::too_many_lines)]
+
 use crate::context_view::ContextView;
 use crate::events::route_event;
 use crate::render::render_turn;
 use crate::rpc::{cancel_job, daemon_token, new_job_id, open_events, start_job, start_job_with_id};
+use crate::settings::SettingsModal;
+use crate::sidebar::Sidebar;
 use leptos::prelude::*;
 use serde_json::json;
-
-const DEFAULT_AGENT: &str = "claude";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -71,16 +78,20 @@ pub(crate) struct Chat {
     pub(crate) turn_job: Option<String>,
     pub(crate) turns: Vec<Turn>,
     pub(crate) streaming: bool,
+    /// Epoch-ms of the last activity (created / last message). Drives the rail's
+    /// relative timestamp and recency sort.
+    pub(crate) updated_ms: f64,
 }
 
 impl Chat {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             title: "New thread".into(),
             session: None,
             turn_job: None,
             turns: Vec::new(),
             streaming: false,
+            updated_ms: js_sys::Date::now(),
         }
     }
 }
@@ -104,12 +115,18 @@ pub fn App() -> impl IntoView {
     let input = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
     let approval = RwSignal::new(None::<ApprovalReq>);
-    // The local CLI to drive (claude / codex / gemini) + the autonomy posture
-    // passed to delegate.start (full = no prompts, edit, read_only = plan).
-    let agent = RwSignal::new(DEFAULT_AGENT.to_string());
-    let autonomy = RwSignal::new("full".to_string());
+    // Persisted defaults (theme + default agent/autonomy/model) seed the live
+    // signals; an Effect below re-persists + re-applies the theme on any change.
+    let saved = crate::settings::load();
+    // The local CLI to drive (claude / codex) + the autonomy posture passed to
+    // delegate.start (full = no prompts, edit, read_only = plan).
+    let agent = RwSignal::new(saved.agent);
+    let autonomy = RwSignal::new(saved.autonomy);
     // Optional model override passed to delegate.start (empty = the CLI's default).
-    let model = RwSignal::new(String::new());
+    let model = RwSignal::new(saved.model);
+    let theme = RwSignal::new(saved.theme);
+    let search = RwSignal::new(String::new());
+    let settings_open = RwSignal::new(false);
     let inspector_open = RwSignal::new(false);
     // Top-level surface: the delegate chat, or the Context builder.
     let mode = RwSignal::new("chat");
@@ -132,6 +149,33 @@ pub fn App() -> impl IntoView {
                 branch.set(b);
             }
         });
+    });
+
+    // Persist defaults + (re)apply the theme whenever any of them changes.
+    Effect::new(move |_| {
+        let s = crate::settings::Settings {
+            theme: theme.get(),
+            agent: agent.get(),
+            autonomy: autonomy.get(),
+            model: model.get(),
+        };
+        crate::settings::apply_theme(&s.theme);
+        crate::settings::save(&s);
+    });
+
+    // Keep the model valid for the selected agent (covers both the composer's
+    // agent picker and the settings modal): a stale cross-agent model would send
+    // e.g. a Claude model id to Codex.
+    Effect::new(move |_| {
+        let ag = agent.get();
+        let m = model.get_untracked();
+        let ok = m.is_empty()
+            || crate::data::AGENT_MODELS
+                .iter()
+                .any(|(a, id, _)| *a == ag && *id == m);
+        if !ok {
+            model.set(String::new());
+        }
     });
 
     // Whether the active chat is mid-turn (drives Send⇄Stop).
@@ -161,6 +205,7 @@ pub fn App() -> impl IntoView {
                 c.turns.push(Turn::user(text.clone()));
                 c.turns.push(Turn::assistant_streaming());
                 c.streaming = true;
+                c.updated_ms = js_sys::Date::now();
                 c.turn_job = Some(turn_id.clone());
                 if is_start {
                     c.session = Some(turn_id.clone());
@@ -186,11 +231,7 @@ pub fn App() -> impl IntoView {
             if let Err(err) = start_job_with_id(&tok, &turn_id, cmd).await {
                 // Roll back the optimistic session on a failed start.
                 if is_start {
-                    chats.update(|cs| {
-                        if let Some(c) = cs.get_mut(idx) {
-                            c.session = None;
-                        }
-                    });
+                    clear_session(chats, idx);
                 }
                 let verb = if is_start {
                     "delegate.start"
@@ -211,44 +252,6 @@ pub fn App() -> impl IntoView {
         };
         leptos::task::spawn_local(async move {
             let _ = cancel_job(&tok, &job).await;
-        });
-    };
-
-    let new_chat = move |_| {
-        let mut idx = 0;
-        chats.update(|cs| {
-            cs.push(Chat::new());
-            idx = cs.len() - 1;
-        });
-        active.set(idx);
-        input.set(String::new());
-        error.set(None);
-    };
-
-    // Close a chat: end its delegate session in the daemon (best effort — without
-    // this, every thread leaks a parked CLI child), remove it, fix `active`. Keeps
-    // at least one chat.
-    let close_chat = move |idx: usize, session: Option<String>| {
-        if let (Some(tok), Some(sid)) = (token.get_value(), session) {
-            leptos::task::spawn_local(async move {
-                let _ = start_job(&tok, json!({"kind": "delegate.close", "session_id": sid})).await;
-            });
-        }
-        chats.update(|cs| {
-            if cs.len() > 1 {
-                cs.remove(idx);
-            } else {
-                cs[0] = Chat::new();
-            }
-        });
-        let len = chats.with_untracked(|cs| cs.len());
-        active.update(|a| {
-            if idx < *a {
-                *a = a.saturating_sub(1);
-            }
-            if *a >= len {
-                *a = len.saturating_sub(1);
-            }
         });
     };
 
@@ -358,44 +361,8 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div id="nerve-shell" class:with-inspector=move || inspector_open.get()>
-            <aside class="sidebar">
-                <div class="brand"><span class="spark">"N"</span><span>"Nerve"</span></div>
-                <button class="newchat" title="New thread" on:click=new_chat>
-                    <span class="plus">"+"</span>"New thread"
-                </button>
-                <div class="rail-label">"Projects"</div>
-                <div class="project-row"><span class="project-dot"></span><span>{move || workspace.get()}</span></div>
-                <div class="rail-label">"Conversations"</div>
-                <div class="rail">
-                    {move || {
-                        let cur = active.get();
-                        chats.get().into_iter().enumerate().map(|(i, c)| {
-                            let cls = if i == cur { "rail-row on" } else { "rail-row" };
-                            let live = c.session.is_some();
-                            let title = c.title;
-                            let session = c.session.clone();
-                            view! {
-                                <div class=cls>
-                                    <button class="rail-pick" on:click=move |_| active.set(i)>
-                                        <span class="rail-dot" class:live=live></span>
-                                        <span class="rail-title">{title}</span>
-                                    </button>
-                                    <button class="rail-close" title="Close thread"
-                                        on:click=move |_| close_chat(i, session.clone())>"×"</button>
-                                </div>
-                            }
-                        }).collect_view()
-                    }}
-                </div>
-                <div class="spacer"></div>
-                <div class="status-row">
-                    {move || if active_busy() {
-                        view! { <span class="dot busy"></span>"running" }.into_any()
-                    } else {
-                        view! { <span class="dot idle"></span>"runtime v4" }.into_any()
-                    }}
-                </div>
-            </aside>
+            <Sidebar chats active input error token search workspace settings_open
+                busy=Signal::derive(active_busy) />
             <main class="main chat">
                 <div class="topbar">
                     <div class="picker">
@@ -403,7 +370,7 @@ pub fn App() -> impl IntoView {
                             class="model-pill"
                             title="Agent CLI"
                             prop:value=move || agent.get()
-                            on:change=move |ev| { agent.set(event_target_value(&ev)); model.set(String::new()); }
+                            on:change=move |ev| agent.set(event_target_value(&ev))
                         >
                             {crate::data::AGENTS.iter().map(|(id, label)| view! {
                                 <option value=*id>{*label}</option>
@@ -473,6 +440,9 @@ pub fn App() -> impl IntoView {
                     </div>
                 </aside>
             })}
+            {move || settings_open.get().then(|| view! {
+                <SettingsModal open=settings_open theme=theme agent=agent autonomy=autonomy model=model />
+            })}
             {move || approval.get().map(|req| view! {
                 <ApprovalModal req=req token=token approval=approval />
             })}
@@ -526,6 +496,15 @@ fn respond(
             "decision": decision,
         });
         let _ = start_job(&tok, cmd).await;
+    });
+}
+
+/// Drop a chat's optimistic session id (rollback after a failed `delegate.start`).
+fn clear_session(chats: RwSignal<Vec<Chat>>, idx: usize) {
+    chats.update(|cs| {
+        if let Some(c) = cs.get_mut(idx) {
+            c.session = None;
+        }
     });
 }
 

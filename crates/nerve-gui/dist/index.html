@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Nerve Console (Leptos)</title>
     <link rel="icon" href="data:," />
+    <script>
+      // Apply the persisted theme BEFORE first paint to avoid a flash. Mirrors
+      // crate::settings::apply_theme: explicit light/dark set a data-theme
+      // override; "system" (or missing) clears it so the CSS media query governs.
+      (function () {
+        try {
+          var s = JSON.parse(localStorage.getItem("nerve.settings") || "{}");
+          var t = s.theme || "system";
+          var el = document.documentElement;
+          if (t === "light" || t === "dark") el.setAttribute("data-theme", t);
+          else el.removeAttribute("data-theme");
+        } catch (e) {}
+      })();
+    </script>
     <!-- data-wasm-opt="0": trunk's bundled wasm-opt fails in this env; the
          release rustc build already shrinks the wasm well below the debug size. -->
     
@@ -19,7 +33,7 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-    <link rel="stylesheet" href="/app/styles.css" integrity="sha384-cirv58YmsNB3TqVFkXb0Wi3DBHnH5IijpqRT7GW/cI6S3IXgld4Dpl12srFiABMy"/>
-  <link rel="modulepreload" href="/app/nerve-gui.js" crossorigin="anonymous" integrity="sha384-hvVbZTOVL9RP3a4LLUHiIC4h847HchT7IJXcpDy0f9G4mqCEjC21WJhXilQa/C0M"><link rel="preload" href="/app/nerve-gui_bg.wasm" crossorigin="anonymous" integrity="sha384-5Gv0k4C4sC+s8Pzj3v2FXI5L+4Q2+aRkQeZ5nObvynGkDAVBVaHYBB0CNmwuar4a" as="fetch" type="application/wasm"></head>
+    <link rel="stylesheet" href="/app/styles.css" integrity="sha384-1Q0xEZFLMVBfS21HnHs8yQV7WGAUvBcAbUUxC50khYqP8+L/CVMZk2NiYeHAEidl"/>
+  <link rel="modulepreload" href="/app/nerve-gui.js" crossorigin="anonymous" integrity="sha384-Kn2W1udP2nHTNA2owma8FM7iVzcuzUkzoyok0tmc1yaIodUEiSI1xGQWRkRTGLCI"><link rel="preload" href="/app/nerve-gui_bg.wasm" crossorigin="anonymous" integrity="sha384-d/hheRvwD6gAPGUX95s7dyPAiKmXTIiQl+/rzmOJOEjm2/qEm9n2xzyVUKk5mWa5" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>
