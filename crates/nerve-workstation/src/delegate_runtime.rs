@@ -794,19 +794,19 @@ mod tests {
 
     #[test]
     fn cwd_defaults_to_root_and_rejects_escape() {
-        let root = Path::new("/work");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("work");
+        let relative = root.join("crates/core");
+        assert_eq!(resolve_delegate_cwd(&root, None).unwrap(), root);
         assert_eq!(
-            resolve_delegate_cwd(root, None).unwrap(),
-            PathBuf::from("/work")
+            resolve_delegate_cwd(&root, Some("crates/core")).unwrap(),
+            relative
         );
-        assert_eq!(
-            resolve_delegate_cwd(root, Some("crates/core")).unwrap(),
-            PathBuf::from("/work/crates/core")
-        );
-        let err = resolve_delegate_cwd(root, Some("../etc")).expect_err("escape rejected");
+        let err = resolve_delegate_cwd(&root, Some("../etc")).expect_err("escape rejected");
         assert!(matches!(err, DelegateError::CwdEscape(_)));
-        let outside =
-            resolve_delegate_cwd(root, Some("/etc/passwd")).expect_err("absolute outside rejected");
+        let outside_path = temp.path().join("outside");
+        let outside = resolve_delegate_cwd(&root, outside_path.to_str())
+            .expect_err("absolute outside rejected");
         assert!(matches!(outside, DelegateError::CwdEscape(_)));
     }
 
