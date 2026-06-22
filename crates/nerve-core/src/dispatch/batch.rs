@@ -2,7 +2,7 @@ use super::DispatchError;
 use crate::{CatalogProvider, edit::FileChange};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Component, Path},
+    path::{Component, Path, PrefixComponent},
 };
 
 pub(super) fn preflight_changes<P: CatalogProvider + ?Sized>(
@@ -106,9 +106,10 @@ fn path_key(path: &str) -> Result<String, DispatchError> {
     let mut parts = Vec::new();
     for component in Path::new(path).components() {
         match component {
+            Component::Prefix(prefix) => parts.push(prefix_key(prefix)),
             Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
             Component::CurDir | Component::RootDir => {}
-            Component::ParentDir | Component::Prefix(_) => {
+            Component::ParentDir => {
                 return preflight_error(format!("path is not batch-safe: {path}"));
             }
         }
@@ -118,6 +119,11 @@ fn path_key(path: &str) -> Result<String, DispatchError> {
     } else {
         Ok(parts.join("/"))
     }
+}
+
+fn prefix_key(prefix: PrefixComponent<'_>) -> String {
+    let raw = prefix.as_os_str().to_string_lossy().replace('\\', "/");
+    raw.strip_prefix("//?/").unwrap_or(&raw).to_string()
 }
 
 fn reject(condition: bool, label: &str, path: &str) -> Result<(), DispatchError> {
