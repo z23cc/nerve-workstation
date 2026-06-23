@@ -1,8 +1,9 @@
 # CodeGraph — a deterministic, persistent cross-file code-intelligence engine
 
-Status: **in progress** — PR0 (deterministic kernel) and PR1 (shared snapshot-memoized
-index) shipped on branch `feat/deterministic-kernel`, all CI gates green; PR2 next. Governs a
-structural change — read `docs/designs/architecture-north-star.md` first.
+Status: **in progress** — PR0 (deterministic kernel), PR1 (shared snapshot-memoized index)
+and PR1b (memoized derived ReferenceGraph) shipped on branch `feat/deterministic-kernel`, all
+CI gates green; PR1c (shared inverted definition index for navigate scans) / PR2 next. Governs
+a structural change — read `docs/designs/architecture-north-star.md` first.
 Date: 2026-06-23
 Related: `architecture-north-star.md` (determinism boundary, seam table, P7 cockpit),
 `agent-long-term-memory.md` (the *agent-fact* memory — a different subsystem; see §8).
@@ -140,9 +141,14 @@ goldens + a `RESOLVER_VERSION` const. codebase-memory-mcp supplies **no** consta
   the one shared index; output **byte-identical** (zero golden diffs — verified). Ships the
   FsCatalogProvider `hit==miss` memo test + a ptr_eq hit-path test + a direct-parity test.
   No disk, no feature, no new tool. `get_repo_map` left on `analyze_files_cancellable`.
-  *Deferred to a later PR:* memoizing the derived `ReferenceGraph` + `definition_index` (the
-  bigger per-call recompute) and collapsing the `build_context` repo-map/indexed_files double
-  walk (needs unifying `analyze_files` + `indexed_files`).
+- **PR1b — SHIPPED (`32c5a9c`)** — `graph/derived.rs` `shared_reference_graph`: a second
+  snapshot-Arc-memoized cache for the derived `ReferenceGraph` (the per-call O(edges)
+  cross-file graph build), so `get_repo_map` + `build_context` reuse one graph while the
+  provider serves the same snapshot Arc. Byte-identical by construction (`ReferenceGraph::build`
+  is a pure fn of `&[IndexedFile]`, ignores `query_match`); zero golden diffs; FsCatalogProvider
+  `hit==miss` + ptr_eq tests. *Still deferred:* the navigate per-query definition scans
+  (`definition_file_indexes` etc.) reusing a shared inverted index (PR1c), and collapsing the
+  `build_context` repo-map/indexed_files double walk.
 - **PR2** — `graph/resolver.rs`: confidence-tiered resolution; constants re-derived + golden
   + `RESOLVER_VERSION`; public `Confidence{High,Low}` preserved, bands additive; the
   `incremental==cold` band-stability fixture lands here.
