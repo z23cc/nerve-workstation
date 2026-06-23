@@ -1486,7 +1486,7 @@
           "type": "object"
         },
         {
-          "description": "Steer a live flow branch with a follow-up message, running one more turn against the same live worker session (design §4 / Wave C3a). Reuses the C0 [`WorkerSession::steer`] port per-worker, exactly as `delegate.steer` does for a single delegated session: the host job manager looks up the live worker for `target` in the live-flow worker registry and continues it; progress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a live, steerable branch (a `Single`/`Pipeline` worker still in flight, on a steerable substrate) can be steered; a closed or one-shot worker (`gemini`) returns a clear error. `flow_id` is the originating [`Self::FlowStart`] job id; `target` selects which branch (by node id, or the only live worker when unset).",
+          "description": "Steer a live flow branch with a follow-up message, running one more turn against the same live worker session (design §4 / Wave C3a). Reuses the C0 `WorkerSession::steer` port per-worker, exactly as `delegate.steer` does for a single delegated session: the host job manager looks up the live worker for `target` in the live-flow worker registry and continues it; progress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a live, steerable branch (a `Single`/`Pipeline` worker still in flight, on a steerable substrate) can be steered; a closed or one-shot worker (`gemini`) returns a clear error. `flow_id` is the originating [`Self::FlowStart`] job id; `target` selects which branch (by node id, or the only live worker when unset).",
           "properties": {
             "flow_id": {
               "type": "string"
@@ -1538,7 +1538,7 @@
               "type": "object"
             }
           ],
-          "description": "Deterministically REPLAY a recorded flow offline (the audit verb, design §3/§4). The host loads the recorded [`WorkerLedger`] from the `FlowStore` by [`LedgerRef`], runs the SAME deterministic engine in REPLAY mode — a `ReplayWorker` re-emits the recorded `WorkerEvent`s/`TurnResult`s instead of calling any LLM/subprocess — and re-emits the `flow_*` event stream. Runs as one cancellable **job** (the `job_id` IS the replayed `flow_id`); the replay is byte-identical to the recorded run (the CI gate), at zero cost. `workspace` scopes which project's `.nerve/flows` the ledger is loaded from when more than one is registered.",
+          "description": "Deterministically REPLAY a recorded flow offline (the audit verb, design §3/§4). The host loads the recorded `WorkerLedger` from the `FlowStore` by [`LedgerRef`], runs the SAME deterministic engine in REPLAY mode — a `ReplayWorker` re-emits the recorded `WorkerEvent`s/`TurnResult`s instead of calling any LLM/subprocess — and re-emits the `flow_*` event stream. Runs as one cancellable **job** (the `job_id` IS the replayed `flow_id`); the replay is byte-identical to the recorded run (the CI gate), at zero cost. `workspace` scopes which project's `.nerve/flows` the ledger is loaded from when more than one is registered.",
           "properties": {
             "kind": {
               "enum": [
