@@ -12,11 +12,13 @@ use serde::{Deserialize, Serialize};
 mod allocation;
 mod explain;
 mod reference_expansion;
+mod scout;
 mod sensitive;
 use allocation::allocate_selection;
 pub use explain::{
     BuildContextAllocationAttempt, BuildContextAllocationTrace, BuildContextScoreBreakdown,
 };
+pub use scout::{ScoutCitation, ScoutRange, ScoutRequest, ScoutResponse, scout, scout_cancellable};
 pub use sensitive::BuildContextSensitiveFinding;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -109,41 +111,15 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
     request: &BuildContextRequest,
     cancel: &CancelToken,
 ) -> Result<BuildContextResponse, NerveError> {
-    cancel.check_cancelled()?;
     let max_files = request.max_files.unwrap_or(DEFAULT_MAX_FILES).max(1);
-    let search = search_snapshot_cancellable(
-        provider,
-        snapshot,
-        &SearchRequest {
-            pattern: request.query.clone(),
-            mode: SearchMode::Both,
-            regex: false,
-            max_results: max_files.saturating_mul(4).max(50),
-            context_lines: SLICE_RADIUS,
-            ..SearchRequest::default()
-        },
-        cancel,
-    )?;
-    cancel.check_cancelled()?;
-    let repo_map = get_repo_map_cancellable(
-        provider,
-        snapshot,
-        &RepoMapRequest {
-            query: Some(request.query.clone()),
-            seed_paths: request.seed_paths.clone(),
-            max_files: max_files.saturating_mul(4).max(20),
-        },
-        cancel,
-    )?;
-    cancel.check_cancelled()?;
-
-    let ranked = rank_candidates(
+    let ranked = ranked_candidates(
         provider,
         snapshot,
         request.query.as_str(),
-        &search,
-        &repo_map,
-    );
+        &request.seed_paths,
+        max_files,
+        cancel,
+    )?;
     // One render cache spans the greedy allocation and reference expansion:
     // each (file, mode) is rendered once instead of re-rendered per trial.
     let mut render_cache = RenderCache::new(snapshot.generation);
@@ -200,6 +176,50 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
             sensitive_findings,
         },
     })
+}
+
+/// Run the shared search + repo-map ranking for a query and return the fused,
+/// sorted candidates. Extracted so `build_context` and `scout` rank identically
+/// (same search params, same repo-map seeding, same fusion) — `scout` then turns
+/// the candidates' content-hit lines into compact citations rather than allocating
+/// a token budget.
+fn ranked_candidates<'a, P: CatalogProvider + Sync>(
+    provider: &P,
+    snapshot: &'a Arc<crate::CatalogSnapshot>,
+    query: &str,
+    seed_paths: &[PathBuf],
+    max_files: usize,
+    cancel: &CancelToken,
+) -> Result<Vec<Candidate<'a>>, NerveError> {
+    cancel.check_cancelled()?;
+    let search = search_snapshot_cancellable(
+        provider,
+        snapshot,
+        &SearchRequest {
+            pattern: query.to_string(),
+            mode: SearchMode::Both,
+            regex: false,
+            max_results: max_files.saturating_mul(4).max(50),
+            context_lines: SLICE_RADIUS,
+            ..SearchRequest::default()
+        },
+        cancel,
+    )?;
+    cancel.check_cancelled()?;
+    let repo_map = get_repo_map_cancellable(
+        provider,
+        snapshot,
+        &RepoMapRequest {
+            query: Some(query.to_string()),
+            seed_paths: seed_paths.to_vec(),
+            max_files: max_files.saturating_mul(4).max(20),
+        },
+        cancel,
+    )?;
+    cancel.check_cancelled()?;
+    Ok(rank_candidates(
+        provider, snapshot, query, &search, &repo_map,
+    ))
 }
 
 #[derive(Debug)]

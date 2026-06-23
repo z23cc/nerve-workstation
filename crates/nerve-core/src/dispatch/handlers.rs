@@ -41,6 +41,7 @@ where
         "call_hierarchy" => handle_call_hierarchy(provider, arguments, cancel),
         "detect_changes" => handle_detect_changes(provider, arguments, cancel),
         "trace_path" => handle_trace_path(provider, arguments, cancel),
+        "scout" => handle_scout(provider, arguments, cancel),
         other => Err(DispatchError::UnknownTool(other.to_string())),
     }
 }
@@ -437,6 +438,20 @@ where
     let args: crate::TracePathRequest = serde_json::from_value(arguments)?;
     let snapshot = provider.snapshot_arc_cancellable(cancel)?;
     let response = crate::trace_path_cancellable(provider, &snapshot, &args, cancel)?;
+    tool_response_text(&response)
+}
+
+fn handle_scout<P>(
+    provider: &P,
+    arguments: Value,
+    cancel: &CancelToken,
+) -> Result<Value, DispatchError>
+where
+    P: DispatchProvider,
+{
+    let args: crate::ScoutRequest = serde_json::from_value(arguments)?;
+    let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+    let response = crate::scout_cancellable(provider, &snapshot, &args, cancel)?;
     tool_response_text(&response)
 }
 

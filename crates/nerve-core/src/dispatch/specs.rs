@@ -457,6 +457,20 @@ pub fn tool_specs() -> Value {
             }
         }),
         json!({
+            "name": "scout",
+            "description": "Read-only repository SCOUT: given a natural-language query, return the most relevant code locations as compact `path:line-range` citations — a deterministic FastContext-style explorer that finds WHERE code lives without pulling whole files into your context. Fuses BM25 search + repo-map PageRank + path relevance (the same ranking as build_context) and clusters each file's content-hit lines into ranges; files relevant only by graph centrality are returned file-level (no ranges). Deterministic; no LLM. Use it first to locate code, then read_file the cited ranges.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "query": { "type": "string", "description": "What to find — natural language or identifiers." },
+                    "max_files": { "type": "integer", "default": 12, "description": "Maximum files to return citations for." },
+                    "seed_paths": { "type": "array", "items": { "type": "string" }, "description": "Optional files (relative to an allowed root) to bias the repo-map PageRank toward." }
+                }
+            }
+        }),
+        json!({
             "name": "find_referencing_symbols",
             "description": "Find enclosing symbols that reference an exact target symbol, with the exact reference line and a small source context. This is a compact symbolic-read view between raw find_references and full analyze_impact. Deterministic tree-sitter name matching; not a scope/type resolver.",
             "inputSchema": {

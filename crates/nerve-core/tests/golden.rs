@@ -483,3 +483,42 @@ fn get_repo_map_is_listed_and_dispatches() {
         Value::String("repo_map/rust_lib.rs".to_string())
     );
 }
+
+#[test]
+fn scout_is_listed_and_returns_line_range_citations() {
+    let specs = tool_specs();
+    let tool_names: Vec<_> = specs
+        .as_array()
+        .expect("tool specs array")
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(tool_names.contains(&"scout"));
+
+    let provider = provider();
+    let response = handle_tool_call(
+        &provider,
+        &json!({
+            "name": "scout",
+            "arguments": { "query": "shared_rust_helper", "max_files": 5 }
+        }),
+    )
+    .expect("scout dispatch");
+    let citations = response["structuredContent"]["citations"]
+        .as_array()
+        .expect("citations array");
+    // The file containing the query term is cited with concrete line ranges
+    // (a content hit clusters into at least one range).
+    let hit = citations
+        .iter()
+        .find(|c| c["path"] == Value::String("repo_map/rust_lib.rs".to_string()))
+        .expect("rust_lib.rs cited");
+    assert!(
+        !hit["ranges"].as_array().expect("ranges array").is_empty(),
+        "content hit must yield at least one line range: {hit}"
+    );
+    // The model-facing text is the compact path:line-range rendering.
+    let text = response["content"][0]["text"].as_str().expect("scout text");
+    assert!(text.starts_with("scout:"), "{text}");
+    assert!(text.contains("repo_map/rust_lib.rs:"), "{text}");
+}

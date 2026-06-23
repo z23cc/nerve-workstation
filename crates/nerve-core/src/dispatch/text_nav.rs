@@ -110,6 +110,35 @@ impl ToolText for crate::TracePathResponse {
     }
 }
 
+impl ToolText for crate::ScoutResponse {
+    fn tool_text(&self) -> String {
+        if self.citations.is_empty() {
+            return format!("scout: no relevant files for {:?}\n", self.query);
+        }
+        let mut out = format!(
+            "scout: {} files for {:?}\n",
+            self.citations.len(),
+            self.query
+        );
+        for citation in &self.citations {
+            if citation.ranges.is_empty() {
+                out.push_str(&format!(
+                    "  {} (file-level) — {}\n",
+                    citation.display_path, citation.score
+                ));
+                continue;
+            }
+            for range in &citation.ranges {
+                out.push_str(&format!(
+                    "  {}:{}-{} — {}\n",
+                    citation.display_path, range.start, range.end, citation.score
+                ));
+            }
+        }
+        out
+    }
+}
+
 impl ToolText for crate::navigate::ImpactAnalysisResponse {
     fn tool_text(&self) -> String {
         let mut out = format!(

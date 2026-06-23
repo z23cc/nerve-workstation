@@ -33,7 +33,8 @@ pub mod workspace;
 pub mod workspace_context;
 
 pub use build_context::{
-    BuildContextRequest, BuildContextResponse, build_context, build_context_cancellable,
+    BuildContextRequest, BuildContextResponse, ScoutCitation, ScoutRange, ScoutRequest,
+    ScoutResponse, build_context, build_context_cancellable, scout, scout_cancellable,
 };
 pub use cancel::CancelToken;
 #[cfg(not(target_arch = "wasm32"))]
