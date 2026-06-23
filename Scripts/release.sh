@@ -87,7 +87,7 @@ EOF
 
   def install
     # Engine + the Rust terminal UI client, so `nerve chat` works out of the box.
-    system "cargo", "install", "--features", "semantic", *std_cargo_args(path: "crates/nerve-workstation")
+    system "cargo", "install", *std_cargo_args(path: "crates/nerve-workstation")
     system "cargo", "install", *std_cargo_args(path: "crates/nerve-tui")
   end
 
@@ -115,7 +115,7 @@ bundle_tui_client() {
 build_bottle() {
   local srcdir="$1"
   echo ">> building Homebrew bottle ($BTAG)"
-  ( cd "$srcdir" && cargo build --release -p nerve-workstation --features semantic )
+  ( cd "$srcdir" && cargo build --release -p nerve-workstation )
   ( cd "$srcdir" && cargo build --release -p nerve-tui ) # Rust TUI client (nerve chat)
   "$srcdir/target/release/$BIN" --version >/dev/null # smoke test: abort if it can't run
   local keg="$TMP/bottle/$FORMULA/$NEW"

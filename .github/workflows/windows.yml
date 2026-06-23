@@ -34,10 +34,6 @@ jobs:
         shell: bash
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Note: the `semantic` feature (ort/fastembed/ONNX Runtime) is opt-in and
-      # source-only — it is not in the released artifact and is verified locally,
-      # so it is intentionally kept off the Windows release-critical path.
-
       - name: File-size gate
         shell: bash
         run: bash Scripts/check-file-size.sh --strict
@@ -49,7 +45,7 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          cargo build --release -p nerve-workstation --features semantic
+          cargo build --release -p nerve-workstation
           ./target/release/nerve.exe --version
 
       - name: Upload nerve.exe + sha256 to the release
