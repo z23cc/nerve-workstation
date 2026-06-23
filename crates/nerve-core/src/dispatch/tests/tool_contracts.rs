@@ -304,6 +304,51 @@ fn analyze_impact_is_listed_and_dispatches() {
 }
 
 #[test]
+fn detect_changes_is_listed_and_dispatches() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn alpha() {\n    let x = 1;\n}\npub fn beta() {}\n",
+    )
+    .expect("lib");
+    let provider = FsCatalogProvider::new(
+        RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+        ScanOptions::default(),
+    );
+
+    let specs = tool_specs();
+    let tool_names: Vec<_> = specs
+        .as_array()
+        .expect("tool specs array")
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(tool_names.contains(&"detect_changes"));
+
+    let diff = "--- a/lib.rs\n+++ b/lib.rs\n@@ -1,3 +1,3 @@\n pub fn alpha() {\n-    let x = 1;\n+    let x = 42;\n }\n";
+    let response = handle_tool_call(
+        &provider,
+        &json!({ "name": "detect_changes", "arguments": { "diff": diff } }),
+    )
+    .expect("detect_changes dispatch");
+
+    let files = response["structuredContent"]["files"]
+        .as_array()
+        .expect("files");
+    assert!(files.iter().any(|file| {
+        file["display_path"] == "lib.rs"
+            && file["affected"]
+                .as_array()
+                .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["name"] == "alpha"))
+    }));
+    assert!(
+        response["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("detect_changes") && text.contains("alpha"))
+    );
+}
+
+#[test]
 fn read_symbol_is_listed_and_dispatches_body_or_candidates() {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::write(

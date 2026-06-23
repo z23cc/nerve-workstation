@@ -6,6 +6,7 @@
 pub mod build_context;
 pub mod cancel;
 pub mod catalog;
+pub mod changes;
 pub mod codemap;
 pub mod dispatch;
 pub mod edit;
@@ -38,6 +39,10 @@ pub use cancel::CancelToken;
 #[cfg(not(target_arch = "wasm32"))]
 pub use catalog::{FsCatalogProvider, ScanOptions};
 pub use catalog::{HostFile, MemoryCatalogProvider};
+pub use changes::{
+    AffectedSymbol, ChangedFileImpact, DetectChangesRequest, DetectChangesResponse,
+    detect_changes_cancellable,
+};
 pub use codemap::get_code_structure;
 pub use dispatch::{
     DispatchError, dispatch_error_json, dispatch_error_json_for, dispatch_error_kind,

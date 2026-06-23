@@ -430,6 +430,18 @@ pub fn tool_specs() -> Value {
             }
         }),
         json!({
+            "name": "detect_changes",
+            "description": "Map a unified diff (e.g. `git diff` output, passed as text — no VCS is invoked) to the symbols it touches: per changed file, the symbols whose tree-sitter block span overlaps a changed line. The compact 'what did this change touch' companion to analyze_impact — chain the affected symbols into analyze_impact for the dependency blast radius. Deterministic span matching; not a scope/type resolver. New/untracked files absent from the snapshot are skipped.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["diff"],
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "diff": { "type": "string", "description": "A unified diff (git diff output). Only new-side line numbers are used to locate touched symbols." }
+                }
+            }
+        }),
+        json!({
             "name": "find_referencing_symbols",
             "description": "Find enclosing symbols that reference an exact target symbol, with the exact reference line and a small source context. This is a compact symbolic-read view between raw find_references and full analyze_impact. Deterministic tree-sitter name matching; not a scope/type resolver.",
             "inputSchema": {

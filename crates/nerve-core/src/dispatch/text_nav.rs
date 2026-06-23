@@ -61,6 +61,28 @@ impl ToolText for crate::navigate::FindReferencingSymbolsResponse {
     }
 }
 
+impl ToolText for crate::DetectChangesResponse {
+    fn tool_text(&self) -> String {
+        if self.files.is_empty() {
+            return "detect_changes: no affected symbols\n".to_string();
+        }
+        let mut out = format!(
+            "detect_changes: {} affected symbols across {} files\n",
+            self.affected_symbols, self.changed_files
+        );
+        for file in &self.files {
+            out.push_str(&format!("{}:\n", file.display_path));
+            for symbol in &file.affected {
+                out.push_str(&format!(
+                    "  {}-{} {} {}\n",
+                    symbol.start_line, symbol.end_line, symbol.kind, symbol.name
+                ));
+            }
+        }
+        out
+    }
+}
+
 impl ToolText for crate::navigate::ImpactAnalysisResponse {
     fn tool_text(&self) -> String {
         let mut out = format!(

@@ -39,6 +39,7 @@ where
         "goto_definition" => handle_goto_definition(provider, arguments, cancel),
         "find_references" => handle_find_references(provider, arguments, cancel),
         "call_hierarchy" => handle_call_hierarchy(provider, arguments, cancel),
+        "detect_changes" => handle_detect_changes(provider, arguments, cancel),
         other => Err(DispatchError::UnknownTool(other.to_string())),
     }
 }
@@ -407,6 +408,20 @@ where
         &args.into_request(),
         cancel,
     )?;
+    tool_response_text(&response)
+}
+
+fn handle_detect_changes<P>(
+    provider: &P,
+    arguments: Value,
+    cancel: &CancelToken,
+) -> Result<Value, DispatchError>
+where
+    P: DispatchProvider,
+{
+    let args: crate::DetectChangesRequest = serde_json::from_value(arguments)?;
+    let snapshot = provider.snapshot_arc_cancellable(cancel)?;
+    let response = crate::detect_changes_cancellable(provider, &snapshot, &args, cancel)?;
     tool_response_text(&response)
 }
 
