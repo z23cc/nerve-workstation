@@ -310,6 +310,15 @@ pub(crate) fn delegate_policy(cwd: &Path) -> SandboxPolicy {
     let mut policy = SandboxPolicy::for_root(Some(cwd));
     policy.net = NetPolicy::Allow;
     policy.timeout = DEFAULT_DELEGATE_TIMEOUT;
+    // A GUI-launched daemon inherits a minimal launchd PATH; hand the delegated
+    // agent a repaired PATH (see [`crate::agent_path`]) so it can find its own
+    // subtools (git, language toolchains) under that minimal environment.
+    policy.env_overrides = vec![(
+        "PATH".to_string(),
+        crate::agent_path::child_path()
+            .to_string_lossy()
+            .into_owned(),
+    )];
     policy
 }
 

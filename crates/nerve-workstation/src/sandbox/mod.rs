@@ -165,6 +165,13 @@ pub(crate) struct SandboxPolicy {
     pub(crate) timeout: Duration,
     /// Per-stream output cap in bytes.
     pub(crate) max_output: usize,
+    /// Explicit environment entries applied to the child **after** the allowlist
+    /// and secret scrub, so they win over (or add to) the inherited environment.
+    /// The delegate runtime injects a repaired `PATH` here (see the `agent_path`
+    /// module) so a GUI-launched daemon, which inherits a minimal launchd `PATH`,
+    /// can still find and run the external agent CLIs. Empty for ordinary
+    /// `run_command` policies.
+    pub(crate) env_overrides: Vec<(String, String)>,
 }
 
 impl SandboxPolicy {
@@ -185,6 +192,7 @@ impl SandboxPolicy {
             env: EnvPolicy::dev_default(),
             timeout: DEFAULT_TIMEOUT,
             max_output: DEFAULT_MAX_OUTPUT,
+            env_overrides: Vec::new(),
         }
     }
 }

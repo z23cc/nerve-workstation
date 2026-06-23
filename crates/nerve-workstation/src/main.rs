@@ -2,6 +2,7 @@
 
 mod agent;
 mod agent_event;
+mod agent_path;
 mod agent_toolbox;
 mod auth;
 mod capabilities;

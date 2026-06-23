@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use nerve_core::CancelToken;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
@@ -113,7 +114,14 @@ pub(super) fn spawn_child(
     policy: &SandboxPolicy,
     stdin: Stdio,
 ) -> Result<Child> {
-    let mut command = Command::new(&spec.command);
+    // Resolve a bare program name (e.g. `claude`) against the repaired PATH so a
+    // GUI-launched daemon — which inherits a minimal launchd PATH — can still find
+    // user-local agent CLIs; a name with a path separator is taken verbatim.
+    let resolved = crate::agent_path::resolve_program(&spec.command);
+    let program = resolved
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(&spec.command));
+    let mut command = Command::new(&program);
     command
         .args(&spec.args)
         .current_dir(&policy.cwd)
@@ -125,9 +133,29 @@ pub(super) fn spawn_child(
     for (name, value) in child_env(std::env::vars(), &policy.env) {
         command.env(name, value);
     }
+    // Explicit overrides win over the inherited+scrubbed environment (e.g. the
+    // repaired PATH the delegate runtime injects for agent spawns).
+    for (name, value) in &policy.env_overrides {
+        command.env(name, value);
+    }
     command
         .spawn()
-        .with_context(|| format!("failed to spawn `{}`", spec.command))
+        .with_context(|| spawn_error_context(spec, resolved.is_none()))
+}
+
+/// Context for a failed spawn. A bare program name that did not resolve on the
+/// (repaired) PATH gets an actionable "not found" hint — the common delegate
+/// failure when an agent CLI (claude/codex/gemini) isn't installed or is off the
+/// daemon's PATH — instead of the bare io error.
+fn spawn_error_context(spec: &CommandSpec, unresolved: bool) -> String {
+    if unresolved && !spec.command.contains('/') {
+        format!(
+            "failed to spawn `{}`: not found on PATH — is it installed and on the daemon's PATH?",
+            spec.command
+        )
+    } else {
+        format!("failed to spawn `{}`", spec.command)
+    }
 }
 
 /// Feed `input` to the child's stdin on a detached thread, then close the pipe so
@@ -470,6 +498,7 @@ mod tests {
                 env: EnvPolicy::dev_default(),
                 timeout,
                 max_output: DEFAULT_MAX_OUTPUT,
+                env_overrides: Vec::new(),
             }
         }
 
