@@ -2182,6 +2182,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nerve-wechat"
+version = "0.0.68"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "ureq",
+]
+
+[[package]]
 name = "nerve-workstation"
 version = "0.0.68"
 dependencies = [
