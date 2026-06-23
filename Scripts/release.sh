@@ -117,6 +117,10 @@ build_bottle() {
   echo ">> building Homebrew bottle ($BTAG)"
   ( cd "$srcdir" && cargo build --release -p nerve-workstation )
   ( cd "$srcdir" && cargo build --release -p nerve-tui ) # Rust TUI client (nerve chat)
+  # nerve-wechat is intentionally NOT bundled: it is an experimental client surface
+  # (text-only, needs a live iLink bot_type) and stays buildable/tested via the
+  # workspace (default-members + CI) until it is verified end-to-end against a live
+  # account. Add it here once it ships as a supported surface.
   "$srcdir/target/release/$BIN" --version >/dev/null # smoke test: abort if it can't run
   local keg="$TMP/bottle/$FORMULA/$NEW"
   rm -rf "$TMP/bottle"; mkdir -p "$keg/bin" "$keg/.brew"

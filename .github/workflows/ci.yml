@@ -1,0 +1,64 @@
+name: CI
+
+# Enforces the documented gates (CLAUDE.md "CI gates") on every push/PR to main —
+# previously these ran only on Windows/release, never on each commit. Mirrors the
+# local gates so main stays green: fmt, clippy -D warnings, the file-size cap, the
+# full workspace test suite, and runtime-protocol drift. A separate job runs a
+# RUSTSEC advisory audit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc --version
+
+      # Cache the cargo registry + target dir (the 11 tree-sitter grammars compile
+      # parser.c, so a cold build is slow).
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy (-D warnings, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: File-size gate (<= 600 non-test lines)
+        run: bash Scripts/check-file-size.sh --strict
+
+      - name: Test (whole workspace)
+        run: cargo test --workspace
+
+      - name: Runtime-protocol drift
+        run: cargo run -p nerve-runtime --bin export-runtime-protocol -- --check
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: RUSTSEC advisory audit
+        run: cargo audit
