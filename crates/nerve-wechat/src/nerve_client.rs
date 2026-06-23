@@ -10,8 +10,8 @@
 //! pure and unit-tested; only the process spawn + blocking read loop are not.
 
 use crate::bridge::{BridgeError, NerveControl, NerveReply};
-use nerve_runtime::protocol::{RUNTIME_EVENT_METHOD, RUNTIME_JOB_START_METHOD};
-use nerve_runtime::{DelegateAutonomy, DelegateRole, RuntimeCommand, RuntimeEvent};
+use nerve_proto::protocol::{RUNTIME_EVENT_METHOD, RUNTIME_JOB_START_METHOD};
+use nerve_proto::{DelegateAutonomy, DelegateRole, RuntimeCommand, RuntimeEvent};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};

@@ -14,7 +14,7 @@
 
 use crate::gateway::DEFAULT_BASE_URL;
 use crate::login::WeixinSession;
-use nerve_runtime::DelegateAutonomy;
+use nerve_proto::DelegateAutonomy;
 use std::path::PathBuf;
 
 /// Bridge configuration.

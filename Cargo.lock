@@ -2186,7 +2186,7 @@ name = "nerve-wechat"
 version = "0.0.68"
 dependencies = [
  "base64",
- "nerve-runtime",
+ "nerve-proto",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
