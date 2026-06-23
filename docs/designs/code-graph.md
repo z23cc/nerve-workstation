@@ -172,12 +172,22 @@ goldens + a `RESOLVER_VERSION` const. codebase-memory-mcp supplies **no** consta
   (stable cached snapshot, memo hot) per-call latency on a 4096-file synthetic corpus. Median:
   `find_references` 1.48 s → 3.9 µs; `get_repo_map` 1.70 s → 42 ms (PageRank not memoized);
   `detect_changes` 1.60 s → 1.84 ms. **Verdict:** the PR1/PR1b/PR1c memoization is validated
-  (warm is orders of magnitude cheaper), and the ~1.5–1.7 s cold rebuild (catalog rescan + parse
-  + cross-file derivation) — re-paid on every edit / 5 s TTL lapse / daemon restart, ≈ tens of
-  seconds at Linux-kernel scale — is the recurring bottleneck. This is the data-driven green
-  light for **T1 (on-disk persistence + incremental re-index)** as the next major investment.
-  Cheap follow-up the data surfaced: memoize no-query PageRank (the 42 ms warm `get_repo_map`).
-  Resident RAM / many-workspaces / memo-lock-contention remain unmeasured (secondary).
+  (warm is orders of magnitude cheaper), and the ~1.5–1.7 s cold rebuild — whose dominant cost is
+  **re-parsing every file** — was re-paid on every edit / 5 s TTL lapse / daemon restart.
+- **T1a — SHIPPED (`perf(catalog): retain … codemap cache across invalidate`).** The data above
+  showed re-parse dominates, so the highest-leverage fix was the smallest: stop clearing the
+  signature-validated codemap parse cache on `invalidate()`. Now the frequent post-edit / post-TTL
+  re-query loop re-parses only **changed** files. Re-measured cold (invalidate, no content change):
+  `find_references` 1.48 s → **57 ms** (~26×), `get_repo_map` 1.70 s → **114 ms** (~15×),
+  `detect_changes` 1.60 s → **51 ms** (~31×). Byte-identical (zero golden diffs); correctness from
+  the existing signature + generation guards.
+- **T1b (on-disk persistence) — reassessed SECONDARY post-T1a.** T1a eliminated the re-parse for
+  the *frequent* cases (edit / TTL); the residual ~50–115 ms is rescan + re-derive. Disk
+  persistence would now only help the *one-time* cold start (empty parse cache, ≈ 1.5 s / 4096
+  files) and daemon restart — worth it only if cold-start on very large repos is a specific
+  concern. Deferred unless that need is shown. Cheap follow-up still open: memoize no-query
+  PageRank (the 42 ms warm `get_repo_map`); note `build_context` always passes a query so it would
+  not benefit. Resident RAM / many-workspaces / memo-lock-contention remain unmeasured (secondary).
 - **PR3 (gated)** — first extract `crate::persist` out of the (removed) semantic island's
   shape into a shared module (its own PR), then add `graph-cache` + `graph/persist.rs`:
   cold-load content-addressed graph, fail-closed; new CI job; `cached == cold` golden.

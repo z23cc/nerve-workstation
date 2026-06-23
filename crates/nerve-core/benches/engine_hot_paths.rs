@@ -219,15 +219,16 @@ fn warm_provider_for(root: &Path) -> FsCatalogProvider {
 
 /// Quantify the CodeGraph T0 memoization (PR1/PR1b/PR1c) in the two scenarios a
 /// cockpit actually hits:
-///   * **cold** — a fresh snapshot every call (the first query, or right after an
-///     edit invalidates the snapshot, or after the cache TTL lapses / a daemon
-///     restart): full catalog rescan + parse + cross-file derivation, O(repo).
+///   * **cold** — a fresh snapshot every call (`invalidate()` per iteration): catalog
+///     rescan + cross-file re-derivation. NOTE since T1a (the codemap parse cache is
+///     retained across invalidate) this path no longer re-parses unchanged files, so
+///     it measures the realistic post-edit / post-TTL cost (~50–115 ms here), not the
+///     one-time full-parse cold start (~1.5 s on an empty cache, e.g. process start).
 ///   * **warm** — repeated queries against a stable cached snapshot: the shared
 ///     index / reference graph / definition index are memoized on the snapshot
 ///     `Arc`, so derivation collapses to an O(1) lookup.
-/// The cold time is the per-call cost that gates whether on-disk persistence +
-/// incremental re-index (T1) is worth building; the warm time is what the shipped
-/// memoization already delivers for the steady-state query loop.
+/// Together they gate further work (on-disk persistence would only help the one-time
+/// full-parse cold start) and show what the shipped memoization delivers steady-state.
 ///
 /// Caveat: the synthetic corpus has definitions but almost no cross-file
 /// references, so warm `find_references` mainly reflects the memo eliminating the
