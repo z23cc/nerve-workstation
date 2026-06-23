@@ -15,6 +15,7 @@ mod delegate;
 mod delegate_codex_mcp;
 mod delegate_live;
 mod delegate_proxy;
+mod delegate_roles;
 mod delegate_runtime;
 mod delegate_session;
 mod delegate_session_codex;

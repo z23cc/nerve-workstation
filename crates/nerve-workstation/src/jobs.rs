@@ -18,9 +18,10 @@ use crate::{agent, providers::ProviderRegistry, tools};
 use nerve_agent::AgentEvent;
 use nerve_core::{CancelToken, WorkspaceResolver};
 use nerve_runtime::{
-    DelegateAutonomy, FlowSource, HostCapabilities, HostCapabilitySupport, RuntimeCommand,
-    RuntimeEvent, RuntimeJobError, RuntimeJobErrorExt, RuntimeJobGetRequest, RuntimeJobListRequest,
-    RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus, SessionApprovalDecision,
+    DelegateAutonomy, DelegateRole, FlowSource, HostCapabilities, HostCapabilitySupport,
+    RuntimeCommand, RuntimeEvent, RuntimeJobError, RuntimeJobErrorExt, RuntimeJobGetRequest,
+    RuntimeJobListRequest, RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
+    SessionApprovalDecision,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -459,10 +460,11 @@ impl JobManager {
                 task,
                 cwd,
                 autonomy,
+                role,
                 model,
                 mcp_enable,
             } => self.run_delegate_start(
-                job_id, &agent, &task, cwd, autonomy, model, mcp_enable, token,
+                job_id, &agent, &task, cwd, autonomy, role, model, mcp_enable, token,
             ),
             RuntimeCommand::DelegateSteer {
                 session_id,
@@ -662,10 +664,15 @@ impl JobManager {
         task: &str,
         cwd: Option<String>,
         autonomy: DelegateAutonomy,
+        role: DelegateRole,
         model: Option<String>,
         mcp_enable: Option<Vec<String>>,
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
+        // DA-7: expand the role preset once, before the live/one-shot split, so both
+        // downstream paths inherit the scout's wrapped task + forced read-only posture.
+        let (task, autonomy) = crate::delegate_roles::apply_role(role, task, autonomy);
+        let task = task.as_str();
         let resolved = DelegateAgent::from_name(agent)
             .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
         let root = self.delegate_root()?;

@@ -48,6 +48,12 @@ const AGENT_CATALOG: &[AgentSpec] = &[
 /// names (`read_only` / `edit` / `full`).
 const AUTONOMY_MODES: &[&str] = &["read_only", "edit", "full"];
 
+/// Behavior roles every catalog agent accepts (DA-7), surfaced so a client can
+/// present the choice. The wire strings match [`nerve_runtime::DelegateRole`]'s
+/// serde names (`standard` / `scout`); `scout` is the read-only repository-explorer
+/// preset (forces read-only autonomy + an explore-and-cite instruction).
+const ROLES: &[&str] = &["standard", "scout"];
+
 /// MCP-style spec for the `list_agents` tool. Read-only and side-effect-free:
 /// the optional `refresh` flag is accepted for forward-compatibility (DA-1 holds
 /// no cache, so it is a no-op) and never changes the catalog.
@@ -128,6 +134,7 @@ fn probe_agent(spec: &AgentSpec) -> Value {
         "available": path.is_some(),
         "path": path.as_ref().map(|p| p.display().to_string()),
         "autonomy_modes": AUTONOMY_MODES,
+        "roles": ROLES,
     });
     if spec.name == "codex" {
         entry["mcp_servers"] = codex_mcp_servers_view();
@@ -231,6 +238,7 @@ mod tests {
                 agent["autonomy_modes"],
                 json!(["read_only", "edit", "full"])
             );
+            assert_eq!(agent["roles"], json!(["standard", "scout"]));
         }
     }
 

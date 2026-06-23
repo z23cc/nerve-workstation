@@ -211,6 +211,12 @@ pub enum RuntimeCommand {
         cwd: Option<String>,
         #[serde(default)]
         autonomy: DelegateAutonomy,
+        /// Behavior preset for the delegated agent (DA-7). Defaults to
+        /// [`DelegateRole::Standard`] (passthrough); [`DelegateRole::Scout`] makes
+        /// it a read-only repository explorer that returns compact citations and
+        /// forces read-only autonomy regardless of the `autonomy` field.
+        #[serde(default, skip_serializing_if = "DelegateRole::is_default")]
+        role: DelegateRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// DA-6 (codex only): the MCP allowlist for this delegated codex session —
@@ -424,6 +430,37 @@ pub enum DelegateAutonomy {
     Edit,
     /// The delegated agent may read, edit, and run commands.
     Full,
+}
+
+/// The *role* a delegated agent plays (DA-7): a curated behavior preset the host
+/// materializes on top of the raw agent CLI. Defaults to [`Self::Standard`] (no
+/// preset — the `task`/`autonomy` are used verbatim).
+///
+/// [`Self::Scout`] is a read-only **repository-exploration** preset: the host
+/// wraps the task in an explore-and-cite instruction and forces read-only
+/// autonomy, so the agent returns compact `path:line-range` citations instead of
+/// editing — a cheap context sub-agent that keeps the caller's context window
+/// clean (the FastContext pattern, run on an existing CLI). The role is plain
+/// vocabulary here; the host (`delegate_roles`) owns the prompt + posture it maps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DelegateRole {
+    /// No preset: the task and autonomy are passed through unchanged.
+    #[default]
+    Standard,
+    /// Read-only repository-exploration preset — forces read-only autonomy and an
+    /// explore-and-cite instruction (see the type docs).
+    Scout,
+}
+
+impl DelegateRole {
+    /// Whether this is the default ([`Self::Standard`]) — used to keep an unset
+    /// `role` off the wire (serde `skip_serializing_if`).
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Standard)
+    }
 }
 
 /// Decision supplied by a human/client for a session approval request.
@@ -661,6 +698,7 @@ mod tests {
                 task,
                 cwd,
                 autonomy,
+                role,
                 model,
                 mcp_enable,
             } => {
@@ -668,6 +706,7 @@ mod tests {
                 assert_eq!(task, "add a test");
                 assert_eq!(cwd, None);
                 assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
+                assert_eq!(role, DelegateRole::Standard);
                 assert_eq!(model, None);
                 assert_eq!(mcp_enable, None);
             }
@@ -700,6 +739,7 @@ mod tests {
             task: "t".into(),
             cwd: None,
             autonomy: DelegateAutonomy::ReadOnly,
+            role: DelegateRole::Standard,
             model: None,
             mcp_enable: Some(vec![]),
         };
@@ -710,11 +750,17 @@ mod tests {
             task: "t".into(),
             cwd: None,
             autonomy: DelegateAutonomy::ReadOnly,
+            role: DelegateRole::Standard,
             model: None,
             mcp_enable: None,
         };
         let json = serde_json::to_value(&without).expect("serialize None");
         assert!(json.get("mcp_enable").is_none(), "None is skipped: {json}");
+        // The default role is kept off the wire (skip_serializing_if).
+        assert!(
+            json.get("role").is_none(),
+            "default role is skipped: {json}"
+        );
     }
 
     #[test]

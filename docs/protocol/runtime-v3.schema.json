@@ -333,6 +333,25 @@
         }
       ]
     },
+    "DelegateRole": {
+      "description": "The *role* a delegated agent plays (DA-7): a curated behavior preset the host materializes on top of the raw agent CLI. Defaults to [`Self::Standard`] (no preset — the `task`/`autonomy` are used verbatim).\n\n[`Self::Scout`] is a read-only **repository-exploration** preset: the host wraps the task in an explore-and-cite instruction and forces read-only autonomy, so the agent returns compact `path:line-range` citations instead of editing — a cheap context sub-agent that keeps the caller's context window clean (the FastContext pattern, run on an existing CLI). The role is plain vocabulary here; the host (`delegate_roles`) owns the prompt + posture it maps to.",
+      "oneOf": [
+        {
+          "description": "No preset: the task and autonomy are passed through unchanged.",
+          "enum": [
+            "standard"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Read-only repository-exploration preset — forces read-only autonomy and an explore-and-cite instruction (see the type docs).",
+          "enum": [
+            "scout"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "FailPolicy": {
       "description": "What the engine does when a step's worker fails (`ok == false` or errored).",
       "oneOf": [
@@ -1346,6 +1365,14 @@
                 "string",
                 "null"
               ]
+            },
+            "role": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/DelegateRole"
+                }
+              ],
+              "description": "Behavior preset for the delegated agent (DA-7). Defaults to [`DelegateRole::Standard`] (passthrough); [`DelegateRole::Scout`] makes it a read-only repository explorer that returns compact citations and forces read-only autonomy regardless of the `autonomy` field."
             },
             "task": {
               "type": "string"

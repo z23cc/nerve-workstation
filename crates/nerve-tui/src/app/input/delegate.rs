@@ -4,7 +4,7 @@
 //! to the handlers that use them, mirroring `super`'s "pure decisions are
 //! unit-testable, IO is on [`Shell`]" split.
 
-use nerve_runtime::{DelegateAutonomy, RuntimeCommand};
+use nerve_runtime::{DelegateAutonomy, DelegateRole, RuntimeCommand};
 
 use super::super::Shell;
 use super::super::state::{DelegateSession, State, Tone};
@@ -80,6 +80,8 @@ fn delegate_start_command(agent: String, task: String) -> RuntimeCommand {
         task,
         cwd: None,
         autonomy: DelegateAutonomy::ReadOnly,
+        // The TUI `/delegate` command starts a standard (passthrough) delegate.
+        role: DelegateRole::Standard,
         model: None,
         // The TUI does not expose a per-call codex MCP allowlist; the daemon falls
         // back to the persisted `[delegate.codex] mcp_enable` config (DA-6).
@@ -159,6 +161,7 @@ mod tests {
                 task,
                 cwd,
                 autonomy,
+                role,
                 model,
                 mcp_enable,
             } => {
@@ -166,6 +169,7 @@ mod tests {
                 assert_eq!(task, "fix the bug");
                 assert_eq!(cwd, None);
                 assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
+                assert_eq!(role, DelegateRole::Standard);
                 assert_eq!(model, None);
                 assert_eq!(mcp_enable, None);
             }
