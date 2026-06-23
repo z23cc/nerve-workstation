@@ -10,6 +10,7 @@
 mod definitions;
 mod derived;
 mod memo;
+mod snapshot_memo;
 
 pub(crate) use definitions::{DefinitionNameIndex, shared_definition_index};
 pub(crate) use derived::shared_reference_graph;

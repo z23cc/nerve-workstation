@@ -1,162 +1,47 @@
-//! Process-global, snapshot-identity-memoized shared index.
+//! Process-global, snapshot-memoized shared indexed-file set (CodeGraph T0).
 //!
 //! Every navigation / `build_context` call used to re-run
 //! [`indexed_files_cancellable`] from scratch — re-reading bytes, re-collecting
 //! symbols, and re-sorting a fresh `Vec<IndexedFile>` even though the underlying
-//! parses are already codemap-cached by the provider. This module builds that
+//! parses are already codemap-cached by the provider. This builds that
 //! `Vec<IndexedFile>` **once per snapshot** and reuses it across all callers for
 //! as long as the provider keeps serving the same cached snapshot `Arc`.
 //!
-//! ## Memo key (the correctness crux)
-//!
-//! The memo is keyed on **snapshot `Arc` identity**, never on
-//! `CatalogSnapshot.generation`. `FsCatalogProvider` hard-codes
-//! `generation = 1` permanently (`catalog/fs_scan.rs` `finalize_snapshot`); the
-//! real edit counter lives in a separate `ProviderCache.generation` that never
-//! reaches the snapshot value tools observe. A generation-keyed memo would
-//! therefore serve a **stale** index after an edit — a determinism violation.
-//!
-//! The provider re-serves the *same* `Arc<CatalogSnapshot>` within its cache TTL
-//! and drops it to `None` on every write/delete/rename (`invalidate()`), so the
-//! next call after an edit builds a fresh `Arc`. We store a [`Weak`] reference to
-//! that `Arc` and confirm a hit with [`Arc::ptr_eq`] — this avoids the ABA
-//! problem of raw-pointer keys and needs no content hashing. The strong `Arc` is
-//! deliberately *not* stored, so the memo never pins snapshots in memory.
-//!
-//! The memo is a pure derived cache: a hit is byte-identical to a miss, because
-//! both return the exact output of [`indexed_files_cancellable`] for the same
-//! snapshot. The bound below keeps it from growing without limit.
+//! Keying, eviction, and the hit==miss determinism guarantee live in
+//! [`super::snapshot_memo`]; this module is just the indexed-file instantiation.
 
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{
-    cancel::CancelToken, models::NerveError, port::CatalogProvider, repomap::IndexedFile,
-    repomap::indexed_files_cancellable, snapshot::CatalogSnapshot,
+    cancel::CancelToken,
+    models::NerveError,
+    port::CatalogProvider,
+    repomap::{IndexedFile, indexed_files_cancellable},
+    snapshot::CatalogSnapshot,
 };
 
+use super::snapshot_memo::SnapshotMemo;
+
 /// Maximum number of distinct snapshots whose shared index is retained at once.
-///
-/// Small on purpose: a daemon usually drives one or a few live snapshots
-/// concurrently (one per active workspace). Entries are held by `Weak`, so an
-/// over-budget eviction only drops the memoized `Vec`, never a live snapshot.
+/// Small on purpose: a daemon usually drives one or a few live snapshots.
 const SHARED_INDEX_CAP: usize = 8;
 
-struct CacheEntry {
-    /// Identity key: upgraded + `Arc::ptr_eq`'d against the caller's snapshot.
-    snapshot: Weak<CatalogSnapshot>,
-    /// The memoized, fully-sorted indexed file set for that snapshot.
-    indexed: Arc<Vec<IndexedFile>>,
-}
-
-/// MRU-ordered (front = most recently used) bounded list of memo entries.
-#[derive(Default)]
-struct SharedIndexCache {
-    entries: Vec<CacheEntry>,
-}
-
-fn cache() -> &'static Mutex<SharedIndexCache> {
-    static CACHE: OnceLock<Mutex<SharedIndexCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(SharedIndexCache::default()))
+fn cache() -> &'static Mutex<SnapshotMemo<Vec<IndexedFile>>> {
+    static CACHE: OnceLock<Mutex<SnapshotMemo<Vec<IndexedFile>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SnapshotMemo::new(SHARED_INDEX_CAP)))
 }
 
 /// Return the memoized indexed-file set for `snapshot`, building it once on a
-/// miss via the existing [`indexed_files_cancellable`] logic.
-///
-/// On a hit the returned `Arc` is `Arc::ptr_eq`-equal across repeated calls that
-/// observe the same cached snapshot `Arc`. The build runs **without** holding the
-/// cache lock so concurrent callers on different snapshots never serialize on the
-/// O(repo) parse pass; a racing duplicate build is reconciled on re-check.
+/// miss via the existing [`indexed_files_cancellable`] logic. A hit is
+/// byte-identical to a miss (same snapshot → same output).
 pub(crate) fn shared_indexed_files<P: CatalogProvider + Sync>(
     provider: &P,
     snapshot: &Arc<CatalogSnapshot>,
     cancel: &CancelToken,
 ) -> Result<Arc<Vec<IndexedFile>>, NerveError> {
-    if let Some(indexed) = lookup(snapshot) {
-        return Ok(indexed);
-    }
-
-    // Build outside the lock: O(repo) work must not block other snapshots.
-    let built = Arc::new(indexed_files_cancellable(provider, snapshot, cancel)?);
-    Ok(insert(snapshot, built))
-}
-
-/// Look up `snapshot` by `Arc` identity, pruning any dead `Weak` entries seen.
-/// Promotes a hit to the front (MRU).
-fn lookup(snapshot: &Arc<CatalogSnapshot>) -> Option<Arc<Vec<IndexedFile>>> {
-    let mut cache = crate::sync::lock_recover(cache());
-    let mut hit = None;
-    let mut index = 0;
-    while index < cache.entries.len() {
-        match cache.entries[index].snapshot.upgrade() {
-            Some(existing) if Arc::ptr_eq(&existing, snapshot) => {
-                hit = Some(index);
-                break;
-            }
-            Some(_) => index += 1,
-            // Dead entry: the snapshot was dropped (e.g. after an edit). Prune it.
-            None => {
-                cache.entries.remove(index);
-            }
-        }
-    }
-    let index = hit?;
-    let entry = cache.entries.remove(index);
-    let indexed = Arc::clone(&entry.indexed);
-    cache.entries.insert(0, entry);
-    Some(indexed)
-}
-
-/// Insert (or reconcile a racing duplicate of) the built index, returning the
-/// canonical `Arc` so concurrent builders converge on a single shared value.
-fn insert(snapshot: &Arc<CatalogSnapshot>, built: Arc<Vec<IndexedFile>>) -> Arc<Vec<IndexedFile>> {
-    let mut cache = crate::sync::lock_recover(cache());
-    // Another thread may have inserted the same snapshot while we built ours.
-    if let Some(existing) = take_existing(&mut cache, snapshot) {
-        cache.entries.insert(
-            0,
-            CacheEntry {
-                snapshot: Arc::downgrade(snapshot),
-                indexed: Arc::clone(&existing),
-            },
-        );
-        return existing;
-    }
-    cache.entries.insert(
-        0,
-        CacheEntry {
-            snapshot: Arc::downgrade(snapshot),
-            indexed: Arc::clone(&built),
-        },
-    );
-    evict_over_budget(&mut cache);
-    built
-}
-
-/// Remove and return the memoized index for `snapshot` if present, pruning dead
-/// entries along the way.
-fn take_existing(
-    cache: &mut SharedIndexCache,
-    snapshot: &Arc<CatalogSnapshot>,
-) -> Option<Arc<Vec<IndexedFile>>> {
-    let mut index = 0;
-    while index < cache.entries.len() {
-        match cache.entries[index].snapshot.upgrade() {
-            Some(existing) if Arc::ptr_eq(&existing, snapshot) => {
-                return Some(cache.entries.remove(index).indexed);
-            }
-            Some(_) => index += 1,
-            None => {
-                cache.entries.remove(index);
-            }
-        }
-    }
-    None
-}
-
-fn evict_over_budget(cache: &mut SharedIndexCache) {
-    while cache.entries.len() > SHARED_INDEX_CAP {
-        cache.entries.pop();
-    }
+    SnapshotMemo::get_or_build(cache(), snapshot, || {
+        indexed_files_cancellable(provider, snapshot, cancel)
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

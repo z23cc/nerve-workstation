@@ -1,33 +1,23 @@
-//! Process-global, snapshot-identity-memoized derived reference graph.
+//! Process-global, snapshot-memoized derived reference graph.
 //!
-//! `get_repo_map` (and `build_context`, which calls it) used to rebuild the
-//! whole cross-file [`ReferenceGraph`] — an O(edges) pass over every reference
-//! in the repo — on **every** call, even when the underlying snapshot and its
-//! shared [`IndexedFile`] set were unchanged. This module memoizes that derived
-//! graph **once per snapshot** and reuses it for as long as the provider keeps
-//! serving the same cached snapshot `Arc`.
+//! `get_repo_map` (and `build_context`, which calls it) used to rebuild the whole
+//! cross-file [`ReferenceGraph`] — an O(edges) pass over every reference in the
+//! repo — on **every** call, even when the snapshot and its shared
+//! [`IndexedFile`] set were unchanged. This memoizes that derived graph **once per
+//! snapshot** and reuses it while the provider serves the same cached `Arc`.
 //!
-//! ## Why this is byte-identical (the determinism crux)
+//! ## Why this is byte-identical
 //!
 //! [`ReferenceGraph::build`] is a **pure** function of `&[IndexedFile]`: it reads
 //! only `file.references`, `file.symbols`, and `language_family`, never
 //! `query_match`. The shared index from [`shared_indexed_files`] is the exact
-//! `Indexed`-filtered, path-sorted set `get_repo_map` would build from its own
-//! `analyze_files_cancellable` pass — the only per-file difference a query makes
-//! is the `query_match` bool, which the graph build ignores. So a graph built off
-//! `shared_indexed_files` is identical to the per-call graph; caching a pure
+//! `Indexed`-filtered, path-sorted set `get_repo_map` would build itself, so a
+//! graph built off it is identical to the per-call graph; caching a pure
 //! function's output is byte-identical by construction.
 //!
-//! ## Memo key
-//!
-//! Identical to [`super::memo`]: keyed on snapshot **`Arc` identity** via a
-//! [`Weak`] reference confirmed with [`Arc::ptr_eq`], never on
-//! `CatalogSnapshot.generation` (frozen at 1 on `FsCatalogProvider`). The
-//! provider drops its cached snapshot `Arc` on every edit (`invalidate()`), so
-//! the next call builds a fresh `Arc` and the memo misses — never serving a stale
-//! graph. The strong `Arc` is not stored, so the memo never pins snapshots.
+//! Keying, eviction, and the hit==miss guarantee live in [`super::snapshot_memo`].
 
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{
     cancel::CancelToken, models::NerveError, port::CatalogProvider, repomap::ReferenceGraph,
@@ -35,132 +25,28 @@ use crate::{
 };
 
 use super::shared_indexed_files;
+use super::snapshot_memo::SnapshotMemo;
 
 /// Maximum number of distinct snapshots whose reference graph is retained at
-/// once. Mirrors `SHARED_INDEX_CAP`: a daemon usually drives one or a few live
-/// snapshots concurrently, and `Weak` keys mean an over-budget eviction only
-/// drops the memoized graph, never a live snapshot.
+/// once. Mirrors the sibling memos' caps.
 const SHARED_GRAPH_CAP: usize = 8;
 
-struct CacheEntry {
-    /// Identity key: upgraded + `Arc::ptr_eq`'d against the caller's snapshot.
-    snapshot: Weak<CatalogSnapshot>,
-    /// The memoized reference graph derived from that snapshot's shared index.
-    graph: Arc<ReferenceGraph>,
-}
-
-/// MRU-ordered (front = most recently used) bounded list of memo entries.
-#[derive(Default)]
-struct SharedGraphCache {
-    entries: Vec<CacheEntry>,
-}
-
-fn cache() -> &'static Mutex<SharedGraphCache> {
-    static CACHE: OnceLock<Mutex<SharedGraphCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(SharedGraphCache::default()))
+fn cache() -> &'static Mutex<SnapshotMemo<ReferenceGraph>> {
+    static CACHE: OnceLock<Mutex<SnapshotMemo<ReferenceGraph>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SnapshotMemo::new(SHARED_GRAPH_CAP)))
 }
 
 /// Return the memoized [`ReferenceGraph`] for `snapshot`, building it once on a
 /// miss from the shared indexed-file set.
-///
-/// On a hit the returned `Arc` is `Arc::ptr_eq`-equal across repeated calls that
-/// observe the same cached snapshot `Arc`. The build runs **without** holding the
-/// cache lock so concurrent callers on different snapshots never serialize on the
-/// O(edges) graph construction; a racing duplicate build is reconciled on
-/// re-check.
 pub(crate) fn shared_reference_graph<P: CatalogProvider + Sync>(
     provider: &P,
     snapshot: &Arc<CatalogSnapshot>,
     cancel: &CancelToken,
 ) -> Result<Arc<ReferenceGraph>, NerveError> {
-    if let Some(graph) = lookup(snapshot) {
-        return Ok(graph);
-    }
-
-    // Build outside the lock: O(edges) work must not block other snapshots. The
-    // shared index is itself memoized, so a graph miss reuses the cached files.
-    let files = shared_indexed_files(provider, snapshot, cancel)?;
-    let built = Arc::new(ReferenceGraph::build_cancellable(&files, cancel)?);
-    Ok(insert(snapshot, built))
-}
-
-/// Look up `snapshot` by `Arc` identity, pruning any dead `Weak` entries seen.
-/// Promotes a hit to the front (MRU).
-fn lookup(snapshot: &Arc<CatalogSnapshot>) -> Option<Arc<ReferenceGraph>> {
-    let mut cache = crate::sync::lock_recover(cache());
-    let mut hit = None;
-    let mut index = 0;
-    while index < cache.entries.len() {
-        match cache.entries[index].snapshot.upgrade() {
-            Some(existing) if Arc::ptr_eq(&existing, snapshot) => {
-                hit = Some(index);
-                break;
-            }
-            Some(_) => index += 1,
-            // Dead entry: the snapshot was dropped (e.g. after an edit). Prune it.
-            None => {
-                cache.entries.remove(index);
-            }
-        }
-    }
-    let index = hit?;
-    let entry = cache.entries.remove(index);
-    let graph = Arc::clone(&entry.graph);
-    cache.entries.insert(0, entry);
-    Some(graph)
-}
-
-/// Insert (or reconcile a racing duplicate of) the built graph, returning the
-/// canonical `Arc` so concurrent builders converge on a single shared value.
-fn insert(snapshot: &Arc<CatalogSnapshot>, built: Arc<ReferenceGraph>) -> Arc<ReferenceGraph> {
-    let mut cache = crate::sync::lock_recover(cache());
-    // Another thread may have inserted the same snapshot while we built ours.
-    if let Some(existing) = take_existing(&mut cache, snapshot) {
-        cache.entries.insert(
-            0,
-            CacheEntry {
-                snapshot: Arc::downgrade(snapshot),
-                graph: Arc::clone(&existing),
-            },
-        );
-        return existing;
-    }
-    cache.entries.insert(
-        0,
-        CacheEntry {
-            snapshot: Arc::downgrade(snapshot),
-            graph: Arc::clone(&built),
-        },
-    );
-    evict_over_budget(&mut cache);
-    built
-}
-
-/// Remove and return the memoized graph for `snapshot` if present, pruning dead
-/// entries along the way.
-fn take_existing(
-    cache: &mut SharedGraphCache,
-    snapshot: &Arc<CatalogSnapshot>,
-) -> Option<Arc<ReferenceGraph>> {
-    let mut index = 0;
-    while index < cache.entries.len() {
-        match cache.entries[index].snapshot.upgrade() {
-            Some(existing) if Arc::ptr_eq(&existing, snapshot) => {
-                return Some(cache.entries.remove(index).graph);
-            }
-            Some(_) => index += 1,
-            None => {
-                cache.entries.remove(index);
-            }
-        }
-    }
-    None
-}
-
-fn evict_over_budget(cache: &mut SharedGraphCache) {
-    while cache.entries.len() > SHARED_GRAPH_CAP {
-        cache.entries.pop();
-    }
+    SnapshotMemo::get_or_build(cache(), snapshot, || {
+        let files = shared_indexed_files(provider, snapshot, cancel)?;
+        ReferenceGraph::build_cancellable(&files, cancel)
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -221,9 +107,9 @@ mod tests {
         assert!(edges_a >= 1, "expected at least the caller->target edge");
 
         // Add a brand-new defining file (`extra.rs`) and have `caller` call into
-        // it, so a genuinely new file->file edge (caller -> extra) appears and the
-        // indexed-symbol count grows. A graph rebuilt off the new snapshot must
-        // reflect both; a stale memo would report the old counts.
+        // it, so a genuinely new file->file edge appears and the indexed-symbol
+        // count grows. A graph rebuilt off the new snapshot must reflect both; a
+        // stale memo would report the old counts.
         fs::write(&extra, "pub fn other() -> usize { 2 }\n").expect("write extra");
         fs::write(
             &caller,

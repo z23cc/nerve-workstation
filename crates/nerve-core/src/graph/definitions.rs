@@ -1,8 +1,8 @@
-//! Process-global, snapshot-identity-memoized inverted definition-name index.
+//! Process-global, snapshot-memoized inverted definition-name index.
 //!
 //! `find_references` re-scanned every file's every symbol to find the files
 //! defining a queried name — `definition_file_indexes` and `count_definitions`
-//! in `navigate/references.rs`, two O(repo·symbols) passes per call. This module
+//! in `navigate/references.rs`, two O(repo·symbols) passes per call. This
 //! memoizes a single inverted index `name -> [file index per matching symbol]`
 //! **once per snapshot**, so repeated navigation over the same snapshot reuses it.
 //!
@@ -23,16 +23,10 @@
 //! derivation. It can later pre-filter their scans by name, but that is a
 //! separate change.
 //!
-//! ## Memo key
-//!
-//! Identical to [`super::memo`] / [`super::derived`]: snapshot **`Arc` identity**
-//! via a [`Weak`] confirmed with [`Arc::ptr_eq`], never `CatalogSnapshot.generation`
-//! (frozen at 1 on `FsCatalogProvider`). The provider drops its cached snapshot
-//! `Arc` on every edit, so the next call builds a fresh `Arc` and the memo misses
-//! — never serving a stale index. The strong `Arc` is not stored.
+//! Keying, eviction, and the hit==miss guarantee live in [`super::snapshot_memo`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{
     cancel::CancelToken, models::NerveError, port::CatalogProvider, repomap::IndexedFile,
@@ -40,6 +34,7 @@ use crate::{
 };
 
 use super::shared_indexed_files;
+use super::snapshot_memo::SnapshotMemo;
 
 /// Maximum number of distinct snapshots whose definition index is retained at
 /// once. Mirrors the sibling memos' caps.
@@ -72,114 +67,23 @@ impl DefinitionNameIndex {
     }
 }
 
-struct CacheEntry {
-    snapshot: Weak<CatalogSnapshot>,
-    index: Arc<DefinitionNameIndex>,
-}
-
-#[derive(Default)]
-struct DefinitionIndexCache {
-    entries: Vec<CacheEntry>,
-}
-
-fn cache() -> &'static Mutex<DefinitionIndexCache> {
-    static CACHE: OnceLock<Mutex<DefinitionIndexCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(DefinitionIndexCache::default()))
+fn cache() -> &'static Mutex<SnapshotMemo<DefinitionNameIndex>> {
+    static CACHE: OnceLock<Mutex<SnapshotMemo<DefinitionNameIndex>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SnapshotMemo::new(SHARED_DEFINITION_INDEX_CAP)))
 }
 
 /// Return the memoized [`DefinitionNameIndex`] for `snapshot`, building it once
-/// on a miss from the shared indexed-file set. The build runs without holding the
-/// cache lock; a racing duplicate is reconciled to one canonical `Arc`.
+/// on a miss from the shared indexed-file set.
 pub(crate) fn shared_definition_index<P: CatalogProvider + Sync>(
     provider: &P,
     snapshot: &Arc<CatalogSnapshot>,
     cancel: &CancelToken,
 ) -> Result<Arc<DefinitionNameIndex>, NerveError> {
-    if let Some(index) = lookup(snapshot) {
-        return Ok(index);
-    }
-    let files = shared_indexed_files(provider, snapshot, cancel)?;
-    cancel.check_cancelled()?;
-    let built = Arc::new(DefinitionNameIndex::build(&files));
-    Ok(insert(snapshot, built))
-}
-
-/// Look up `snapshot` by `Arc` identity, pruning dead `Weak` entries; promotes a
-/// hit to the front (MRU).
-fn lookup(snapshot: &Arc<CatalogSnapshot>) -> Option<Arc<DefinitionNameIndex>> {
-    let mut cache = crate::sync::lock_recover(cache());
-    let mut hit = None;
-    let mut index = 0;
-    while index < cache.entries.len() {
-        match cache.entries[index].snapshot.upgrade() {
-            Some(existing) if Arc::ptr_eq(&existing, snapshot) => {
-                hit = Some(index);
-                break;
-            }
-            Some(_) => index += 1,
-            None => {
-                cache.entries.remove(index);
-            }
-        }
-    }
-    let index = hit?;
-    let entry = cache.entries.remove(index);
-    let result = Arc::clone(&entry.index);
-    cache.entries.insert(0, entry);
-    Some(result)
-}
-
-/// Insert (or reconcile a racing duplicate of) the built index, returning the
-/// canonical `Arc` so concurrent builders converge on a single shared value.
-fn insert(
-    snapshot: &Arc<CatalogSnapshot>,
-    built: Arc<DefinitionNameIndex>,
-) -> Arc<DefinitionNameIndex> {
-    let mut cache = crate::sync::lock_recover(cache());
-    if let Some(existing) = take_existing(&mut cache, snapshot) {
-        cache.entries.insert(
-            0,
-            CacheEntry {
-                snapshot: Arc::downgrade(snapshot),
-                index: Arc::clone(&existing),
-            },
-        );
-        return existing;
-    }
-    cache.entries.insert(
-        0,
-        CacheEntry {
-            snapshot: Arc::downgrade(snapshot),
-            index: Arc::clone(&built),
-        },
-    );
-    evict_over_budget(&mut cache);
-    built
-}
-
-fn take_existing(
-    cache: &mut DefinitionIndexCache,
-    snapshot: &Arc<CatalogSnapshot>,
-) -> Option<Arc<DefinitionNameIndex>> {
-    let mut index = 0;
-    while index < cache.entries.len() {
-        match cache.entries[index].snapshot.upgrade() {
-            Some(existing) if Arc::ptr_eq(&existing, snapshot) => {
-                return Some(cache.entries.remove(index).index);
-            }
-            Some(_) => index += 1,
-            None => {
-                cache.entries.remove(index);
-            }
-        }
-    }
-    None
-}
-
-fn evict_over_budget(cache: &mut DefinitionIndexCache) {
-    while cache.entries.len() > SHARED_DEFINITION_INDEX_CAP {
-        cache.entries.pop();
-    }
+    SnapshotMemo::get_or_build(cache(), snapshot, || {
+        let files = shared_indexed_files(provider, snapshot, cancel)?;
+        cancel.check_cancelled()?;
+        Ok(DefinitionNameIndex::build(&files))
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
