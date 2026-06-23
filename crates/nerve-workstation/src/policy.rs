@@ -1055,6 +1055,51 @@ mod tests {
     }
 
     #[test]
+    fn write_mode_auto_approves_edit_tier_but_still_asks_for_exec() {
+        // Enforcement-level proof for ApprovalMode::Write (the auto-approval mode a
+        // session/agent runs in). `decide_with_mode` is matrix-tested separately
+        // (`write_allows_read_and_edit_asks_exec`); this exercises the wrapping
+        // `PolicyToolBox::call` dispatch end-to-end.
+
+        // Edit-tier is auto-allowed WITHOUT consulting the approver: a denying
+        // approver is never reached, yet the inner box runs.
+        let gate = PolicyToolBox::new(
+            CountingToolBox::new(),
+            Policy::default(),
+            ApprovalMode::Write,
+            Arc::new(FixedApprover(false)),
+        );
+        let out = gate
+            .call(
+                "edit",
+                &serde_json::json!({ "path": "src/lib.rs" }),
+                &CancelToken::never(),
+            )
+            .expect("Write mode auto-allows Edit-tier with no prompt");
+        assert_eq!(out["ran"], "edit");
+        assert_eq!(gate.inner.calls(), 1);
+
+        // Exec-tier still asks; the denying approver blocks it and the inner box
+        // never runs.
+        let gate = PolicyToolBox::new(
+            CountingToolBox::new(),
+            Policy::default(),
+            ApprovalMode::Write,
+            Arc::new(FixedApprover(false)),
+        );
+        let err = gate
+            .call(
+                "run_command",
+                &serde_json::json!({ "command": "ls" }),
+                &CancelToken::never(),
+            )
+            .expect_err("Write mode must still gate Exec-tier");
+        assert!(matches!(err, AgentError::Tool(_)));
+        assert!(err.to_string().contains("permission denied"));
+        assert_eq!(gate.inner.calls(), 0);
+    }
+
+    #[test]
     fn deny_rule_blocks_even_with_approver() {
         // A `deny` rule never consults the approver, even one that would allow.
         let policy = Policy::from_file(
