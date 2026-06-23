@@ -349,6 +349,49 @@ fn detect_changes_is_listed_and_dispatches() {
 }
 
 #[test]
+fn trace_path_is_listed_and_dispatches() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn top() { middle(); }\npub fn middle() { leaf(); }\npub fn leaf() {}\n",
+    )
+    .expect("lib");
+    let provider = FsCatalogProvider::new(
+        RootPolicy::new(vec![dir.path().to_path_buf()]).expect("policy"),
+        ScanOptions::default(),
+    );
+
+    let specs = tool_specs();
+    let tool_names: Vec<_> = specs
+        .as_array()
+        .expect("tool specs array")
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(tool_names.contains(&"trace_path"));
+
+    let response = handle_tool_call(
+        &provider,
+        &json!({ "name": "trace_path", "arguments": { "from": "top", "to": "leaf" } }),
+    )
+    .expect("trace_path dispatch");
+
+    assert_eq!(response["structuredContent"]["found"], true);
+    let path: Vec<_> = response["structuredContent"]["path"]
+        .as_array()
+        .expect("path")
+        .iter()
+        .filter_map(|step| step["symbol"].as_str())
+        .collect();
+    assert_eq!(path, vec!["top", "middle", "leaf"]);
+    assert!(
+        response["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("trace_path"))
+    );
+}
+
+#[test]
 fn read_symbol_is_listed_and_dispatches_body_or_candidates() {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::write(

@@ -63,6 +63,9 @@ pub use navigate::{
     goto_definition, goto_definition_cancellable, read_symbol, read_symbol_cancellable,
     symbol_search, symbol_search_cancellable,
 };
+pub use navigate::{
+    PathStep, TracePathRequest, TracePathResponse, trace_path, trace_path_cancellable,
+};
 pub use port::CatalogProvider;
 pub use read::read_file;
 pub use repomap::{RepoMapRequest, get_repo_map, get_repo_map_cancellable};

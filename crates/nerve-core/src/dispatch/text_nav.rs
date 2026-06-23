@@ -83,6 +83,33 @@ impl ToolText for crate::DetectChangesResponse {
     }
 }
 
+impl ToolText for crate::TracePathResponse {
+    fn tool_text(&self) -> String {
+        if !self.found {
+            return format!(
+                "trace_path: no call chain from {} to {} within depth {}\n",
+                self.from, self.to, self.max_depth
+            );
+        }
+        let mut out = format!(
+            "trace_path: {} -> {} ({} hops)\n",
+            self.from,
+            self.to,
+            self.path.len().saturating_sub(1)
+        );
+        for (index, step) in self.path.iter().enumerate() {
+            out.push_str(&format!(
+                "  {}. {}:{} {}\n",
+                index + 1,
+                step.display_path,
+                step.line,
+                step.symbol
+            ));
+        }
+        out
+    }
+}
+
 impl ToolText for crate::navigate::ImpactAnalysisResponse {
     fn tool_text(&self) -> String {
         let mut out = format!(

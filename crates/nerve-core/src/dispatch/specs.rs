@@ -442,6 +442,21 @@ pub fn tool_specs() -> Value {
             }
         }),
         json!({
+            "name": "trace_path",
+            "description": "Find the shortest call chain from one symbol to another: breadth-first over name-resolved outgoing callees (the same best-effort matching as call_hierarchy; not a scope/type resolver). Returns the chain from -> ... -> to, or found=false if unreachable within max_depth.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["from", "to"],
+                "properties": {
+                    "workspace": workspace_schema(),
+                    "from": { "type": "string", "description": "Exact source symbol name (case-sensitive)." },
+                    "to": { "type": "string", "description": "Exact target symbol name (case-sensitive)." },
+                    "max_depth": { "type": "integer", "default": 8, "description": "Maximum call-chain length to search." },
+                    "language": { "type": "string", "description": "Optional display-language filter applied at every hop." }
+                }
+            }
+        }),
+        json!({
             "name": "find_referencing_symbols",
             "description": "Find enclosing symbols that reference an exact target symbol, with the exact reference line and a small source context. This is a compact symbolic-read view between raw find_references and full analyze_impact. Deterministic tree-sitter name matching; not a scope/type resolver.",
             "inputSchema": {

@@ -417,6 +417,7 @@ mod references;
 mod referencing_symbols;
 mod source;
 mod symbol_search;
+mod trace_path;
 
 pub use call_hierarchy::{call_hierarchy, call_hierarchy_cancellable};
 pub use definition::{goto_definition, goto_definition_cancellable};
@@ -425,6 +426,9 @@ pub use read_symbol::{read_symbol, read_symbol_cancellable};
 pub use references::{find_references, find_references_cancellable};
 pub use referencing_symbols::{find_referencing_symbols, find_referencing_symbols_cancellable};
 pub use symbol_search::{symbol_search, symbol_search_cancellable};
+pub use trace_path::{
+    PathStep, TracePathRequest, TracePathResponse, trace_path, trace_path_cancellable,
+};
 
 use source::*;
 
