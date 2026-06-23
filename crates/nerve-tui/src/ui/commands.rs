@@ -1,7 +1,7 @@
 //! Pure slash-command helpers: parsing, the autocomplete palette, approval-mode
 //! spellings, and model-list formatting.
 
-use nerve_runtime::ApprovalMode;
+use nerve_runtime::{ApprovalMode, DelegateRole};
 use serde_json::Value;
 
 /// A parsed `/command rest...` line.
@@ -68,16 +68,21 @@ pub fn provider_models_tool(provider: &str) -> Option<&'static str> {
 /// catalog names (DA-1/DA-2). Listed in the hint/help and rejected otherwise.
 pub const DELEGATE_AGENTS: &[&str] = &["codex", "claude", "gemini"];
 
-/// A parsed `/delegate <agent> [task...]` argument string: the validated agent
-/// name plus the rest of the line as the task (empty when none was supplied).
+/// A parsed `/delegate [scout] <agent> [task...]` argument string: the role, the
+/// validated agent name, plus the rest of the line as the task (empty when none
+/// was supplied).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegateArgs {
+    pub role: DelegateRole,
     pub agent: String,
     pub task: String,
 }
 
-/// Parse the `rest` of a `/delegate` command into an agent + task. The first
-/// whitespace-delimited token is the agent (must be one of [`DELEGATE_AGENTS`]);
+/// Parse the `rest` of a `/delegate` command into a role + agent + task. An
+/// optional leading `scout` keyword selects the read-only repository-explorer role
+/// ([`DelegateRole::Scout`]); since `scout` is never a valid agent name the
+/// detection is unambiguous (`/delegate scout <agent> <query>`). Otherwise the
+/// first whitespace-delimited token is the agent (one of [`DELEGATE_AGENTS`]) and
 /// the remainder is the task. `Err` carries a user-facing hint: a missing agent
 /// or an unknown one.
 ///
@@ -86,13 +91,23 @@ pub struct DelegateArgs {
 /// delegate agent.
 pub fn parse_delegate(rest: &str) -> Result<DelegateArgs, String> {
     let rest = rest.trim();
+    // Peel an optional leading `scout` role keyword off the front.
+    let (role, rest) = match rest.split_once(char::is_whitespace) {
+        Some((first, tail)) if first.eq_ignore_ascii_case("scout") => {
+            (DelegateRole::Scout, tail.trim())
+        }
+        // Bare `/delegate scout` (no agent): keep the role so the usage hint names
+        // the missing agent rather than rejecting "scout" as an unknown agent.
+        _ if rest.eq_ignore_ascii_case("scout") => (DelegateRole::Scout, ""),
+        _ => (DelegateRole::Standard, rest),
+    };
     let (agent, task) = match rest.split_once(char::is_whitespace) {
         Some((agent, task)) => (agent, task.trim()),
         None => (rest, ""),
     };
     if agent.is_empty() {
         return Err(format!(
-            "usage: /delegate <agent> [task] — agent ∈ {}",
+            "usage: /delegate [scout] <agent> [task] — agent ∈ {}",
             DELEGATE_AGENTS.join("|")
         ));
     }
@@ -104,6 +119,7 @@ pub fn parse_delegate(rest: &str) -> Result<DelegateArgs, String> {
         ));
     }
     Ok(DelegateArgs {
+        role,
         agent,
         task: task.to_string(),
     })
@@ -184,7 +200,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "delegate",
-        hint: "start a steerable agent (codex|claude|gemini)",
+        hint: "steerable agent; prefix `scout` for read-only explore",
     },
     CommandSpec {
         name: "done",
@@ -247,6 +263,7 @@ pub const HELP_TEXT: &str = "commands:\n  \
 /models                    list the current provider's models\n  \
 /mode [always-ask|write|yolo]  set the approval mode (bare = show current)\n  \
 /delegate <agent> [task]   start a steerable delegate session (codex|claude|gemini)\n  \
+/delegate scout <agent> <query>  read-only repo explorer → path:line citations\n  \
 /done                      end the active delegate session (alias: /close)\n  \
 /flow <strategy> <agents> <task>  run a fleet (parallel|vote|pipeline) · /flow --file <p.json>\n  \
 /flow close                cancel the running flow\n  \
@@ -341,6 +358,7 @@ mod tests {
         assert_eq!(
             parse_delegate("claude fix the bug"),
             Ok(DelegateArgs {
+                role: DelegateRole::Standard,
                 agent: "claude".into(),
                 task: "fix the bug".into(),
             })
@@ -349,6 +367,7 @@ mod tests {
         assert_eq!(
             parse_delegate("codex"),
             Ok(DelegateArgs {
+                role: DelegateRole::Standard,
                 agent: "codex".into(),
                 task: String::new(),
             })
@@ -358,6 +377,32 @@ mod tests {
             parse_delegate("GEMINI refactor").map(|d| d.agent),
             Ok("gemini".into())
         );
+    }
+
+    #[test]
+    fn parse_delegate_recognizes_the_scout_role_keyword() {
+        // A leading `scout` selects the read-only explorer role; the next token is
+        // the agent and the remainder is the query.
+        assert_eq!(
+            parse_delegate("scout claude where is auth handled?"),
+            Ok(DelegateArgs {
+                role: DelegateRole::Scout,
+                agent: "claude".into(),
+                task: "where is auth handled?".into(),
+            })
+        );
+        // Case-insensitive, and the agent is still validated.
+        assert_eq!(
+            parse_delegate("SCOUT gemini trace the parser").map(|d| d.role),
+            Ok(DelegateRole::Scout)
+        );
+        // `scout` only counts as the role at the FRONT — a task may contain it.
+        let args = parse_delegate("claude scout the module manually").unwrap();
+        assert_eq!(args.role, DelegateRole::Standard);
+        assert_eq!(args.task, "scout the module manually");
+        // Bare `/delegate scout` (no agent) is a usage error, not "unknown agent scout".
+        let err = parse_delegate("scout").expect_err("missing agent");
+        assert!(err.contains("usage:"), "{err}");
     }
 
     #[test]

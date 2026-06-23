@@ -28,26 +28,40 @@ impl Shell {
             }
         };
         if args.task.is_empty() {
-            self.state.hint = format!(
-                "usage: /delegate {} <task> — describe what to do",
-                args.agent
-            );
+            self.state.hint = match args.role {
+                DelegateRole::Scout => {
+                    format!(
+                        "usage: /delegate scout {} <query> — what to find",
+                        args.agent
+                    )
+                }
+                DelegateRole::Standard => {
+                    format!(
+                        "usage: /delegate {} <task> — describe what to do",
+                        args.agent
+                    )
+                }
+            };
             return;
         }
-        self.start_delegate(args.agent, args.task).await;
+        self.start_delegate(args.agent, args.task, args.role).await;
     }
 
     /// Start the `delegate.start` job and, on success, record its `job_id` as the
     /// active delegate session. A daemon failure (e.g. delegation disabled when
     /// `--allow-delegate` was not passed) surfaces as a red notice rather than a
     /// crash.
-    async fn start_delegate(&mut self, agent: String, task: String) {
-        let command = delegate_start_command(agent.clone(), task);
+    async fn start_delegate(&mut self, agent: String, task: String, role: DelegateRole) {
+        let command = delegate_start_command(agent.clone(), task, role);
         match self.client.start_job(command, None).await {
             Ok(job) => {
                 let session_id = job.job_id;
+                let label = match role {
+                    DelegateRole::Scout => format!("{agent} (scout)"),
+                    DelegateRole::Standard => agent.clone(),
+                };
                 self.state.note(format!(
-                    "started delegate session {agent} ({session_id}) — steer with messages, /done to end"
+                    "started delegate session {label} ({session_id}) — steer with messages, /done to end"
                 ));
                 self.state.delegate_session = Some(DelegateSession { session_id, agent });
             }
@@ -70,18 +84,18 @@ impl Shell {
     }
 }
 
-/// Build the `delegate.start` command for a `/delegate <agent> <task>` (DA-5d).
-/// Pure so the command shape is testable without a live client; autonomy defaults
-/// to the most-restricted [`DelegateAutonomy::ReadOnly`].
+/// Build the `delegate.start` command for a `/delegate [scout] <agent> <task>`
+/// (DA-5d/DA-7). Pure so the command shape is testable without a live client;
+/// autonomy defaults to the most-restricted [`DelegateAutonomy::ReadOnly`] (and a
+/// `scout` role forces it read-only host-side regardless).
 #[must_use]
-fn delegate_start_command(agent: String, task: String) -> RuntimeCommand {
+fn delegate_start_command(agent: String, task: String, role: DelegateRole) -> RuntimeCommand {
     RuntimeCommand::DelegateStart {
         agent,
         task,
         cwd: None,
         autonomy: DelegateAutonomy::ReadOnly,
-        // The TUI `/delegate` command starts a standard (passthrough) delegate.
-        role: DelegateRole::Standard,
+        role,
         model: None,
         // The TUI does not expose a per-call codex MCP allowlist; the daemon falls
         // back to the persisted `[delegate.codex] mcp_enable` config (DA-6).
@@ -154,7 +168,11 @@ mod tests {
 
     #[test]
     fn delegate_start_command_defaults_to_read_only() {
-        let command = delegate_start_command("claude".into(), "fix the bug".into());
+        let command = delegate_start_command(
+            "claude".into(),
+            "fix the bug".into(),
+            DelegateRole::Standard,
+        );
         match command {
             RuntimeCommand::DelegateStart {
                 agent,
@@ -172,6 +190,21 @@ mod tests {
                 assert_eq!(role, DelegateRole::Standard);
                 assert_eq!(model, None);
                 assert_eq!(mcp_enable, None);
+            }
+            other => panic!("expected DelegateStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegate_start_command_carries_the_scout_role() {
+        let command = delegate_start_command(
+            "claude".into(),
+            "where is auth handled?".into(),
+            DelegateRole::Scout,
+        );
+        match command {
+            RuntimeCommand::DelegateStart { role, .. } => {
+                assert_eq!(role, DelegateRole::Scout);
             }
             other => panic!("expected DelegateStart, got {other:?}"),
         }
@@ -279,11 +312,34 @@ mod tests {
         let parsed = parse_command("/delegate claude fix the bug").expect("slash command");
         assert_eq!(parsed.cmd, "delegate");
         let args = parse_delegate(&parsed.rest).expect("delegate args");
-        let command = delegate_start_command(args.agent, args.task);
+        let command = delegate_start_command(args.agent, args.task, args.role);
         match command {
-            RuntimeCommand::DelegateStart { agent, task, .. } => {
+            RuntimeCommand::DelegateStart {
+                agent, task, role, ..
+            } => {
                 assert_eq!(agent, "claude");
                 assert_eq!(task, "fix the bug");
+                assert_eq!(role, DelegateRole::Standard);
+            }
+            other => panic!("expected DelegateStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegate_scout_command_carries_scout_role_end_to_end() {
+        // `/delegate scout claude <query>` parses to the Scout role and the command
+        // builder carries it through to delegate.start.
+        let parsed = parse_command("/delegate scout claude where is auth").expect("slash command");
+        let args = parse_delegate(&parsed.rest).expect("delegate args");
+        assert_eq!(args.role, DelegateRole::Scout);
+        let command = delegate_start_command(args.agent, args.task, args.role);
+        match command {
+            RuntimeCommand::DelegateStart {
+                agent, task, role, ..
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(task, "where is auth");
+                assert_eq!(role, DelegateRole::Scout);
             }
             other => panic!("expected DelegateStart, got {other:?}"),
         }
