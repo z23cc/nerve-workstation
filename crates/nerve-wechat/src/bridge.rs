@@ -20,6 +20,11 @@ use crate::types::WeixinMessage;
 use std::collections::{BTreeSet, HashMap};
 use thiserror::Error;
 
+/// Reply sent when an allowed owner sends a media-only message (image/file/voice):
+/// media relay is not implemented yet, so acknowledge rather than silently drop.
+const UNSUPPORTED_MEDIA_REPLY: &str =
+    "I can only act on text messages right now — please describe the task in text.";
+
 /// A bridge failure.
 #[derive(Debug, Error)]
 pub enum BridgeError {
@@ -153,6 +158,10 @@ impl<G: WeixinGateway, N: NerveControl> Bridge<G, N> {
             return Ok(false);
         }
         let Some(text) = msg.text() else {
+            // Acknowledge an allowed owner's media-only message instead of silently
+            // dropping it (text-only for now).
+            self.gateway
+                .send_text(&msg.from_user_id, &msg.session_id, UNSUPPORTED_MEDIA_REPLY)?;
             return Ok(false);
         };
         let key = chat_key(&self.account_id, msg);
@@ -333,15 +342,21 @@ mod tests {
     }
 
     #[test]
-    fn media_only_message_is_skipped() {
+    fn media_only_message_from_owner_is_acknowledged_not_run() {
         let mut media = msg("m1", "u_owner", "");
         media.item_list = vec![MessageItem {
             item_type: crate::types::item_type::IMAGE,
             text_item: None,
         }];
         let mut b = bridge(&["u_owner"], vec![updates("c1", vec![media])]);
+        // Not handled (the agent never runs)...
         assert_eq!(b.poll_once().expect("poll"), 0);
         assert!(b.nerve.calls.borrow().is_empty());
+        // ...but the owner gets a friendly text-only acknowledgement (not silently dropped).
+        let sent = b.gateway.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "u_owner");
+        assert!(sent[0].2.contains("text messages"));
     }
 
     #[test]
