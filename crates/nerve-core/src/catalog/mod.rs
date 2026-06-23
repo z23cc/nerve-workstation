@@ -10,8 +10,6 @@ use crate::codemap::path_language_name;
 use crate::port::FileSignature;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::security::RootPolicy;
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-use crate::semantic::SemanticIndex;
 use crate::{
     cancel::CancelToken,
     codemap::symbols_for_path,
@@ -69,8 +67,6 @@ pub struct FsCatalogProvider {
     options: ScanOptions,
     cache: Arc<ProviderCache>,
     clock: Arc<Clock>,
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    semantic_index: Option<Arc<SemanticIndex>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -131,39 +127,6 @@ impl FsCatalogProvider {
             options,
             cache: Arc::new(ProviderCache::default()),
             clock: Arc::new(clock),
-            #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-            semantic_index: None,
-        }
-    }
-
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    #[must_use]
-    pub fn with_semantic_index(
-        policy: RootPolicy,
-        options: ScanOptions,
-        semantic_index: Option<Arc<SemanticIndex>>,
-    ) -> Self {
-        Self::with_semantic_index_and_clock(policy, options, semantic_index, Instant::now)
-    }
-
-    /// Like [`Self::with_semantic_index`] but with an injectable monotonic clock,
-    /// matching [`Self::with_clock`]. Routes construction through `with_clock` so the
-    /// cache-TTL clock stays injectable on the semantic path instead of hard-coding
-    /// `Instant::now`.
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    #[must_use]
-    pub fn with_semantic_index_and_clock<F>(
-        policy: RootPolicy,
-        options: ScanOptions,
-        semantic_index: Option<Arc<SemanticIndex>>,
-        clock: F,
-    ) -> Self
-    where
-        F: Fn() -> Instant + Send + Sync + 'static,
-    {
-        Self {
-            semantic_index,
-            ..Self::with_clock(policy, options, clock)
         }
     }
 
@@ -210,10 +173,6 @@ impl FsCatalogProvider {
         crate::sync::write_recover(&self.cache.codemap).clear();
         if let Some(warming) = crate::sync::lock_recover(&self.cache.codemap_warming).take() {
             warming.cancel.cancel();
-        }
-        #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        if let Some(index) = &self.semantic_index {
-            index.invalidate();
         }
     }
 
@@ -486,11 +445,6 @@ impl CatalogProvider for FsCatalogProvider {
     ) -> Result<CodeSymbolsResult, NerveError> {
         let allowed = self.policy.resolve_allowed(path)?;
         Self::code_symbols_for_allowed(&self.cache, &allowed, rel_path, None)
-    }
-
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    fn semantic_index(&self) -> Option<Arc<SemanticIndex>> {
-        self.semantic_index.clone()
     }
 
     fn display_path(&self, path: &Path) -> String {

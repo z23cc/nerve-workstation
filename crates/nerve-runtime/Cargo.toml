@@ -8,7 +8,6 @@ repository.workspace = true
 
 [features]
 default = []
-semantic = ["nerve-core/semantic"]
 
 [dependencies]
 anyhow.workspace = true

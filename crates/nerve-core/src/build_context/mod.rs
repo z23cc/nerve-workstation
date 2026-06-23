@@ -6,8 +6,6 @@ use crate::{
     WorkspaceContextRequest, WorkspaceContextResponse, get_repo_map_cancellable,
     search_snapshot_cancellable, workspace_context_for_selection,
 };
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-use crate::{SemanticSearchMode, SemanticSearchRequest};
 use crate::{repomap::RepoMapResponse, selection::SelectionKey, workspace_context::RenderCache};
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +27,6 @@ const DEFAULT_MAX_FILES: usize = 20;
 const SEARCH_WEIGHT: f64 = 0.55;
 const REPOMAP_WEIGHT: f64 = 0.35;
 const PATH_WEIGHT: f64 = 0.10;
-const SEARCH_SEMANTIC_WEIGHT: f64 = 0.30;
-const REPOMAP_SEMANTIC_WEIGHT: f64 = 0.25;
-const SEMANTIC_WEIGHT: f64 = 0.35;
 const SLICE_RADIUS: usize = 2;
 
 /// Request for the `build_context` primitive and MCP tool.
@@ -135,8 +130,6 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
         cancel,
     )?;
     cancel.check_cancelled()?;
-    let semantic_scores =
-        semantic_candidate_scores(provider, snapshot, request, max_files, cancel)?;
 
     let ranked = rank_candidates(
         provider,
@@ -144,7 +137,6 @@ pub fn build_context_cancellable<P: CatalogProvider + Sync>(
         request.query.as_str(),
         &search,
         &repo_map,
-        &semantic_scores,
     );
     // One render cache spans the greedy allocation and reference expansion:
     // each (file, mode) is rendered once instead of re-rendered per trial.
@@ -219,7 +211,6 @@ fn rank_candidates<'a, P: CatalogProvider>(
     query: &str,
     search: &crate::SearchResponse,
     repo_map: &RepoMapResponse,
-    semantic_scores: &BTreeMap<String, f64>,
 ) -> Vec<Candidate<'a>> {
     let entries_by_path = snapshot
         .entries
@@ -237,9 +228,6 @@ fn rank_candidates<'a, P: CatalogProvider>(
     for file in &repo_map.files {
         builders.entry(file.path.clone()).or_default().repo_score =
             file.score.parse::<f64>().unwrap_or(0.0);
-    }
-    for (path, score) in semantic_scores {
-        builders.entry(path.clone()).or_default().semantic_score = score.max(0.0);
     }
     for entry in &snapshot.entries {
         let path_score = path_relevance(&entry.rel_path, query);
@@ -259,11 +247,6 @@ fn rank_candidates<'a, P: CatalogProvider>(
         .values()
         .map(|builder| builder.repo_score)
         .fold(0.0, f64::max);
-    let max_semantic = builders
-        .values()
-        .map(|builder| builder.semantic_score)
-        .fold(0.0, f64::max);
-    let has_semantic = !semantic_scores.is_empty();
 
     let mut candidates = builders
         .into_iter()
@@ -272,21 +255,12 @@ fn rank_candidates<'a, P: CatalogProvider>(
             let search_score = normalize(builder.search_score, max_search);
             let repo_score = normalize(builder.repo_score, max_repo);
             let path_score = builder.path_score;
-            let semantic_score = normalize(builder.semantic_score, max_semantic);
-            let score = fused_score(
-                search_score,
-                repo_score,
-                semantic_score,
-                path_score,
-                has_semantic,
-            );
+            let score = fused_score(search_score, repo_score, path_score);
             let score_breakdown = BuildContextScoreBreakdown::from_normalized(
                 search_score,
                 repo_score,
-                semantic_score,
                 path_score,
                 score,
-                has_semantic,
             );
             (score > 0.0).then(|| Candidate {
                 entry,
@@ -311,7 +285,6 @@ fn rank_candidates<'a, P: CatalogProvider>(
 struct CandidateBuilder {
     search_score: f64,
     repo_score: f64,
-    semantic_score: f64,
     path_score: f64,
     hit_lines: BTreeSet<usize>,
 }
@@ -330,65 +303,8 @@ fn normalize(value: f64, max: f64) -> f64 {
     if max > 0.0 { value / max } else { 0.0 }
 }
 
-fn fused_score(search: f64, repo: f64, semantic: f64, path: f64, has_semantic: bool) -> f64 {
-    if has_semantic {
-        search * SEARCH_SEMANTIC_WEIGHT
-            + repo * REPOMAP_SEMANTIC_WEIGHT
-            + semantic * SEMANTIC_WEIGHT
-            + path * PATH_WEIGHT
-    } else {
-        search.mul_add(SEARCH_WEIGHT, repo * REPOMAP_WEIGHT) + path * PATH_WEIGHT
-    }
-}
-
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-fn semantic_candidate_scores<P: CatalogProvider + Sync>(
-    provider: &P,
-    snapshot: &crate::CatalogSnapshot,
-    request: &BuildContextRequest,
-    max_files: usize,
-    cancel: &CancelToken,
-) -> Result<BTreeMap<String, f64>, NerveError> {
-    let Some(index) = provider.semantic_index() else {
-        return Ok(BTreeMap::new());
-    };
-    let request = SemanticSearchRequest {
-        query: request.query.clone(),
-        mode: SemanticSearchMode::Hybrid,
-        max_results: max_files.saturating_mul(4).max(1),
-        rerank: false,
-    };
-    match index.search_if_ready(provider, snapshot, &request, cancel) {
-        Ok(Some(response)) => Ok(semantic_scores_by_path(response)),
-        Ok(None) => Ok(BTreeMap::new()),
-        Err(NerveError::Cancelled) => Err(NerveError::Cancelled),
-        Err(_) => Ok(BTreeMap::new()),
-    }
-}
-
-#[cfg(not(all(feature = "semantic", not(target_arch = "wasm32"))))]
-fn semantic_candidate_scores<P: CatalogProvider + Sync>(
-    _provider: &P,
-    _snapshot: &crate::CatalogSnapshot,
-    _request: &BuildContextRequest,
-    _max_files: usize,
-    _cancel: &CancelToken,
-) -> Result<BTreeMap<String, f64>, NerveError> {
-    Ok(BTreeMap::new())
-}
-
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-fn semantic_scores_by_path(response: crate::SemanticSearchResponse) -> BTreeMap<String, f64> {
-    let mut scores = BTreeMap::<String, f64>::new();
-    for result in response.results {
-        if result.score.is_finite() {
-            scores
-                .entry(result.path)
-                .and_modify(|score| *score = score.max(result.score))
-                .or_insert(result.score);
-        }
-    }
-    scores
+fn fused_score(search: f64, repo: f64, path: f64) -> f64 {
+    search.mul_add(SEARCH_WEIGHT, repo * REPOMAP_WEIGHT) + path * PATH_WEIGHT
 }
 
 fn path_relevance(path: &str, query: &str) -> f64 {

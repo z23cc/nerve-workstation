@@ -8,46 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-#[derive(Debug, Deserialize)]
-pub(super) struct SemanticSearchArgs {
-    pub(super) query: String,
-    #[serde(default)]
-    pub(super) mode: crate::SemanticSearchMode,
-    #[serde(
-        default = "default_semantic_max_results",
-        deserialize_with = "lenient_usize"
-    )]
-    pub(super) max_results: usize,
-    #[serde(default = "default_true")]
-    pub(super) rerank: bool,
-}
-
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-pub(super) fn default_semantic_max_results() -> usize {
-    20
-}
-
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
 pub(super) fn default_true() -> bool {
     true
-}
-
-#[cfg(not(all(feature = "semantic", not(target_arch = "wasm32"))))]
-pub(super) fn default_true() -> bool {
-    true
-}
-
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-impl SemanticSearchArgs {
-    pub(super) fn into_request(self) -> crate::SemanticSearchRequest {
-        crate::SemanticSearchRequest {
-            query: self.query,
-            mode: self.mode,
-            max_results: self.max_results,
-            rerank: self.rerank,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

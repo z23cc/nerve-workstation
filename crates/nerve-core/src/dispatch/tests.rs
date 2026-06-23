@@ -1,7 +1,5 @@
 use super::*;
 use crate::{FsCatalogProvider, RootPolicy, ScanOptions, WorkspaceRegistry};
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-use crate::{HostFile, MemoryCatalogProvider, semantic::SemanticIndex};
 use std::{fs, sync::Arc};
 
 fn provider_for(path: &std::path::Path) -> FsCatalogProvider {
@@ -48,7 +46,5 @@ fn selection_response(provider: &FsCatalogProvider) -> Value {
 mod args_text;
 mod editing;
 mod editing_selection;
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-mod semantic;
 mod tool_contracts;
 mod workspace;

@@ -69,43 +69,6 @@ impl ToolText for crate::BuildContextResponse {
     }
 }
 
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-impl ToolText for crate::SemanticSearchResponse {
-    fn tool_text(&self) -> String {
-        let mut out = String::new();
-        if self.results.is_empty() {
-            out.push_str("(no semantic matches)\n");
-        } else {
-            out.push_str("semantic matches:\n");
-            for result in &self.results {
-                let symbol = result
-                    .symbol
-                    .as_deref()
-                    .map(|symbol| format!(" {symbol}"))
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "  {}:{}-{}{} (score {:.4})\n",
-                    result.display_path, result.line_start, result.line_end, symbol, result.score
-                ));
-            }
-        }
-        out.push_str(&format!(
-            "totals: {} chunks, {} dense, {} bm25, {} reranked\n",
-            self.totals.chunks,
-            self.totals.dense_candidates,
-            self.totals.bm25_candidates,
-            self.totals.reranked
-        ));
-        if !self.diagnostics.is_empty() {
-            out.push_str(&format!(
-                "({} diagnostics in structuredContent)\n",
-                self.diagnostics.len()
-            ));
-        }
-        out
-    }
-}
-
 impl ToolText for crate::SearchResponse {
     fn tool_text(&self) -> String {
         let mut out = String::new();

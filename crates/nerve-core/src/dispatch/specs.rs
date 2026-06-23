@@ -493,22 +493,6 @@ pub fn tool_specs() -> Value {
             }
         }),
     ];
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    tools.push(json!({
-        "name": "semantic_search",
-        "description": "Intent-based code retrieval over a persistent semantic index. Cold dense builds run in the background; queries return BM25-only results with a warming diagnostic until dense search is ready.",
-        "inputSchema": {
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "workspace": workspace_schema(),
-                "query": { "type": "string", "description": "Natural-language or code intent query." },
-                "mode": { "type": "string", "enum": ["hybrid", "semantic"], "default": "hybrid", "description": "hybrid: dense ANN + chunk BM25; semantic: dense ANN only." },
-                "max_results": { "type": "integer", "default": 20 },
-                "rerank": { "type": "boolean", "default": true }
-            }
-        }
-    }));
     #[cfg(not(target_arch = "wasm32"))]
     {
         tools.push(json!({

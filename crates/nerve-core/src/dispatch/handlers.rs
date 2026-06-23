@@ -17,8 +17,6 @@ where
         "workspace_context" => handle_workspace_context(provider, arguments, cancel),
         "build_context" => handle_build_context(provider, arguments, cancel),
         "file_search" => handle_file_search(provider, arguments, cancel),
-        #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        "semantic_search" => handle_semantic_search(provider, arguments, cancel),
         "read_file" => handle_read_file(provider, arguments, cancel),
         "edit" => handle_edit(provider, arguments, cancel),
         "replace_symbol_body" => handle_replace_symbol_body(provider, arguments, cancel),
@@ -124,25 +122,6 @@ where
     let mut response = search_snapshot_cancellable(provider, &snapshot, &request, cancel)?;
     diagnostics.append(&mut response.diagnostics);
     response.diagnostics = diagnostics;
-    tool_response_text(&response)
-}
-
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-fn handle_semantic_search<P>(
-    provider: &P,
-    arguments: Value,
-    cancel: &CancelToken,
-) -> Result<Value, DispatchError>
-where
-    P: DispatchProvider,
-{
-    let args: SemanticSearchArgs = serde_json::from_value(arguments)?;
-    let request = args.into_request();
-    let snapshot = provider.snapshot_arc_cancellable(cancel)?;
-    let index = provider
-        .semantic_index()
-        .ok_or(NerveError::SemanticUnavailable)?;
-    let response = index.search_background((*provider).clone(), snapshot, &request, cancel)?;
     tool_response_text(&response)
 }
 

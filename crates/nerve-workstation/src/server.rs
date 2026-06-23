@@ -134,51 +134,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "semantic")]
-    #[test]
-    fn semantic_flags_flow_to_registry_and_named_workspaces() {
-        let named_dir = tempfile::tempdir().expect("named tempdir");
-        fs::write(
-            named_dir.path().join("config.rs"),
-            "pub fn validate_config() {}\n",
-        )
-        .expect("named write");
-        let mut args = args_with(
-            Vec::new(),
-            vec![WorkspaceArg {
-                name: "named".to_string(),
-                path: named_dir.path().to_path_buf(),
-            }],
-        );
-        args.no_semantic = false;
-        args.semantic_embedding_model = Some("mock".to_string());
-        args.semantic_reranker_model = Some("mock".to_string());
-
-        let runtime = tools::runtime(registry(&args).expect("registry"));
-        let mut initialized = true;
-        let response = handle_message(
-            &runtime,
-            &mut initialized,
-            RpcMessage {
-                id: Some(json!(1)),
-                method: "tools/call".to_string(),
-                params: json!({
-                    "name": "semantic_search",
-                    "arguments": {
-                        "workspace": "named",
-                        "query": "config validation",
-                        "max_results": 1
-                    }
-                }),
-            },
-        )
-        .expect("response");
-        assert_eq!(
-            response["result"]["structuredContent"]["results"][0]["path"],
-            Value::String("config.rs".to_string())
-        );
-    }
-
     #[test]
     fn manage_workspaces_add_remove_affects_later_routing() {
         let default_dir = tempfile::tempdir().expect("default tempdir");

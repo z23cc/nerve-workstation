@@ -1,7 +1,5 @@
 //! Workspace routing abstractions for multi-project hosts.
 
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-use crate::semantic::SemanticRuntimeConfig;
 use crate::{CatalogProvider, NerveError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{FsCatalogProvider, RootPolicy, ScanOptions, models::RootRef};
@@ -105,8 +103,6 @@ where
     workspaces: WorkspaceStore<P>,
     #[cfg(not(target_arch = "wasm32"))]
     scan_options: ScanOptions,
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    semantic: SemanticRuntimeConfig,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -133,8 +129,6 @@ where
             workspaces: new_workspace_store(),
             #[cfg(not(target_arch = "wasm32"))]
             scan_options: ScanOptions::default(),
-            #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-            semantic: SemanticRuntimeConfig::disabled(),
         }
     }
 
@@ -279,21 +273,6 @@ impl WorkspaceRegistry<FsCatalogProvider> {
         Self {
             workspaces: new_workspace_store(),
             scan_options,
-            #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-            semantic: SemanticRuntimeConfig::disabled(),
-        }
-    }
-
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    #[must_use]
-    pub fn with_scan_options_and_semantic(
-        scan_options: ScanOptions,
-        semantic: SemanticRuntimeConfig,
-    ) -> Self {
-        Self {
-            workspaces: new_workspace_store(),
-            scan_options,
-            semantic,
         }
     }
 
@@ -303,16 +282,6 @@ impl WorkspaceRegistry<FsCatalogProvider> {
         roots: Vec<PathBuf>,
     ) -> Result<Option<Arc<FsCatalogProvider>>, NerveError> {
         let policy = RootPolicy::new(roots)?;
-        #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        let provider = {
-            let semantic_index = self.semantic.build_index_for_roots(policy.roots())?;
-            Arc::new(FsCatalogProvider::with_semantic_index(
-                policy,
-                self.scan_options.clone(),
-                semantic_index,
-            ))
-        };
-        #[cfg(not(all(feature = "semantic", not(target_arch = "wasm32"))))]
         let provider = Arc::new(FsCatalogProvider::new(policy, self.scan_options.clone()));
         Ok(self.insert(name, provider))
     }

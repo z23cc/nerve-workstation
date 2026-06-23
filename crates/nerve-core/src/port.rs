@@ -116,11 +116,6 @@ pub trait CatalogProvider {
         Ok(symbols_for_path(&source, rel_path).map(|maybe| maybe.map(Arc::new)))
     }
 
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    fn semantic_index(&self) -> Option<Arc<crate::semantic::SemanticIndex>> {
-        None
-    }
-
     fn display_path(&self, path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
     }

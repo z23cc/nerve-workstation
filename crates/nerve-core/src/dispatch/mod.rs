@@ -48,14 +48,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-pub trait DispatchProvider: CatalogProvider + Clone + Send + Sync + 'static {}
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-impl<T> DispatchProvider for T where T: CatalogProvider + Clone + Send + Sync + 'static {}
-
-#[cfg(not(all(feature = "semantic", not(target_arch = "wasm32"))))]
 pub trait DispatchProvider: CatalogProvider + Sync {}
-#[cfg(not(all(feature = "semantic", not(target_arch = "wasm32"))))]
 impl<T> DispatchProvider for T where T: CatalogProvider + Sync {}
 
 /// Dispatch one MCP `tools/call` params object and return the MCP tool response.

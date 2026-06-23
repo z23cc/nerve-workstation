@@ -29,7 +29,7 @@ navigating, and editing a codebase. Plan briefly, call tools to gather context b
 minimal correct changes, and stop when the task is complete. Prefer reading exact lines over \
 guessing, and keep prose concise. For web or X/Twitter search, use the Grok \
 search tools (xai_web_search for the web, xai_x_search for X) rather than other \
-methods; use the codebase search tools (file_search, semantic_search) only for \
+methods; use the codebase search tools (file_search) only for \
 the local repository. On multi-step tasks, keep a working memory via the \
 update_checkpoint tool: the current plan, key decisions, progress, next steps, and \
 pointers (path:line). It stays pinned across the whole task even as older context is \

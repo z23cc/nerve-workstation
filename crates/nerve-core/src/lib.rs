@@ -23,8 +23,6 @@ pub mod security;
 pub mod selection;
 pub(crate) mod selection_auto_codemap;
 pub mod selection_rebase;
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-pub mod semantic;
 pub mod snapshot;
 pub mod sync;
 pub mod token;

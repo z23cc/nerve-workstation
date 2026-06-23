@@ -787,10 +787,6 @@ fn build_context_manifest_explains_included_and_excluded_scores() {
     assert_eq!(included["score"], included["score_breakdown"]["total"]);
     assert_eq!(excluded["score"], excluded["score_breakdown"]["total"]);
     assert_eq!(
-        included["score_breakdown"]["semantic_enabled"],
-        Value::Bool(false)
-    );
-    assert_eq!(
         included["score_breakdown"]["source"],
         Value::String("ranked".to_string())
     );

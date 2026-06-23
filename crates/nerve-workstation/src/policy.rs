@@ -69,7 +69,6 @@ const READONLY_TOOLS: &[&str] = &[
     "find_references",
     "call_hierarchy",
     "ast_search",
-    "semantic_search",
     "build_context",
     "workspace_context",
     "git",
@@ -164,8 +163,8 @@ pub(crate) fn format_preview(tool: &str, args: &Value) -> String {
         "edit" | "write" => string_field(args, "path"),
         "delete" => string_field(args, "path"),
         "move" => move_preview(args),
-        "file_search" | "semantic_search" | "ast_search" | "build_context" | "web_search"
-        | "x_search" | "xai_x_search" | "xai_web_search" => string_field(args, "query"),
+        "file_search" | "ast_search" | "build_context" | "web_search" | "x_search"
+        | "xai_x_search" | "xai_web_search" => string_field(args, "query"),
         "xai_image_generate" | "xai_video_generate" | "openai_image_generate" => {
             string_field(args, "prompt")
         }
@@ -650,7 +649,6 @@ mod tests {
             "read_file",
             "file_search",
             "git",
-            "semantic_search",
             "build_context",
             "workspace_context",
             "get_repo_map",
@@ -842,10 +840,7 @@ mod tests {
             "a.rs -> b.rs"
         );
         assert_eq!(
-            format_preview(
-                "semantic_search",
-                &serde_json::json!({ "query": "auth flow" })
-            ),
+            format_preview("file_search", &serde_json::json!({ "query": "auth flow" })),
             "auth flow"
         );
         assert_eq!(

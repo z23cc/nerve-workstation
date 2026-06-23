@@ -1,5 +1,3 @@
-#[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-use crate::semantic::SemanticIndex;
 use crate::{
     cancel::CancelToken,
     codemap::symbols_for_path,
@@ -53,8 +51,6 @@ struct MemoryProviderState {
     files: RwLock<HashMap<PathBuf, Arc<Vec<u8>>>>,
     codemap: RwLock<HashMap<PathBuf, Arc<CodeSymbolsResult>>>,
     selection: RwLock<Selection>,
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    semantic_index: RwLock<Option<Arc<SemanticIndex>>>,
 }
 
 impl Default for MemoryProviderState {
@@ -69,8 +65,6 @@ impl Default for MemoryProviderState {
             files: RwLock::new(HashMap::new()),
             codemap: RwLock::new(HashMap::new()),
             selection: RwLock::new(Selection::default()),
-            #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-            semantic_index: RwLock::new(None),
         }
     }
 }
@@ -150,17 +144,8 @@ impl MemoryCatalogProvider {
 
         *crate::sync::write_recover(&self.state.files) = map;
         *crate::sync::write_recover(&self.state.codemap) = HashMap::new();
-        #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        if let Some(index) = crate::sync::read_recover(&self.state.semantic_index).as_ref() {
-            index.invalidate();
-        }
         *crate::sync::write_recover(&self.state.snapshot) = Arc::new(snapshot);
         Ok(())
-    }
-
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    pub fn set_semantic_index(&self, index: Option<Arc<SemanticIndex>>) {
-        *crate::sync::write_recover(&self.state.semantic_index) = index;
     }
 
     #[must_use]
@@ -190,10 +175,6 @@ impl CatalogProvider for MemoryCatalogProvider {
 
     fn invalidate(&self) {
         crate::sync::write_recover(&self.state.codemap).clear();
-        #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-        if let Some(index) = crate::sync::read_recover(&self.state.semantic_index).as_ref() {
-            index.invalidate();
-        }
     }
 
     fn selection(&self) -> Selection {
@@ -281,11 +262,6 @@ impl CatalogProvider for MemoryCatalogProvider {
         crate::sync::write_recover(&self.state.codemap)
             .insert(normalized, Arc::new(parsed.clone()));
         Ok(parsed)
-    }
-
-    #[cfg(all(feature = "semantic", not(target_arch = "wasm32")))]
-    fn semantic_index(&self) -> Option<Arc<SemanticIndex>> {
-        crate::sync::read_recover(&self.state.semantic_index).clone()
     }
 
     fn display_path(&self, path: &Path) -> String {

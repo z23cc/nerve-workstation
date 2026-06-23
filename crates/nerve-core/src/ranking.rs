@@ -1,8 +1,7 @@
 //! Shared lexical ranking primitives.
 //!
 //! The file-search ranker intentionally preserves its existing file-level
-//! behavior. Semantic search builds a separate chunk-level corpus model on top of
-//! the tokenization helpers here.
+//! behavior.
 
 use crate::{models::NerveError, models::SearchRequest};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -201,7 +200,7 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0)
 }
 
-/// Path filter inputs shared by file_search and the semantic index.
+/// Path filter inputs shared by file_search entry filters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EntryFilterConfig {
     pub(crate) extensions: Vec<String>,

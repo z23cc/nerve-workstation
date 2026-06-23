@@ -24,14 +24,10 @@ enum CommandKind {
     Doctor,
     /// Inspect configuration.
     Config(ConfigArgs),
-    /// Warm the current project's semantic index cache.
-    Warm(ServeArgs),
     /// Manage xAI OAuth credentials.
     Auth(auth::AuthArgs),
     /// Multi-provider agent loop: subscription login and task run.
     Agent(agent::AgentArgs),
-    /// Manage local caches.
-    Cache(CacheArgs),
     /// Register Nerve as an MCP server in Claude Code and/or Codex.
     Install(commands::install::InstallArgs),
     /// Interactive terminal chat client (forwards to the bundled `nerve-tui`).
@@ -78,18 +74,6 @@ enum ConfigCommand {
     Roots(ServeArgs),
 }
 
-#[derive(Debug, Args)]
-struct CacheArgs {
-    #[command(subcommand)]
-    command: CacheCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum CacheCommand {
-    /// Delete the current project's semantic index cache.
-    Purge(ServeArgs),
-}
-
 pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -101,12 +85,8 @@ pub(crate) fn run() -> Result<()> {
         CommandKind::Config(args) => match args.command {
             ConfigCommand::Roots(serve_args) => commands::config::config_roots(serve_args),
         },
-        CommandKind::Warm(args) => commands::cache::warm(args),
         CommandKind::Auth(args) => auth::run(args),
         CommandKind::Agent(args) => agent::run(args),
-        CommandKind::Cache(args) => match args.command {
-            CacheCommand::Purge(serve_args) => commands::cache::purge(serve_args),
-        },
         CommandKind::Install(args) => commands::install::install(args),
         CommandKind::Chat(args) => commands::chat::chat(args),
         CommandKind::Flow(args) => match args.command {
@@ -120,17 +100,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_parses_warm_cache_and_auth() {
+    fn cli_parses_daemon_mcp_and_auth() {
         let daemon = Cli::try_parse_from(["nerve", "daemon", "--stdio", "--root", "."])
             .expect("daemon parse");
         assert!(matches!(daemon.command, CommandKind::Daemon(_)));
         let mcp =
             Cli::try_parse_from(["nerve", "mcp", "serve", "--root", "."]).expect("mcp serve parse");
         assert!(matches!(mcp.command, CommandKind::Mcp(_)));
-        let warm = Cli::try_parse_from(["nerve", "warm"]).expect("warm parse");
-        assert!(matches!(warm.command, CommandKind::Warm(_)));
-        let purge = Cli::try_parse_from(["nerve", "cache", "purge"]).expect("purge parse");
-        assert!(matches!(purge.command, CommandKind::Cache(_)));
         let login =
             Cli::try_parse_from(["nerve", "auth", "login", "xai"]).expect("auth login parse");
         assert!(matches!(login.command, CommandKind::Auth(_)));

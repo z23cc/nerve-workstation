@@ -14,7 +14,6 @@ path = "src/main.rs"
 
 [features]
 default = []
-semantic = ["nerve-core/semantic", "nerve-runtime/semantic"]
 
 [dependencies]
 anyhow.workspace = true
