@@ -22,14 +22,18 @@
 //! login + run loop) are the next slice.
 
 pub mod bridge;
+pub mod config;
 pub mod error;
 pub mod gateway;
 pub mod http;
 pub mod login;
+pub mod nerve_client;
 pub mod types;
 
 pub use bridge::{Bridge, BridgeError, NerveControl, NerveReply, SenderAllowlist, chat_key};
+pub use config::WechatConfig;
 pub use error::{WeixinError, WeixinResult};
 pub use gateway::{CDN_BASE_URL, DEFAULT_BASE_URL, IlinkGateway, WeixinGateway};
 pub use login::{QrStart, QrStatus, WeixinSession, poll_qr_once, qr_login, start_qr_login};
+pub use nerve_client::DelegateNerve;
 pub use types::{GetUpdatesResp, MessageItem, WeixinMessage};

@@ -6,8 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "nerve-wechat"
+path = "src/main.rs"
+
 [dependencies]
 base64.workspace = true
+nerve-runtime = { path = "../nerve-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
