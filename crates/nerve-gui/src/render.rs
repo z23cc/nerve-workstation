@@ -1,14 +1,18 @@
-//! Transcript rendering helpers for the Leptos chat surface.
+//! Shared transcript rendering helpers for the Leptos chat surface.
+//!
+//! The per-turn reactive renderers live in [`crate::transcript`]; this module
+//! owns the stateless pieces both it and tests share: markdown → sanitized HTML,
+//! tool cards, and the copy affordances.
 
-use crate::app::{Role, ToolCard, Turn};
 use crate::clipboard::copy_text_with_note;
+use crate::model::ToolCard;
 use crate::trace_format::tool_trace;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-struct RenderedMarkdown {
-    html: String,
-    code_blocks: Vec<String>,
+pub(crate) struct RenderedMarkdown {
+    pub(crate) html: String,
+    pub(crate) code_blocks: Vec<String>,
 }
 
 struct CodeCapture {
@@ -16,60 +20,11 @@ struct CodeCapture {
     source: String,
 }
 
-pub(crate) fn render_turn(turn: Turn) -> AnyView {
-    match turn.role {
-        Role::User => {
-            let text = turn.text;
-            let copy_text_value = text.clone();
-            let copy_note = RwSignal::new(String::new());
-            view! {
-                <div class="turn user" role="article" aria-label="User message">
-                    <div class="turn-actions user-actions">
-                        {turn_copy_button("Copy user message", copy_text_value, copy_note)}
-                        {copy_status(copy_note)}
-                    </div>
-                    <div class="bubble" aria-label="User message text">{text}</div>
-                </div>
-            }
-            .into_any()
-        }
-        Role::Assistant => {
-            let response_text = turn.text.clone();
-            let rendered = markdown_to_html(&turn.text);
-            let html = rendered.html;
-            let code_blocks = StoredValue::new(rendered.code_blocks);
-            let reasoning = turn.reasoning.clone();
-            let tools = turn.tools.clone();
-            let streaming = turn.streaming;
-            let copy_note = RwSignal::new(String::new());
-            let assistant_label = if streaming {
-                "Assistant response, streaming"
-            } else {
-                "Assistant response"
-            };
-            view! {
-                <div class="turn assistant" role="article" aria-label=assistant_label aria-busy=if streaming { "true" } else { "false" }>
-                    <div class="turn-actions assistant-actions">
-                        {turn_copy_button("Copy assistant response", response_text, copy_note)}
-                        {copy_status(copy_note)}
-                    </div>
-                    {(!reasoning.is_empty()).then(|| view! {
-                        <details class="reasoning" aria-label="Assistant reasoning details">
-                            <summary aria-label="Toggle assistant reasoning details">"Thought for this step"</summary>
-                            <pre aria-label="Assistant reasoning text">{reasoning}</pre>
-                        </details>
-                    })}
-                    <div class="md" inner_html=html on:click=move |ev| copy_code_block(ev, code_blocks, copy_note)></div>
-                    {tools.into_iter().map(render_tool).collect_view()}
-                    {streaming.then(|| view! { <span class="cursor" aria-hidden="true">"▋"</span> })}
-                </div>
-            }
-            .into_any()
-        }
-    }
-}
-
-fn turn_copy_button(label: &'static str, text: String, note: RwSignal<String>) -> impl IntoView {
+pub(crate) fn turn_copy_button(
+    label: &'static str,
+    text: String,
+    note: RwSignal<String>,
+) -> impl IntoView {
     view! {
         <button
             class="turn-copy"
@@ -83,7 +38,7 @@ fn turn_copy_button(label: &'static str, text: String, note: RwSignal<String>) -
     }
 }
 
-fn copy_status(note: RwSignal<String>) -> impl IntoView {
+pub(crate) fn copy_status(note: RwSignal<String>) -> impl IntoView {
     view! {
         {move || (!note.get().is_empty()).then(|| view! {
             <span class="turn-copy-note" role="status">{note.get()}</span>
@@ -91,7 +46,7 @@ fn copy_status(note: RwSignal<String>) -> impl IntoView {
     }
 }
 
-fn copy_code_block(
+pub(crate) fn copy_code_block(
     ev: leptos::ev::MouseEvent,
     code_blocks: StoredValue<Vec<String>>,
     note: RwSignal<String>,
@@ -115,7 +70,7 @@ fn copy_code_block(
     }
 }
 
-fn render_tool(card: ToolCard) -> AnyView {
+pub(crate) fn render_tool(card: ToolCard) -> AnyView {
     let status = match card.ok {
         None => "run",
         Some(true) => "ok",
@@ -182,7 +137,7 @@ fn render_tool(card: ToolCard) -> AnyView {
     .into_any()
 }
 
-fn markdown_to_html(src: &str) -> RenderedMarkdown {
+pub(crate) fn markdown_to_html(src: &str) -> RenderedMarkdown {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let mut out = String::new();

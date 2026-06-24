@@ -240,6 +240,9 @@ pub(crate) fn Sidebar(
     open_inspector_tab: Callback<&'static str>,
     chat_backend: RwSignal<String>,
     native_file_dialogs: Signal<bool>,
+    branch: RwSignal<String>,
+    branch_loading: RwSignal<bool>,
+    reveal_workspace: Callback<()>,
     busy: Signal<bool>,
 ) -> impl IntoView {
     let thread_typeahead = RwSignal::new(ThreadTypeaheadState::default());
@@ -424,7 +427,8 @@ pub(crate) fn Sidebar(
                     <span class="nav-icon">{skill_icon()}</span><span>"Tools"</span>
                 </button>
             </nav>
-            <ProjectRail token=token workspace=workspace workspaces=workspaces native_file_dialogs=native_file_dialogs/>
+            <ProjectRail token=token workspace=workspace workspaces=workspaces native_file_dialogs=native_file_dialogs
+                branch=branch branch_loading=branch_loading reveal=reveal_workspace/>
             <div class="thread-rail-wrap">
                 <div class="rail-label">"Threads"</div>
                 <div id="thread-list" class="rail rail-nested" role="list" aria-label="Threads">

@@ -16,8 +16,8 @@
 
 use crate::approval::ApprovalModal;
 use crate::chat_backend::{
-    DelegateTurn, SessionTurn, active_turn_route, close_session_if_any, default_agent,
-    default_chat_backend, send_delegate_turn, send_session_turn, session_id, stop_backend_turn,
+    DelegateTurn, SessionTurn, active_turn_route, close_session_if_any, send_delegate_turn,
+    send_session_turn, session_id, stop_backend_turn,
 };
 use crate::chat_ops::{add_chat, clear_session, fail_chat, reset_chat};
 use crate::command_palette::CommandPalette;
@@ -27,117 +27,17 @@ use crate::events::route_event;
 use crate::hero_chips::HeroChips;
 use crate::inspector::Inspector;
 use crate::inspector_state::inspector_state;
-use crate::render::render_turn;
+// Chat-state types live in `model`; re-exported here so existing `crate::app::*`
+// paths across the crate keep resolving.
+pub(crate) use crate::model::{ApprovalReq, Chat, Role, ToolCard, Turn, TurnHandle};
 use crate::rpc::{cancel_job, daemon_token, new_job_id, open_events, start_job};
+use crate::scroll::ScrollAnchor;
 use crate::settings::SettingsModal;
 use crate::sidebar::Sidebar;
 use crate::topbar::Topbar;
+use crate::transcript::Transcript;
 use leptos::prelude::*;
 use serde_json::json;
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum Role {
-    User,
-    Assistant,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ToolCard {
-    pub(crate) tool: String,
-    pub(crate) ok: Option<bool>,
-    #[serde(default)]
-    pub(crate) input: String,
-    pub(crate) output: String,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Turn {
-    pub(crate) role: Role,
-    pub(crate) text: String,
-    #[serde(default)]
-    pub(crate) reasoning: String,
-    #[serde(default)]
-    pub(crate) tools: Vec<ToolCard>,
-    // Runtime-only: a restored turn is never mid-stream.
-    #[serde(skip)]
-    pub(crate) streaming: bool,
-}
-
-impl Turn {
-    fn user(text: String) -> Self {
-        Self {
-            role: Role::User,
-            text,
-            reasoning: String::new(),
-            tools: Vec::new(),
-            streaming: false,
-        }
-    }
-    pub(crate) fn assistant_streaming() -> Self {
-        Self {
-            role: Role::Assistant,
-            text: String::new(),
-            reasoning: String::new(),
-            tools: Vec::new(),
-            streaming: true,
-        }
-    }
-}
-
-/// One conversation in the sidebar list (in-memory for this browser session).
-/// `session` is the backend session id (`session.start` id or the delegate
-/// live-session job id); `turn_job` is the in-flight turn job id, used to stop it.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Chat {
-    pub(crate) title: String,
-    #[serde(default = "default_chat_backend")]
-    pub(crate) backend: String,
-    /// The external CLI agent bound to this thread (claude / codex / gemini),
-    /// captured at first send. Drives the sidebar agent badge.
-    #[serde(default = "default_agent")]
-    pub(crate) agent: String,
-    // Runtime-only (server-side session + in-flight job + streaming flag): never
-    // persisted. A restored chat is offline history until the next message, which
-    // opens a fresh backend session under the same thread.
-    #[serde(skip)]
-    pub(crate) session: Option<String>,
-    #[serde(skip)]
-    pub(crate) turn_job: Option<String>,
-    #[serde(default)]
-    pub(crate) turns: Vec<Turn>,
-    #[serde(skip)]
-    pub(crate) streaming: bool,
-    /// Epoch-ms of the last activity (created / last message). Drives the rail's
-    /// relative timestamp and recency sort.
-    #[serde(default)]
-    pub(crate) updated_ms: f64,
-}
-
-impl Chat {
-    pub(crate) fn new_with_backend(backend: impl Into<String>) -> Self {
-        Self {
-            title: "New thread".into(),
-            backend: backend.into(),
-            agent: default_agent(),
-            session: None,
-            turn_job: None,
-            turns: Vec::new(),
-            streaming: false,
-            updated_ms: js_sys::Date::now(),
-        }
-    }
-}
-
-/// A pending tool-permission decision (carries its own session_id so the reply
-/// targets the right chat even if the user has switched conversations).
-#[derive(Clone)]
-pub(crate) struct ApprovalReq {
-    pub(crate) session_id: String,
-    pub(crate) request_id: String,
-    pub(crate) tool: String,
-    pub(crate) preview: String,
-    pub(crate) tier: String,
-}
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -184,6 +84,11 @@ pub fn App() -> impl IntoView {
     let workspace = RwSignal::new(String::new());
     let host_caps = RwSignal::new(None::<nerve_proto::HostCapabilities>);
     let branch = RwSignal::new("—".to_string());
+    // True while the active workspace's branch is being (re)fetched — drives the
+    // project rail's loading skeleton instead of flashing the previous repo's branch.
+    let branch_loading = RwSignal::new(false);
+    // Stick-to-bottom controller for the chat transcript (Copy; lives in app state).
+    let anchor = ScrollAnchor::new();
     // SSE connection health: false while the daemon stream is down (the browser
     // auto-reconnects); drives the "reconnecting" banner.
     let online = RwSignal::new(true);
@@ -232,15 +137,21 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         let ws = workspace.get();
         if ws.is_empty() {
+            branch_loading.set(false);
             return;
         }
         let Some(tok) = token.get_value() else { return };
+        branch_loading.set(true);
         leptos::task::spawn_local(async move {
-            branch.set(
-                crate::data::fetch_branch(&tok, &ws)
-                    .await
-                    .unwrap_or_else(|| "—".into()),
-            );
+            let result = crate::data::fetch_branch(&tok, &ws)
+                .await
+                .unwrap_or_else(|| "—".into());
+            // Drop a stale response: if the active workspace moved on while this
+            // request was in flight, the newer switch owns the branch + skeleton.
+            if workspace.get_untracked() == ws {
+                branch.set(result);
+                branch_loading.set(false);
+            }
         });
     });
 
@@ -332,8 +243,8 @@ pub fn App() -> impl IntoView {
                 if c.turns.is_empty() {
                     c.title = crate::data::truncate_title(&text);
                 }
-                c.turns.push(Turn::user(text.clone()));
-                c.turns.push(Turn::assistant_streaming());
+                c.turns.push(TurnHandle::new(Turn::user(text.clone())));
+                c.turns.push(TurnHandle::new(Turn::assistant_streaming()));
                 c.streaming = true;
                 c.updated_ms = js_sys::Date::now();
                 c.turn_job = Some(turn_id.clone());
@@ -346,6 +257,9 @@ pub fn App() -> impl IntoView {
                 }
             }
         });
+        // Sending is explicit intent: re-pin so the user always follows their own
+        // message even if they had scrolled up to read history.
+        anchor.snap_to_bottom();
         let (ag, au, md, ws_name, root) = (
             agent.get_untracked(),
             autonomy.get_untracked(),
@@ -526,6 +440,9 @@ pub fn App() -> impl IntoView {
             <Sidebar chats active input error token search workspace workspaces settings_open mode inspector_open inspector_tab open_inspector_tab
                 chat_backend=chat_backend
                 native_file_dialogs=native_file_dialogs
+                branch=branch
+                branch_loading=branch_loading
+                reveal_workspace=reveal_workspace
                 busy=Signal::derive(active_busy) />
             <main class="main chat">
                 <Topbar
@@ -567,10 +484,7 @@ pub fn App() -> impl IntoView {
                 } else {
                     view! {
                         <section id="surface-chat" class="surface-panel" role="tabpanel" aria-labelledby="surface-tab-chat" tabindex="-1">
-                        <div class="transcript" role="log" aria-label="Conversation transcript" aria-live="polite" aria-relevant="additions text" aria-atomic="false">
-                            {move || chats.with(|cs| cs.get(active.get()).map(|c| c.turns.clone()).unwrap_or_default())
-                                .into_iter().map(render_turn).collect_view()}
-                        </div>
+                        <Transcript chats=chats active=active anchor=anchor/>
                         <div class="composer-dock">{composer()}</div>
                         </section>
                     }.into_any()

@@ -2,7 +2,7 @@
 //! that owns its session. Split out of `app.rs` to stay under the file-size
 //! gate; the chat state types live in [`crate::app`].
 
-use crate::app::{ApprovalReq, Chat, Role, ToolCard, Turn};
+use crate::app::{ApprovalReq, Chat, Role, ToolCard, Turn, TurnHandle};
 use leptos::prelude::*;
 use nerve_proto::{AgentEventKind, RuntimeEvent};
 
@@ -21,8 +21,11 @@ pub(crate) fn route_event(
         // crash, missing/unauthenticated CLI, cancelled steer) wedges the chat
         // spinning forever with the composer locked to Stop.
         RuntimeEvent::JobFailed { job_id, error } => with_turn_job(chats, &job_id, |c| {
-            end_turn(c);
+            // Append into the still-streaming turn, THEN finalize — so the warning
+            // renders as a finished (markdown) turn, not a perpetually-streaming one
+            // with a dangling caret under the per-turn-signal renderer.
             append_assistant_text(c, &format!("\n\n⚠ {}", error.message));
+            end_turn(c);
         }),
         RuntimeEvent::JobCancelled { job_id } => with_turn_job(chats, &job_id, end_turn),
         RuntimeEvent::JobCompleted { job_id } => with_turn_job(chats, &job_id, end_turn),
@@ -68,14 +71,35 @@ pub(crate) fn route_event(
 /// Append streamed assistant `text` to the chat's current streaming turn, opening
 /// one if the last turn is not a live assistant turn. Shared by the delegate
 /// stream (`DelegateProgress`) and the structured `Message` agent event.
+///
+/// Text/tool deltas mutate the turn's **own signal** (repainting one transcript
+/// row), while the enclosing `chats.update` notification — which the transcript's
+/// `Memo` short-circuits — drives the stick-to-bottom anchor.
 pub(crate) fn append_assistant_text(chat: &mut Chat, text: &str) {
-    let needs_turn =
-        !matches!(chat.turns.last(), Some(t) if t.role == Role::Assistant && t.streaming);
-    if needs_turn {
-        chat.turns.push(Turn::assistant_streaming());
+    ensure_streaming_turn(chat);
+    edit_last_turn(chat, |t| t.text.push_str(text));
+}
+
+/// Whether the chat's last turn is a live (streaming) assistant turn.
+fn last_is_streaming_assistant(chat: &Chat) -> bool {
+    chat.turns.last().is_some_and(|h| {
+        h.sig
+            .with_untracked(|t| t.role == Role::Assistant && t.streaming)
+    })
+}
+
+/// Open a fresh streaming assistant turn unless one is already live.
+fn ensure_streaming_turn(chat: &mut Chat) {
+    if !last_is_streaming_assistant(chat) {
+        chat.turns
+            .push(TurnHandle::new(Turn::assistant_streaming()));
     }
-    if let Some(turn) = chat.turns.last_mut() {
-        turn.text.push_str(text);
+}
+
+/// Mutate the inner `Turn` of the chat's last turn, notifying only that row.
+fn edit_last_turn(chat: &Chat, f: impl FnOnce(&mut Turn)) {
+    if let Some(handle) = chat.turns.last() {
+        handle.sig.update(f);
     }
 }
 
@@ -107,21 +131,22 @@ fn with_turn_job(chats: RwSignal<Vec<Chat>>, job_id: &str, f: impl FnOnce(&mut C
 fn end_turn(chat: &mut Chat) {
     chat.streaming = false;
     chat.turn_job = None;
-    if let Some(turn) = chat.turns.last_mut() {
-        turn.streaming = false;
-    }
+    edit_last_turn(chat, |t| t.streaming = false);
 }
 
-/// Fold a single `AgentEventKind` into the chat's current (streaming) assistant turn.
+/// Fold a single `AgentEventKind` into the chat's current (streaming) assistant
+/// turn. Chat-level state (`streaming`) is set here; the per-turn mutation routes
+/// through the turn's signal via [`fold_agent_event`].
 fn apply_agent_event(event: AgentEventKind, chat: &mut Chat) {
-    let needs_turn =
-        !matches!(chat.turns.last(), Some(t) if t.role == Role::Assistant && t.streaming);
-    if needs_turn {
-        chat.turns.push(Turn::assistant_streaming());
+    ensure_streaming_turn(chat);
+    if matches!(event, AgentEventKind::Interrupted { .. }) {
+        chat.streaming = false;
     }
-    let Some(turn) = chat.turns.last_mut() else {
-        return;
-    };
+    edit_last_turn(chat, |turn| fold_agent_event(event, turn));
+}
+
+/// The pure per-`Turn` half of [`apply_agent_event`] (no chat-level state).
+fn fold_agent_event(event: AgentEventKind, turn: &mut Turn) {
     match event {
         AgentEventKind::Message { text } => turn.text.push_str(&text),
         AgentEventKind::Reasoning { text } => turn.reasoning.push_str(&text),
@@ -150,10 +175,7 @@ fn apply_agent_event(event: AgentEventKind, chat: &mut Chat) {
                 }),
             }
         }
-        AgentEventKind::Interrupted { .. } => {
-            turn.streaming = false;
-            chat.streaming = false;
-        }
+        AgentEventKind::Interrupted { .. } => turn.streaming = false,
         AgentEventKind::TurnStarted { .. } | AgentEventKind::Usage { .. } => {}
     }
 }
@@ -195,9 +217,9 @@ mod tests {
             1,
             "chunks coalesce into a single streaming turn"
         );
-        assert!(matches!(c.turns[0].role, Role::Assistant));
-        assert!(c.turns[0].streaming);
-        assert_eq!(c.turns[0].text, "hello world");
+        assert!(matches!(c.turns[0].get().role, Role::Assistant));
+        assert!(c.turns[0].get().streaming);
+        assert_eq!(c.turns[0].get().text, "hello world");
     }
 
     #[test]
@@ -207,7 +229,7 @@ mod tests {
         end_turn(&mut c);
         append_assistant_text(&mut c, "second");
         assert_eq!(c.turns.len(), 2);
-        assert_eq!(c.turns[1].text, "second");
+        assert_eq!(c.turns[1].get().text, "second");
     }
 
     #[test]
@@ -219,7 +241,7 @@ mod tests {
         end_turn(&mut c);
         assert!(!c.streaming);
         assert!(c.turn_job.is_none());
-        assert!(!c.turns.last().unwrap().streaming);
+        assert!(!c.turns.last().unwrap().get().streaming);
     }
 
     #[test]
@@ -237,7 +259,7 @@ mod tests {
             },
             &mut c,
         );
-        let turn = c.turns.last().expect("turn");
+        let turn = c.turns.last().expect("turn").get();
         assert_eq!(turn.reasoning, "thinking");
         assert_eq!(turn.text, "answer");
     }
@@ -260,7 +282,8 @@ mod tests {
             },
             &mut c,
         );
-        let tools = &c.turns.last().expect("turn").tools;
+        let turn = c.turns.last().expect("turn").get();
+        let tools = &turn.tools;
         assert_eq!(
             tools.len(),
             1,
@@ -282,7 +305,8 @@ mod tests {
             },
             &mut c,
         );
-        let tools = &c.turns.last().expect("turn").tools;
+        let turn = c.turns.last().expect("turn").get();
+        let tools = &turn.tools;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].ok, Some(false));
     }

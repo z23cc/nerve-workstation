@@ -204,7 +204,7 @@ fn tool_rows(chats: RwSignal<Vec<Chat>>, active: RwSignal<usize>) -> Vec<ToolRow
             .map(|chat| {
                 chat.turns
                     .iter()
-                    .flat_map(|turn| turn.tools.iter())
+                    .flat_map(|handle| handle.get().tools)
                     .enumerate()
                     .map(|(idx, card)| {
                         let (status, label) = match card.ok {

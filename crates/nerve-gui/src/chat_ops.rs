@@ -58,8 +58,8 @@ pub(crate) fn fail_chat(
         if let Some(c) = cs.get_mut(idx) {
             c.streaming = false;
             c.turn_job = None;
-            if let Some(turn) = c.turns.last_mut() {
-                turn.streaming = false;
+            if let Some(handle) = c.turns.last() {
+                handle.sig.update(|t| t.streaming = false);
             }
         }
     });

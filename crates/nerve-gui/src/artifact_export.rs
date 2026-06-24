@@ -440,7 +440,8 @@ fn thread_transcript(chat: Option<&Chat>) -> String {
         out.push_str("\nNo messages yet.\n");
         return out;
     }
-    for (index, turn) in chat.turns.iter().enumerate() {
+    for (index, handle) in chat.turns.iter().enumerate() {
+        let turn = handle.get();
         out.push_str(&format!("\n## {} {}\n\n", index + 1, role_label(turn.role)));
         if !turn.text.trim().is_empty() {
             out.push_str(turn.text.trim());
@@ -469,7 +470,7 @@ fn tool_activity_packet(chat: Option<&Chat>) -> String {
     let Some(chat) = chat else {
         return "# Tool activity\n\nNo active thread.".into();
     };
-    let tools = chat.turns.iter().flat_map(|turn| turn.tools.iter());
+    let tools = chat.turns.iter().flat_map(|handle| handle.get().tools);
     let mut total = 0usize;
     let mut ok = 0usize;
     let mut err = 0usize;

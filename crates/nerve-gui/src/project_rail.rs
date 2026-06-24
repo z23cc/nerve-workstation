@@ -1,4 +1,10 @@
-//! Project/workspace rail: add/remove/switch workspaces with native-list keyboard behavior.
+//! Project/workspace rail: add/remove/switch workspaces with native-list keyboard
+//! behavior, plus per-row git-branch context and an OS reveal affordance.
+
+// The `ProjectRail` `#[component]` expands to one declarative view tree; the
+// `#[component]` macro does not forward a fn-level allow, so the workspace-wide
+// `too_many_lines` deny is applied at module scope (matching app.rs / sidebar.rs).
+#![allow(clippy::too_many_lines)]
 
 use leptos::prelude::*;
 
@@ -11,13 +17,31 @@ struct ProjectTypeaheadState {
     at_ms: f64,
 }
 
+/// Signals threaded into the project rows: the active workspace's git branch, a
+/// loading flag (drives the switch-time skeleton), and the OS reveal callback
+/// (reuses `workspace.reveal` — no new protocol).
+#[derive(Clone, Copy)]
+struct RailSignals {
+    branch: RwSignal<String>,
+    branch_loading: RwSignal<bool>,
+    reveal: Callback<()>,
+}
+
 #[component]
 pub(crate) fn ProjectRail(
     token: StoredValue<Option<String>>,
     workspace: RwSignal<String>,
     workspaces: RwSignal<Vec<(String, String)>>,
     native_file_dialogs: Signal<bool>,
+    branch: RwSignal<String>,
+    branch_loading: RwSignal<bool>,
+    reveal: Callback<()>,
 ) -> impl IntoView {
+    let signals = RailSignals {
+        branch,
+        branch_loading,
+        reveal,
+    };
     let adding = RwSignal::new(false);
     let new_path = RwSignal::new(String::new());
     let pick_status = RwSignal::new(String::new());
@@ -60,17 +84,25 @@ pub(crate) fn ProjectRail(
         <>
             <div class="rail-label rail-label-row">
                 <span>"Projects"</span>
-                <button type="button" id="project-add-button" class="rail-add" title="Add project"
-                    aria-label=move || if adding.get() { "Cancel adding project" } else { "Add project" }
-                    aria-controls="project-add"
-                    aria-expanded=move || adding.get().to_string()
-                    on:click=move |_| {
-                        let opening = !adding.get_untracked();
-                        adding.set(opening);
-                        if opening {
-                            crate::dom::focus_element_by_id_next_frame("project-add");
-                        }
-                    }>"+"</button>
+                <div class="rail-label-actions">
+                    <button type="button" class="rail-reveal" title="Reveal active project in file manager"
+                        aria-label="Reveal active project in file manager"
+                        disabled=move || workspace.get().is_empty()
+                        on:click=move |_| reveal.run(())>
+                        {reveal_icon()}
+                    </button>
+                    <button type="button" id="project-add-button" class="rail-add" title="Add project"
+                        aria-label=move || if adding.get() { "Cancel adding project" } else { "Add project" }
+                        aria-controls="project-add"
+                        aria-expanded=move || adding.get().to_string()
+                        on:click=move |_| {
+                            let opening = !adding.get_untracked();
+                            adding.set(opening);
+                            if opening {
+                                crate::dom::focus_element_by_id_next_frame("project-add");
+                            }
+                        }>"+"</button>
+                </div>
             </div>
             {move || adding.get().then(|| view! {
                 <div class="proj-add-row">
@@ -108,7 +140,7 @@ pub(crate) fn ProjectRail(
                 </span>
             })}
             <div class="proj-list" role="list" aria-label="Projects">
-                {move || project_rows(workspaces.get(), workspace.get(), focus_project, do_remove, jump_project)}
+                {move || project_rows(workspaces.get(), workspace.get(), focus_project, do_remove, jump_project, signals)}
             </div>
         </>
     }
@@ -232,12 +264,26 @@ fn remove_project(
     });
 }
 
+/// Per-row data (non-closure) for [`project_row`]; bundled to keep the row
+/// builder's argument count under the clippy gate.
+struct ProjectRowArgs {
+    index: usize,
+    name: String,
+    root: String,
+    selected: bool,
+    multi: bool,
+    len: usize,
+    names: Vec<String>,
+    signals: RailSignals,
+}
+
 fn project_rows(
     list: Vec<(String, String)>,
     current: String,
     focus_project: impl Fn(usize, String) + Copy + 'static,
     do_remove: impl Fn(String) + Copy + 'static,
     jump_project: impl Fn(usize, String) -> bool + Copy + 'static,
+    signals: RailSignals,
 ) -> AnyView {
     if list.is_empty() {
         return view! {
@@ -258,61 +304,160 @@ fn project_rows(
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
-    list.into_iter().enumerate().map(|(index, (name, _root))| {
-        let selected = index == active_index;
-        let tabbable = selected;
-        let pick = name.clone();
-        let rm_for_key = name.clone();
-        let rm_for_close = name.clone();
-        let names_for_key = names.clone();
-        let pos = (index + 1).to_string();
-        let size = len.to_string();
-        let project_label = if selected {
-            format!("Current project: {name}")
-        } else {
-            format!("Project: {name}")
-        };
-        let remove_label = format!("Remove project: {name}");
-        view! {
-            <div class="rail-row" class:on=selected role="listitem" aria-posinset=pos aria-setsize=size>
-                <button type="button" id=format!("project-row-{index}") class="rail-pick"
-                    aria-current=if selected { "true" } else { "false" }
-                    aria-label=project_label
-                    aria-keyshortcuts="ArrowUp ArrowDown Home End Delete Backspace"
-                    tabindex=if tabbable { "0" } else { "-1" }
-                    on:keydown=move |ev| {
-                        if ev.key() == "Escape" {
-                            ev.prevent_default();
-                            crate::dom::focus_element_by_id_next_frame("project-add-button");
-                            return;
-                        }
-                        if let Some(next) = project_key_target(index, len, &ev.key()) {
-                            ev.prevent_default();
-                            if let Some(name) = names_for_key.get(next) {
-                                focus_project(next, name.clone());
-                            }
-                            return;
-                        }
-                        if multi && (ev.key() == "Delete" || ev.key() == "Backspace") {
-                            ev.prevent_default();
-                            do_remove(rm_for_key.clone());
-                            return;
-                        }
-                        if !(ev.meta_key() || ev.ctrl_key() || ev.alt_key()) && jump_project(index, ev.key()) {
-                            ev.prevent_default();
-                        }
+    list.into_iter()
+        .enumerate()
+        .map(|(index, (name, root))| {
+            project_row(
+                ProjectRowArgs {
+                    index,
+                    name,
+                    root,
+                    selected: index == active_index,
+                    multi,
+                    len,
+                    names: names.clone(),
+                    signals,
+                },
+                focus_project,
+                do_remove,
+                jump_project,
+            )
+        })
+        .collect_view()
+        .into_any()
+}
+
+fn project_row(
+    args: ProjectRowArgs,
+    focus_project: impl Fn(usize, String) + Copy + 'static,
+    do_remove: impl Fn(String) + Copy + 'static,
+    jump_project: impl Fn(usize, String) -> bool + Copy + 'static,
+) -> AnyView {
+    let ProjectRowArgs {
+        index,
+        name,
+        root,
+        selected,
+        multi,
+        len,
+        names,
+        signals,
+    } = args;
+    let pick = name.clone();
+    let rm_for_key = name.clone();
+    let rm_for_close = name.clone();
+    let project_label = if selected {
+        format!("Current project: {name}")
+    } else {
+        format!("Project: {name}")
+    };
+    let remove_label = format!("Remove project: {name}");
+    view! {
+        <div class="rail-row" class:on=selected role="listitem"
+            aria-posinset=(index + 1).to_string() aria-setsize=len.to_string()>
+            <button type="button" id=format!("project-row-{index}") class="rail-pick"
+                title=root.clone()
+                aria-current=if selected { "true" } else { "false" }
+                aria-label=project_label
+                aria-keyshortcuts="ArrowUp ArrowDown Home End Delete Backspace"
+                tabindex=if selected { "0" } else { "-1" }
+                on:keydown=move |ev| {
+                    if ev.key() == "Escape" {
+                        ev.prevent_default();
+                        crate::dom::focus_element_by_id_next_frame("project-add-button");
+                        return;
                     }
-                    on:click=move |_| focus_project(index, pick.clone())>
-                    <span class="project-dot"></span>
+                    if let Some(next) = project_key_target(index, len, &ev.key()) {
+                        ev.prevent_default();
+                        if let Some(name) = names.get(next) {
+                            focus_project(next, name.clone());
+                        }
+                        return;
+                    }
+                    if multi && (ev.key() == "Delete" || ev.key() == "Backspace") {
+                        ev.prevent_default();
+                        do_remove(rm_for_key.clone());
+                        return;
+                    }
+                    if !(ev.meta_key() || ev.ctrl_key() || ev.alt_key()) && jump_project(index, ev.key()) {
+                        ev.prevent_default();
+                    }
+                }
+                on:click=move |_| focus_project(index, pick.clone())>
+                <span class="project-dot" class:on=selected></span>
+                <span class="rail-copy">
                     <span class="rail-title">{name}</span>
-                </button>
-                {multi.then(|| view! {
-                    <button type="button" class="rail-close" title="Remove project" aria-label=remove_label tabindex="-1"
-                        on:click=move |_| do_remove(rm_for_close.clone())>"×"</button>
-                })}
-            </div>
-        }
-    }).collect_view().into_any()
+                    {selected.then(|| project_meta(root.clone(), signals))}
+                </span>
+            </button>
+            {selected.then(|| view! {
+                <button type="button" class="rail-reveal rail-reveal-row" tabindex="-1"
+                    title="Reveal in file manager" aria-label="Reveal active project in file manager"
+                    on:click=move |_| signals.reveal.run(())>{reveal_icon()}</button>
+            })}
+            {multi.then(|| view! {
+                <button type="button" class="rail-close" title="Remove project" aria-label=remove_label tabindex="-1"
+                    on:click=move |_| do_remove(rm_for_close.clone())>"×"</button>
+            })}
+        </div>
+    }
+    .into_any()
+}
+
+/// The active row's secondary line: a git-branch chip (skeleton while the branch
+/// Effect resolves) plus the truncated workspace root path.
+fn project_meta(root: String, signals: RailSignals) -> impl IntoView {
+    view! {
+        <span class="proj-meta">
+            {move || if signals.branch_loading.get() {
+                view! {
+                    <span class="proj-skel" aria-hidden="true"></span>
+                    <span class="sr-only" role="status">"Loading branch…"</span>
+                }.into_any()
+            } else {
+                let branch = signals.branch.get();
+                let title = format!("Git branch: {branch}");
+                view! {
+                    <span class="proj-branch" title=title>
+                        {git_icon()}<span class="proj-branch-name">{branch}</span>
+                    </span>
+                }.into_any()
+            }}
+            <span class="proj-sub" aria-hidden="true">{truncate_root(&root)}</span>
+        </span>
+    }
+}
+
+/// Show the tail of a long root path with a leading ellipsis (the tail is the
+/// most distinctive part). The full path is always available via the row tooltip.
+fn truncate_root(root: &str) -> String {
+    const MAX: usize = 34;
+    let count = root.chars().count();
+    if count <= MAX {
+        return root.to_string();
+    }
+    let tail: String = root.chars().skip(count - (MAX - 1)).collect();
+    format!("…{tail}")
+}
+
+fn reveal_icon() -> impl IntoView {
+    view! {
+        <svg class="rail-ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        </svg>
+    }
+}
+
+fn git_icon() -> impl IntoView {
+    view! {
+        <svg class="proj-branch-ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="6" cy="6" r="2.3" />
+            <circle cx="6" cy="18" r="2.3" />
+            <circle cx="18" cy="8" r="2.3" />
+            <path d="M6 8.3v7.4" />
+            <path d="M18 10.3a6 6 0 0 1-6 6H8.3" />
+        </svg>
+    }
 }
 
 fn project_key_target(current: usize, len: usize, key: &str) -> Option<usize> {
