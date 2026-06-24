@@ -322,7 +322,14 @@ mod tests {
         let hero_chips = include_str!("../../../nerve-gui/src/hero_chips.rs");
         let topbar = include_str!("../../../nerve-gui/src/topbar.rs");
         let sidebar = include_str!("../../../nerve-gui/src/sidebar.rs");
-        let render = include_str!("../../../nerve-gui/src/render.rs");
+        // Per-turn rendering was split across render.rs + transcript.rs by the
+        // reactive-transcript refactor; the chrome contract spans both.
+        let render = format!(
+            "{}{}",
+            include_str!("../../../nerve-gui/src/render.rs"),
+            include_str!("../../../nerve-gui/src/transcript.rs"),
+        );
+        let render = render.as_str();
         let inspector = include_str!("../../../nerve-gui/src/inspector.rs");
         let settings = include_str!("../../../nerve-gui/src/settings.rs");
         let settings_auth = include_str!("../../../nerve-gui/src/settings_auth.rs");
