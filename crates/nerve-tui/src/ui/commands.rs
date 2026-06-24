@@ -274,7 +274,7 @@ pub const HELP_TEXT: &str = "commands:\n  \
 /new                       start a fresh session (clears history)\n  \
 /login [provider] [--device]  how to authenticate; --device is reserved/fail-closed for now\n  \
 /lease [provider] [--refresh]  show broker OAuth lease metadata; --refresh forces broker refresh; token redacted\n  \
-/wechat login <bot_type> [base_url]  start WeChat QR login; scan the URL shown\n  \
+/wechat login [bot_type] [base_url]  start WeChat QR login (scan-only); scan the QR shown\n  \
 /wechat start [agent] [autonomy] [owner1,owner2,...]  start bridge (default: claude, read_only, empty owners)\n  \
 /wechat stop               stop the WeChat bridge\n  \
 /wechat status             query bridge status\n  \

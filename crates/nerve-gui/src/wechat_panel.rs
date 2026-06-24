@@ -20,6 +20,8 @@
 use crate::rpc::start_job_await;
 use leptos::prelude::*;
 use nerve_proto::WechatEventKind;
+use qrcode::QrCode;
+use qrcode::render::svg;
 use serde_json::json;
 
 const NO_TOKEN: &str = "No daemon token — open the daemon URL or append #token=…";
@@ -43,7 +45,9 @@ const AUTO_OPTS: &[(&str, &str)] = &[
 pub(crate) struct WeChatSignals {
     /// Whether the panel overlay is open.
     pub(crate) open: RwSignal<bool>,
-    /// The remote HTTPS QR image URL to render (`""` = no QR to show).
+    /// The iLink deep-link URL to QR-ENCODE (`""` = no QR to show). This is NOT
+    /// an image — it is the payload the user's WeChat scans, so the panel renders
+    /// a QR generated locally from it via [`qr_svg`].
     pub(crate) qr_url: RwSignal<String>,
     /// Human-readable login status line.
     pub(crate) qr_status: RwSignal<String>,
@@ -99,12 +103,31 @@ fn push_log(log: &mut Vec<String>, direction: &str, text: &str) {
     }
 }
 
+/// Render the iLink deep-link `url` as an inline SVG QR code, generated **locally**
+/// (the url is never sent to any remote service). Returns `""` for an empty url and,
+/// gracefully, also for any url the QR encoder rejects (too long / invalid) so the
+/// caller's caption-line fallback shows the raw url instead of the UI panicking.
+fn qr_svg(url: &str) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    match QrCode::new(url.as_bytes()) {
+        Ok(code) => code
+            .render::<svg::Color<'_>>()
+            .min_dimensions(220, 220)
+            .quiet_zone(true)
+            .dark_color(svg::Color("#000000"))
+            .light_color(svg::Color("#ffffff"))
+            .build(),
+        Err(_) => String::new(),
+    }
+}
+
 #[component]
 pub(crate) fn WeChatPanel(
     token: StoredValue<Option<String>>,
     wechat: WeChatSignals,
 ) -> impl IntoView {
-    let bot_type = RwSignal::new(String::new());
     let owners = RwSignal::new(String::new());
     let agent = RwSignal::new("claude".to_string());
     let autonomy = RwSignal::new("read_only".to_string());
@@ -112,7 +135,7 @@ pub(crate) fn WeChatPanel(
     let bridge_busy = RwSignal::new(false);
 
     let close = move || wechat.open.set(false);
-    let log_in = move || request_login(token, bot_type, wechat.qr_status, login_busy);
+    let log_in = move || request_login(token, wechat.qr_status, login_busy);
     let start = move || {
         request_start(StartArgs {
             token,
@@ -143,24 +166,17 @@ pub(crate) fn WeChatPanel(
                      Starting needs the daemon launched with --allow-delegate and a prior login."
                 </p>
                 <div class="wechat-login">
-                    <label class="wechat-field">
-                        <span class="set-desc">"Bot type"</span>
-                        <input id="wechat-bot-type" name="wechat-bot-type" class="set-input wechat-bot-type"
-                            type="text" spellcheck="false" placeholder="your iLink bot type"
-                            aria-label="iLink bot type"
-                            prop:value=move || bot_type.get()
-                            disabled=move || login_busy.get()
-                            on:input=move |ev| bot_type.set(event_target_value(&ev)) />
-                    </label>
                     <button class="btn allow" type="button"
-                        disabled=move || login_busy.get() || bot_type.get().trim().is_empty()
-                        aria-label="Log in to WeChat with the given bot type"
+                        disabled=move || login_busy.get()
+                        aria-label="Log in to WeChat — fetches a scannable QR"
                         aria-controls="wechat-status"
                         on:click=move |_| log_in()>"Log in"</button>
                 </div>
                 {move || (!wechat.qr_url.get().is_empty()).then(|| view! {
-                    <img class="wechat-qr" alt="WeChat login QR code — scan with WeChat"
-                        src=move || wechat.qr_url.get() />
+                    <div class="wechat-qr" role="img"
+                        aria-label="WeChat login QR code — scan with WeChat"
+                        inner_html=move || qr_svg(&wechat.qr_url.get())></div>
+                    <p class="set-desc wechat-qr-caption">{move || wechat.qr_url.get()}</p>
                 })}
                 <pre id="wechat-status" class="lease-status wechat-status" role="status" aria-live="polite">
                     {move || wechat.qr_status.get()}
@@ -225,12 +241,12 @@ pub(crate) fn WeChatPanel(
     }
 }
 
-/// Run a `wechat.login` job: it streams the QR + login transitions back as global
-/// `wechat` events (folded by `route_event`), so success here just clears the busy
-/// flag — the QR appears via the event fold.
+/// Run a `wechat.login` job (scan-only): the daemon defaults `bot_type` to `"3"`,
+/// so the command omits it entirely. The job streams the QR + login transitions
+/// back as global `wechat` events (folded by `route_event`), so success here just
+/// clears the busy flag — the QR appears via the event fold.
 fn request_login(
     token: StoredValue<Option<String>>,
-    bot_type: RwSignal<String>,
     status: RwSignal<String>,
     busy: RwSignal<bool>,
 ) {
@@ -241,15 +257,10 @@ fn request_login(
     if busy.get_untracked() {
         return;
     }
-    let bot = bot_type.get_untracked().trim().to_string();
-    if bot.is_empty() {
-        status.set("Enter a bot type first.".into());
-        return;
-    }
     busy.set(true);
     status.set("Requesting WeChat login QR…".into());
     leptos::task::spawn_local(async move {
-        let cmd = json!({ "kind": "wechat.login", "bot_type": bot });
+        let cmd = json!({ "kind": "wechat.login" });
         if let Err(err) = start_job_await(&tok, cmd).await {
             status.set(format!("Login failed: {err}"));
         }
@@ -350,5 +361,30 @@ mod tests {
         let mut log = Vec::new();
         push_log(&mut log, "out", "hi there");
         assert_eq!(log[0], "out: hi there");
+    }
+
+    #[test]
+    fn qr_svg_empty_url_is_empty() {
+        assert_eq!(qr_svg(""), "");
+    }
+
+    #[test]
+    fn qr_svg_renders_inline_svg_for_a_url() {
+        let svg = qr_svg(
+            "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=7c707e147a85ec543295e77f9ae6c104&bot_type=3",
+        );
+        assert!(svg.contains("<svg"), "{svg}");
+        assert!(svg.contains("</svg>"), "{svg}");
+        // Black-on-white modules so WeChat can scan it.
+        assert!(svg.contains("#000000"), "{svg}");
+        assert!(svg.contains("#ffffff"), "{svg}");
+    }
+
+    #[test]
+    fn qr_svg_too_long_url_falls_back_to_empty() {
+        // A url longer than any QR version can hold must not panic — it returns
+        // "" so the caller's caption-line fallback shows the raw url instead.
+        let huge = "x".repeat(8000);
+        assert_eq!(qr_svg(&huge), "");
     }
 }

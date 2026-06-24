@@ -25,7 +25,7 @@ Commands (`RuntimeCommand`, serde tag `kind`):
 
 | kind | fields | meaning |
 |---|---|---|
-| `wechat.login` | `bot_type: String`, `base_url: Option<String>` | run the QR login flow as a cancellable **job**; stream `wechat` events; cache the confirmed session |
+| `wechat.login` | `bot_type: String` (default `"3"`), `base_url: Option<String>` | run the QR login flow as a cancellable **job**; stream `wechat` events; cache the confirmed session |
 | `wechat.start` | `owners: Vec<String>`, `agent: String` (default `claude`), `autonomy: DelegateAutonomy` (default `read_only`) | start the long-poll bridge against the logged-in session; each allowed owner's message drives one `delegate.*` turn |
 | `wechat.stop` | — | stop the bridge (idempotent) |
 | `wechat.status` | — | report login + bridge state |
@@ -41,9 +41,14 @@ WeChat events are **global/unscoped** — `RuntimeEvent::session_id()` returns `
 so the per-id fan-out delivers them to **every** connected client (like `Auth`). Any
 GUI/TUI surface renders login + bridge status live without owning a session.
 
-`bot_type` is **required** for login and is **not a published constant** (it comes
-from your iLink bot registration) — the caller supplies it; this is the value you
-enter when logging in to test.
+Login is **scan-only**: `bot_type` defaults to `"3"` (`DEFAULT_ILINK_BOT_TYPE` —
+the value Hermes Agent and other iLink clients bake in), so clients omit it and the
+user only scans the QR. The QR's `image_url` is a `liteapp.weixin.qq.com` **deep
+link to be QR-encoded** (not an image file): the TUI renders it as a unicode QR and
+the GUI renders a locally-generated SVG QR (via the `qrcode` crate) — never an
+`<img src>` of the URL, and never sent to any third-party QR service. Verified live
+end to end against a real account: scan → `login_status` → `logged_in`
+(`account_id` `…@im.bot`, `user_id` `…@im.wechat`).
 
 ### 2. Daemon hosting (`nerve-workstation`)
 
@@ -109,7 +114,8 @@ smoke (`wechat.status` → `job_started`/`job_completed`).
 1. Build + run the daemon against your project, **with delegation lifted**:
    `nerve daemon --root /abs/project --allow-delegate` (HTTP for the GUI, or the
    TUI/`nerve chat` for the stdio path).
-2. From the GUI panel or TUI `/wechat login <bot_type>`: scan the QR that appears.
+2. GUI: open the WeChat panel → **Log in** (no input). TUI: `/wechat login`. A QR
+   renders on the surface (SVG in the GUI, unicode in the TUI) — scan it.
 3. `wechat.start` (GUI button / TUI `/wechat start`): the bridge runs.
 4. From an allowed WeChat owner id, message the bot; the delegated agent (claude by
    default, read-only) replies in the chat. Watch the live log + status on either
@@ -129,3 +135,7 @@ smoke (`wechat.status` → `job_started`/`job_completed`).
   `from_user_id` at the in-process `NerveControl` layer (the allowlist already gated
   the sender); richer attribution would thread the inbound `WeixinMessage` through.
 - **Media:** text-only (image/file relay remains the documented deferral).
+- **iLink identity scope:** QR login yields an iLink *bot* identity (`…@im.bot`),
+  not a fully scriptable ordinary account; iLink generally delivers **direct
+  messages** to the gateway but **not ordinary group events / @-mentions** — so test
+  with a DM to the bot. (Upstream iLink protocol limitation, not Nerve's.)

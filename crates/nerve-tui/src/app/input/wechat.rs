@@ -8,6 +8,11 @@ use nerve_runtime::{DelegateAutonomy, RuntimeCommand};
 use super::super::Shell;
 use super::super::state::Tone;
 
+/// Default iLink `bot_type` for `/wechat login` — the published
+/// `DEFAULT_ILINK_BOT_TYPE` (`3`), matching the daemon's own default so login is
+/// scan-only and the arg can be omitted.
+const DEFAULT_WECHAT_BOT_TYPE: &str = "3";
+
 impl Shell {
     /// `/wechat login <bot_type> [base_url]`
     /// Starts a `wechat.login` job that streams QR + status events back.
@@ -31,19 +36,24 @@ impl Shell {
         }
     }
 
-    /// `/wechat login <bot_type> [base_url]`
+    /// `/wechat login [bot_type] [base_url]`
+    ///
+    /// Scan-only: `bot_type` is optional and defaults to `"3"`
+    /// (`DEFAULT_ILINK_BOT_TYPE`, matching the daemon default), so plain
+    /// `/wechat login` just fetches a scannable QR.
     async fn cmd_wechat_login(&mut self, args: &str) {
         let mut parts = args.splitn(2, char::is_whitespace);
-        let bot_type = parts.next().unwrap_or("").trim().to_string();
+        let bot_type = parts.next().unwrap_or("").trim();
+        let bot_type = if bot_type.is_empty() {
+            DEFAULT_WECHAT_BOT_TYPE.to_string()
+        } else {
+            bot_type.to_string()
+        };
         let base_url = parts
             .next()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        if bot_type.is_empty() {
-            self.state.hint = "usage: /wechat login <bot_type> [base_url]".to_string();
-            return;
-        }
         let command = wechat_login_command(bot_type, base_url);
         self.state
             .note("starting wechat login — scan the QR when it appears");

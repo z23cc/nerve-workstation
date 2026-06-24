@@ -356,10 +356,12 @@ pub enum RuntimeCommand {
     /// success caches the session so [`Self::WechatStart`] can run the bridge. Pure
     /// protocol vocabulary; the daemon's WeChat host executes it (it is network +
     /// wall-clock, never `nerve-core`). The job is cancellable (cancel aborts the
-    /// QR poll). `bot_type` is your iLink bot registration's type — not a published
-    /// constant, so the caller supplies it.
+    /// QR poll). `bot_type` is the iLink bot registration type; it defaults to
+    /// `"3"` (`DEFAULT_ILINK_BOT_TYPE` — the value tools like Hermes Agent bake in),
+    /// so login is **scan-only** and the field can be omitted.
     #[serde(rename = "wechat.login")]
     WechatLogin {
+        #[serde(default = "runtime_command_impl::default_wechat_bot_type")]
         bot_type: String,
         /// Login bootstrap host; defaults to the iLink default when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,7 +379,7 @@ pub enum RuntimeCommand {
         #[serde(default)]
         owners: Vec<String>,
         /// Delegate agent catalog name (`claude` / `codex` / `gemini`).
-        #[serde(default = "default_wechat_agent")]
+        #[serde(default = "runtime_command_impl::default_wechat_agent")]
         agent: String,
         /// Autonomy granted to each delegated turn (defaults to read-only).
         #[serde(default)]
@@ -570,12 +572,6 @@ impl ApprovalMode {
             Self::Yolo => RiskTier::Exec,
         }
     }
-}
-
-/// Default delegate agent for [`RuntimeCommand::WechatStart`] when the caller
-/// omits it: the most broadly-installed CLI.
-fn default_wechat_agent() -> String {
-    "claude".to_string()
 }
 
 fn default_arguments() -> BTreeMap<String, Value> {
@@ -854,21 +850,27 @@ mod tests {
 
     #[test]
     fn wechat_commands_round_trip_and_are_named() {
-        // login: bot_type required, base_url optional (omitted by default).
-        let login: RuntimeCommand = serde_json::from_value(serde_json::json!({
-            "kind": "wechat.login",
-            "bot_type": "my-bot-type",
-        }))
-        .expect("parse wechat.login");
+        // login: scan-only — bot_type omitted defaults to "3" (DEFAULT_ILINK_BOT_TYPE),
+        // base_url omitted by default.
+        let login: RuntimeCommand =
+            serde_json::from_value(serde_json::json!({ "kind": "wechat.login" }))
+                .expect("parse wechat.login with no fields");
         assert_eq!(login.name(), "wechat.login");
         assert_eq!(login.tool_name(), None);
         match &login {
             RuntimeCommand::WechatLogin { bot_type, base_url } => {
-                assert_eq!(bot_type, "my-bot-type");
+                assert_eq!(bot_type, "3", "bot_type defaults to 3 (scan-only)");
                 assert_eq!(base_url, &None);
             }
             other => panic!("unexpected variant: {}", other.name()),
         }
+        // An explicit bot_type still overrides the default.
+        let custom: RuntimeCommand = serde_json::from_value(serde_json::json!({
+            "kind": "wechat.login",
+            "bot_type": "7",
+        }))
+        .expect("parse wechat.login with explicit bot_type");
+        assert!(matches!(&custom, RuntimeCommand::WechatLogin { bot_type, .. } if bot_type == "7"));
         // base_url omitted when None (skip_serializing_if).
         let value = serde_json::to_value(&login).expect("serialize wechat.login");
         assert!(value.get("base_url").is_none());

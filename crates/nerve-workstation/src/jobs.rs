@@ -2131,8 +2131,7 @@ mod command_executor_partition {
             "flow.replay" => json!({ "flow_id": "f" }),
             "flow.get" | "flow.close" => json!({ "flow_id": "f" }),
             "flow.respond" => json!({ "flow_id": "f", "request_id": "r", "decision": "allow" }),
-            "wechat.login" => json!({ "bot_type": "bt" }),
-            "wechat.start" | "wechat.stop" | "wechat.status" => json!({}),
+            "wechat.login" | "wechat.start" | "wechat.stop" | "wechat.status" => json!({}),
             other => panic!(
                 "RUNTIME_COMMAND_NAMES gained `{other}` with no representative here; add one and \
                  wire the variant to exactly one executor in `run_job`"

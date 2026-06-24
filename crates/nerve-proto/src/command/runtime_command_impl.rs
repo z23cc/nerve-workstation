@@ -1,5 +1,17 @@
 use super::{AuthStartFlow, RuntimeCommand};
 
+/// Default delegate agent for `wechat.start` (the most broadly-installed CLI).
+pub(super) fn default_wechat_agent() -> String {
+    "claude".to_string()
+}
+
+/// Default iLink `bot_type` for `wechat.login`: the published
+/// `DEFAULT_ILINK_BOT_TYPE` (`3`), which keeps login scan-only (the client never
+/// supplies it).
+pub(super) fn default_wechat_bot_type() -> String {
+    "3".to_string()
+}
+
 impl RuntimeCommand {
     /// Construct a browser-flow `auth.start` command with the wire-compatible default flow.
     #[must_use]

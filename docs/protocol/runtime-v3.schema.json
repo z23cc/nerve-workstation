@@ -1634,7 +1634,7 @@
           "type": "object"
         },
         {
-          "description": "Begin a personal-WeChat (个人微信) QR login through the iLink Bot gateway as\na long-lived **job**: the host fetches a QR, streams `wechat` login events\n([`crate::WechatEventKind::LoginQr`] → `LoginStatus` → `LoggedIn`), and on\nsuccess caches the session so [`Self::WechatStart`] can run the bridge. Pure\nprotocol vocabulary; the daemon's WeChat host executes it (it is network +\nwall-clock, never `nerve-core`). The job is cancellable (cancel aborts the\nQR poll). `bot_type` is your iLink bot registration's type — not a published\nconstant, so the caller supplies it.",
+          "description": "Begin a personal-WeChat (个人微信) QR login through the iLink Bot gateway as\na long-lived **job**: the host fetches a QR, streams `wechat` login events\n([`crate::WechatEventKind::LoginQr`] → `LoginStatus` → `LoggedIn`), and on\nsuccess caches the session so [`Self::WechatStart`] can run the bridge. Pure\nprotocol vocabulary; the daemon's WeChat host executes it (it is network +\nwall-clock, never `nerve-core`). The job is cancellable (cancel aborts the\nQR poll). `bot_type` is the iLink bot registration type; it defaults to\n`\"3\"` (`DEFAULT_ILINK_BOT_TYPE` — the value tools like Hermes Agent bake in),\nso login is **scan-only** and the field can be omitted.",
           "properties": {
             "base_url": {
               "description": "Login bootstrap host; defaults to the iLink default when omitted.",
@@ -1644,6 +1644,7 @@
               ]
             },
             "bot_type": {
+              "default": "3",
               "type": "string"
             },
             "kind": {
@@ -1652,8 +1653,7 @@
             }
           },
           "required": [
-            "kind",
-            "bot_type"
+            "kind"
           ],
           "type": "object"
         },

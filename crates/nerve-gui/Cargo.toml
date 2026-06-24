@@ -22,6 +22,10 @@ crate-type = ["rlib"]
 # never pulls schemars. This is the single protocol authority (no hand-rolled
 # duplicate types): the WASM app deserializes the EXACT engine types.
 nerve-proto = { workspace = true }
+# Pure-Rust QR generation. `default-features = false` drops the heavy `image`
+# dep; we re-enable only the `svg` string renderer (compiles to wasm) so the
+# WeChat login QR is generated locally from the deep-link URL — never sent out.
+qrcode = { workspace = true, features = ["svg"] }
 leptos = { version = "0.7", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["http"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
