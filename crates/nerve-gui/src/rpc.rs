@@ -7,6 +7,7 @@
 //! it, so the global is the unreplaced placeholder; in that case the operator
 //! supplies it via the URL fragment and we fall back to that.
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gloo_net::http::Request;
@@ -179,11 +180,17 @@ fn job_error(job: &Value) -> String {
 }
 
 /// Open the `/events` SSE stream and invoke `on_event` for each decoded
-/// [`RuntimeEvent`]. The token rides the URL query (an `EventSource` cannot set
-/// headers — same as the legacy gui.html). The `EventSource` + its closure are
-/// leaked deliberately: the stream lives for the app's lifetime and the browser
-/// auto-reconnects (replaying via `Last-Event-ID`).
-pub fn open_events(token: &str, on_event: impl Fn(RuntimeEvent) + 'static) -> Result<(), String> {
+/// [`RuntimeEvent`]. `on_status` reports the connection lifecycle (`true` on open,
+/// `false` on error) so the UI can show a "reconnecting" state — the browser
+/// auto-reconnects (replaying via `Last-Event-ID`), but without this the UI would
+/// silently freeze during a daemon outage. The token rides the URL query (an
+/// `EventSource` cannot set headers). The `EventSource` + its closures are leaked
+/// deliberately: the stream lives for the app's lifetime.
+pub fn open_events(
+    token: &str,
+    on_event: impl Fn(RuntimeEvent) + 'static,
+    on_status: impl Fn(bool) + 'static,
+) -> Result<(), String> {
     let url = format!("/events?token={token}");
     let source = EventSource::new(&url).map_err(|err| format!("open /events: {err:?}"))?;
     let handler = Closure::<dyn FnMut(MessageEvent)>::new(move |message: MessageEvent| {
@@ -201,6 +208,20 @@ pub fn open_events(token: &str, on_event: impl Fn(RuntimeEvent) + 'static) -> Re
     });
     source.set_onmessage(Some(handler.as_ref().unchecked_ref()));
     handler.forget();
+
+    // Connection lifecycle → `on_status` (open clears the "reconnecting" banner;
+    // error sets it). Both closures are leaked alongside the stream.
+    let on_status = Rc::new(on_status);
+    let on_open = {
+        let status = Rc::clone(&on_status);
+        Closure::<dyn FnMut()>::new(move || status(true))
+    };
+    source.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    on_open.forget();
+    let on_err = Closure::<dyn FnMut()>::new(move || on_status(false));
+    source.set_onerror(Some(on_err.as_ref().unchecked_ref()));
+    on_err.forget();
+
     std::mem::forget(source);
     Ok(())
 }

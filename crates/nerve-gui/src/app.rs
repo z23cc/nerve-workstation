@@ -184,6 +184,9 @@ pub fn App() -> impl IntoView {
     let workspace = RwSignal::new(String::new());
     let host_caps = RwSignal::new(None::<nerve_proto::HostCapabilities>);
     let branch = RwSignal::new("—".to_string());
+    // SSE connection health: false while the daemon stream is down (the browser
+    // auto-reconnects); drives the "reconnecting" banner.
+    let online = RwSignal::new(true);
     // The active workspace's root path (for delegate cwd); "" until loaded. Read
     // only from event handlers, so untracked.
     let active_root = move || {
@@ -203,7 +206,13 @@ pub fn App() -> impl IntoView {
             ));
             return;
         };
-        let _ = open_events(&tok, move |event| route_event(event, chats, approval));
+        if let Err(e) = open_events(
+            &tok,
+            move |event| route_event(event, chats, approval),
+            move |ok| online.set(ok),
+        ) {
+            error.set(Some(e));
+        }
         let workspace_tok = tok.clone();
         leptos::task::spawn_local(async move {
             let list = crate::data::list_workspaces(&workspace_tok).await;
@@ -530,6 +539,9 @@ pub fn App() -> impl IntoView {
                     toggle_inspector=toggle_inspector
                 />
                 {move || error.get().map(|e| view! { <div class="shell-error" role="alert">{e}</div> })}
+                {move || (!online.get()).then(|| view! {
+                    <div class="shell-error" role="status">"Reconnecting to the daemon…"</div>
+                })}
                 {move || if mode.get() == "context" {
                     view! {
                         <section id="surface-context" class="surface-panel" role="tabpanel" aria-labelledby="surface-tab-context" tabindex="-1">

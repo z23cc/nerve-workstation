@@ -30,6 +30,7 @@ jobs:
           rustup update stable
           rustup default stable
           rustup component add rustfmt clippy
+          rustup target add wasm32-unknown-unknown
           rustc --version
 
       # Cache the cargo registry + target dir (the 11 tree-sitter grammars compile
@@ -41,6 +42,12 @@ jobs:
 
       - name: Clippy (-D warnings, all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Gate the wasm32 frontend (nerve-gui is wasm-only; the host clippy above
+      # checks it on the host target, but wasm-specific API breakage only shows up
+      # when compiled for wasm32 — which nothing else in CI does).
+      - name: Clippy frontend (wasm32)
+        run: cargo clippy -p nerve-gui --target wasm32-unknown-unknown -- -D warnings
 
       - name: File-size gate (<= 600 non-test lines)
         run: bash Scripts/check-file-size.sh --strict
