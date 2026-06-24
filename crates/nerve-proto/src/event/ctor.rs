@@ -68,6 +68,21 @@ impl RuntimeEvent {
     }
 
     #[must_use]
+    pub fn run_recorded(
+        session_id: impl Into<String>,
+        run_id: impl Into<String>,
+        root_hash: impl Into<String>,
+        event_count: u64,
+    ) -> Self {
+        Self::RunRecorded {
+            session_id: session_id.into(),
+            run_id: run_id.into(),
+            root_hash: root_hash.into(),
+            event_count,
+        }
+    }
+
+    #[must_use]
     pub fn flow_started(flow_id: impl Into<String>, strategy: Strategy) -> Self {
         Self::FlowStarted {
             flow_id: flow_id.into(),
@@ -322,6 +337,12 @@ impl RuntimeEvent {
             | Self::ToolCallDelta { .. }
             | Self::DelegateProgress { .. }
             | Self::Auth { .. }
+            // A sealed-run announcement is a fleet-wide ledger event, like `Auth` /
+            // `Wechat`: returning `None` broadcasts it to every connected client so a
+            // fleet flight-recorder dashboard catches EVERY recorded run, not only the
+            // session a given client happens to be watching. (Routes consistently with
+            // its `DelegateProgress` stream, which is likewise broadcast.)
+            | Self::RunRecorded { .. }
             // WeChat events are global/unscoped, like `Auth`: returning `None`
             // routes them to every connected client (login + bridge status visible
             // on any surface, not tied to a session the client happens to watch).

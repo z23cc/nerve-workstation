@@ -1,0 +1,108 @@
+---
+source: crates/nerve-core/tests/golden_provenance.rs
+expression: "json!({\n    \"run_id\": run.run_id, \"root_hash\": run.root_hash, \"ledger\": run.ledger,\n    \"events\": run.events,\n})"
+---
+{
+  "events": [
+    {
+      "kind": {
+        "agent": "codex",
+        "cwd": "/repo",
+        "kind": "run_started",
+        "task": "add a regression test for the parser"
+      },
+      "seq": 0
+    },
+    {
+      "kind": {
+        "kind": "turn_started",
+        "turn": 0
+      },
+      "seq": 1
+    },
+    {
+      "kind": {
+        "kind": "output",
+        "text": "reading src/parser.rs",
+        "turn": 0
+      },
+      "seq": 2
+    },
+    {
+      "kind": {
+        "kind": "output",
+        "text": "applied edit to tests/parser.rs",
+        "turn": 0
+      },
+      "seq": 3
+    },
+    {
+      "kind": {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 800,
+        "cost_micro_usd": 4200,
+        "input_tokens": 1200,
+        "kind": "usage_updated",
+        "output_tokens": 340,
+        "turn": 0
+      },
+      "seq": 4
+    },
+    {
+      "kind": {
+        "kind": "turn_finished",
+        "ok": true,
+        "turn": 0
+      },
+      "seq": 5
+    },
+    {
+      "kind": {
+        "exit_code": 0,
+        "kind": "run_finished",
+        "ok": true,
+        "timed_out": false
+      },
+      "seq": 6
+    }
+  ],
+  "ledger": [
+    {
+      "chained_hash": "b2c7e8eda727225d1e92cb5d57cd7b5bb79007bdb2ed72afa90bc7f5962cc6c8",
+      "event_hash": "83dd6fe1ef068842715aa38491c78a27e7a5e8e0c6c332447ee50d4a5b66fb74",
+      "seq": 0
+    },
+    {
+      "chained_hash": "3b036195caca78c768fffa74380ee66d63a7e228704780beff3e6c546fa860eb",
+      "event_hash": "910672ea6de6449ef8eb36f41e5ee29a34cf1503018474d56547e148599cc45e",
+      "seq": 1
+    },
+    {
+      "chained_hash": "6a89675913654e84962e64e61a1e2eef8b382515300ad0bcb0f61eb0354828af",
+      "event_hash": "fc783bee12009e21d0588c096a11b2be9e17014ba9ff82eee426f5978bd380be",
+      "seq": 2
+    },
+    {
+      "chained_hash": "8bfd8fae6f530150177526ef89800ccde412996bf29d4071951c891936449b3f",
+      "event_hash": "08fb828b5110150f4b4727e726c8f4319cec4b7dcb36582223732a5752aad667",
+      "seq": 3
+    },
+    {
+      "chained_hash": "5962da6cea09d5aca8ec69b461a47346e10fcaadc6aaf1f8d323457d00e8219a",
+      "event_hash": "95ef61ee8c9bba4317a55cfc2f268b93605547a4ab5eadaaee31bd5dbc7aa2af",
+      "seq": 4
+    },
+    {
+      "chained_hash": "a36b1a7512f97231fedbd8e5768a226618cb99f34d5d176dc32727e0beb1cdba",
+      "event_hash": "4e68adcae799bc03d7c446e171076824ef5fa29e6edcf529928cbc41d6af6d6c",
+      "seq": 5
+    },
+    {
+      "chained_hash": "452918524e4c422114d11038d93e628bee2e8955d34eea549fc4fe19419a1a2a",
+      "event_hash": "e3718f41a9b1256e665f260a6a58a74f9ebd62c0bfbe804d092d24b1f0d485ef",
+      "seq": 6
+    }
+  ],
+  "root_hash": "452918524e4c422114d11038d93e628bee2e8955d34eea549fc4fe19419a1a2a",
+  "run_id": "452918524e4c422114d11038d93e628bee2e8955d34eea549fc4fe19419a1a2a"
+}

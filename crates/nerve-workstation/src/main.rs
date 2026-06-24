@@ -35,6 +35,7 @@ mod openai;
 mod policy;
 mod providers;
 mod rpc;
+mod run_store;
 mod runconfig;
 mod sandbox;
 mod server;

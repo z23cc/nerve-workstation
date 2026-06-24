@@ -343,6 +343,7 @@ impl JobManager {
         let outcome = match executor_for(&command) {
             Executor::AgentRun => self.run_agent_command(&job_id, command, &token),
             Executor::Delegate => self.run_delegate_command(&job_id, command, &token),
+            Executor::Run => self.run_run_command(command),
             Executor::Host => self.run_host_command(command, &token),
             Executor::Session => self.sessions.handle_command(command, &token),
             Executor::Auth => self.auth.handle_command(command, &token),
@@ -487,6 +488,26 @@ impl JobManager {
             ),
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected a delegate.* command",
+            )),
+        }
+    }
+
+    /// Execute a `run.*` command (L0 flight-recorder, read-only): enumerate or fetch
+    /// captured Runs from the persisted [`RunStore`](crate::run_store) for the served
+    /// root. No served root => an empty list / not-found, mirroring `delegate.*`.
+    fn run_run_command(
+        &self,
+        command: RuntimeCommand,
+    ) -> Result<Value, nerve_runtime::RuntimeError> {
+        match command {
+            RuntimeCommand::RunList => {
+                Ok(crate::run_store::run_run_list(self.run_store().as_ref()))
+            }
+            RuntimeCommand::RunGet { run_id } => {
+                crate::run_store::run_run_get(&run_id, self.run_store().as_ref())
+            }
+            _ => Err(nerve_runtime::RuntimeError::adapter(
+                "expected a run.* command",
             )),
         }
     }
@@ -798,6 +819,9 @@ impl JobManager {
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
         let agent = resolved.catalog_name();
+        // L0 run capture: stamp the session start now; each turn's outcome is recorded
+        // into the live handle and sealed into one content-addressed Run at close.
+        let started_at_ms = now_ms();
         let emit = Arc::clone(&self.emit);
         let job = job_id.to_string();
         let mut on_progress = |text: &str| {
@@ -855,8 +879,21 @@ impl JobManager {
         (self.emit)(RuntimeEvent::session_idle(job_id.to_string()));
         // Register and park: the session stays live for `delegate.steer` until a
         // `delegate.close` (or cancel) wakes this thread to tear it down.
-        let handle = self.live_sessions.register(job_id, driver);
+        // `register` records turn 1 for L0 capture before the handle is reachable;
+        // each steer records its own turn under the session lock (see LiveHandle).
+        let handle = self.live_sessions.register(job_id, driver, &turn);
         self.live_sessions.park_until_closed(job_id, &handle);
+        // Session closed: seal every recorded turn into one content-addressed Run.
+        let turns = handle.take_turns();
+        self.seal_live_run(
+            job_id,
+            agent,
+            task,
+            cwd,
+            started_at_ms,
+            turns,
+            !token.is_cancelled(),
+        );
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
@@ -968,6 +1005,8 @@ impl JobManager {
             session_id,
             crate::delegate_store::DelegateSessionRecord::touch,
         );
+        // The steer turn is recorded for L0 capture inside `LiveHandle::steer` (under
+        // the session lock); the Run is sealed when the session closes.
         Ok(turn.to_json(agent, session_id))
     }
 
@@ -989,6 +1028,13 @@ impl JobManager {
     /// convention (no held field) — see `crate::delegate_store`.
     fn delegate_store(&self) -> Option<crate::delegate_store::DelegateStore> {
         crate::delegate_store::DelegateStore::for_scope(self.delegate_root().ok().as_deref()).ok()
+    }
+
+    /// The durable L0 run store for the served project root, if any (`None` when no
+    /// root is served). Resolved per call, matching the `DelegateStore`/`FlowStore`
+    /// convention (no held field) — see `crate::run_store`.
+    fn run_store(&self) -> Option<crate::run_store::RunStore> {
+        crate::run_store::RunStore::for_scope(self.delegate_root().ok().as_deref()).ok()
     }
 
     /// Best-effort update of a persisted delegate record (load -> mutate -> write): a
@@ -1100,34 +1146,164 @@ impl JobManager {
         let emit = Arc::clone(&self.emit);
         let job = job_id.to_string();
         let agent_owned = agent_name.to_string();
-        let mut on_line = |line: &str| {
-            if let Some(text) = parser.ingest(line) {
-                emit(RuntimeEvent::delegate_progress(
-                    job.clone(),
-                    agent_owned.clone(),
-                    text,
-                ));
-            }
-        };
-        let output = self
-            .delegate_launcher
-            .launch_streaming(
+        // L0 run capture (best-effort): record the delegated run as a
+        // content-addressed event tape ALONGSIDE the existing — untouched —
+        // DelegateProgress stream. The raw stdout/stderr line is the tape's
+        // `Output` unit; persistence happens at seal and never fails the turn.
+        let root = self.delegate_root().ok().map(|p| p.display().to_string());
+        let mut writer = crate::run_store::RunWriter::begin(job_id, agent_name, root);
+        writer.push(nerve_core::provenance::EventKind::RunStarted {
+            agent: agent_name.to_string(),
+            task: task.to_string(),
+            cwd: Some(cwd.display().to_string()),
+        });
+        writer.push(nerve_core::provenance::EventKind::TurnStarted { turn: 0 });
+        let launch = {
+            let mut on_line = |line: &str| {
+                writer.push(nerve_core::provenance::EventKind::Output {
+                    turn: 0,
+                    text: line.to_string(),
+                });
+                if let Some(text) = parser.ingest(line) {
+                    emit(RuntimeEvent::delegate_progress(
+                        job.clone(),
+                        agent_owned.clone(),
+                        text,
+                    ));
+                }
+            };
+            self.delegate_launcher.launch_streaming(
                 &invocation.spec,
                 &policy,
                 &invocation.stdin,
                 token,
                 &mut on_line,
             )
-            .map_err(|err| delegate_launch_error(agent_name, &err))?;
-        if token.is_cancelled() {
+        };
+        let output = launch.map_err(|err| delegate_launch_error(agent_name, &err))?;
+        let cancelled = token.is_cancelled();
+        let outcome = parser.finish(agent_name, output.exit_code, output.timed_out);
+        self.seal_delegate_run(job_id, writer, &outcome, !cancelled);
+        if cancelled {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
-        let outcome = parser.finish(agent_name, output.exit_code, output.timed_out);
         Ok(outcome.to_json())
+    }
+
+    /// Seal a one-shot delegated run's captured tape (best-effort) and announce it.
+    /// Appends the terminal usage / turn / run events derived from the
+    /// [`DelegateOutcome`](delegate_runtime::DelegateOutcome), content-addresses +
+    /// persists the [`Run`](crate::run_store), and emits `RunRecorded` to the client
+    /// watching the session. A persistence failure is swallowed — capture is an audit
+    /// seam, never a gate on the turn.
+    fn seal_delegate_run(
+        &self,
+        job_id: &str,
+        mut writer: crate::run_store::RunWriter,
+        outcome: &delegate_runtime::DelegateOutcome,
+        finished: bool,
+    ) {
+        use nerve_core::provenance::EventKind;
+        if let Some(usage) = &outcome.usage {
+            writer.push(delegate_usage_event(0, usage, outcome.cost_usd));
+        }
+        writer.push(EventKind::TurnFinished {
+            turn: 0,
+            ok: outcome.ok,
+        });
+        writer.push(EventKind::RunFinished {
+            ok: outcome.ok,
+            exit_code: outcome.exit_code,
+            timed_out: outcome.timed_out,
+        });
+        self.emit_run_recorded(job_id, writer.seal(finished, self.run_store().as_ref()));
+    }
+
+    /// Seal a live delegated session's captured turns (claude/codex) into one
+    /// content-addressed Run and announce it (best-effort). Each [`CapturedTurn`]
+    /// becomes `TurnStarted` → optional `UsageUpdated` → `TurnFinished`, bracketed by
+    /// `RunStarted` / `RunFinished`. The raw per-line output tape is NOT captured on
+    /// the live path yet (it sits behind the streamed `on_progress` filter); this
+    /// records the run's lifecycle + usage, the foundation a later brick extends with
+    /// the live raw tape. `finished` is false when the session ended by cancellation.
+    #[allow(clippy::too_many_arguments)] // reason: one cohesive seal call; the run
+    // identity (job_id/agent), the start context (task/cwd/started_at_ms), the
+    // captured turns, and the finished flag are independent inputs, and bundling them
+    // into a struct would add indirection without isolating a separate responsibility
+    // (mirrors `run_delegate_live` / `start_live_driver` in this file).
+    fn seal_live_run(
+        &self,
+        job_id: &str,
+        agent: &str,
+        task: &str,
+        cwd: &std::path::Path,
+        started_at_ms: u64,
+        turns: Vec<crate::delegate_live::CapturedTurn>,
+        finished: bool,
+    ) {
+        use nerve_core::provenance::EventKind;
+        let root = self.delegate_root().ok().map(|p| p.display().to_string());
+        let mut writer = crate::run_store::RunWriter::begin_at(started_at_ms, job_id, agent, root);
+        writer.push(EventKind::RunStarted {
+            agent: agent.to_string(),
+            task: task.to_string(),
+            cwd: Some(cwd.display().to_string()),
+        });
+        let mut last_ok = true;
+        for (index, captured) in turns.iter().enumerate() {
+            let turn = index as u64;
+            writer.push(EventKind::TurnStarted { turn });
+            if let Some(usage) = &captured.usage {
+                writer.push(delegate_usage_event(turn, usage, captured.cost_usd));
+            }
+            writer.push(EventKind::TurnFinished {
+                turn,
+                ok: captured.ok,
+            });
+            last_ok = captured.ok;
+        }
+        writer.push(EventKind::RunFinished {
+            ok: finished && last_ok,
+            exit_code: None,
+            timed_out: false,
+        });
+        self.emit_run_recorded(job_id, writer.seal(finished, self.run_store().as_ref()));
+    }
+
+    /// Emit a `RunRecorded` announcement for a sealed run, if it persisted. A
+    /// best-effort no-op when sealing was skipped (no served root / write failure).
+    fn emit_run_recorded(&self, job_id: &str, sealed: Option<crate::run_store::SealedRun>) {
+        if let Some(sealed) = sealed {
+            self.emit(RuntimeEvent::run_recorded(
+                job_id,
+                sealed.run_id,
+                sealed.root_hash,
+                sealed.event_count,
+            ));
+        }
     }
 
     fn emit(&self, event: RuntimeEvent) {
         (self.emit)(event);
+    }
+}
+
+/// Build a [`UsageUpdated`](nerve_core::provenance::EventKind::UsageUpdated) event
+/// for one turn from a parsed [`DelegateUsage`](delegate_runtime::DelegateUsage) +
+/// reported USD cost. Shared by the one-shot and live capture paths; cost is stored
+/// as integer micro-USD (no floats in the hashed bytes — INV-R2).
+fn delegate_usage_event(
+    turn: u64,
+    usage: &delegate_runtime::DelegateUsage,
+    cost_usd: Option<f64>,
+) -> nerve_core::provenance::EventKind {
+    nerve_core::provenance::EventKind::UsageUpdated {
+        turn,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_creation_tokens: usage.cache_creation_tokens,
+        cost_micro_usd: crate::run_store::cost_to_micro_usd(cost_usd),
     }
 }
 
@@ -1272,6 +1448,9 @@ enum Executor {
     /// The host delegate runtime (`delegate.*` family): drives an external agent
     /// CLI subprocess. DA-1 ships a stub; DA-2 wires the real subprocess.
     Delegate,
+    /// The host L0 run store (`run.*` family): enumerate/fetch captured Runs from
+    /// the persisted [`RunStore`](crate::run_store) (read-only).
+    Run,
     /// The runtime host/native shell side-effects (`host.*` / `workspace.*`).
     Host,
     /// The host `SessionManager` (`session.*` family).
@@ -2064,6 +2243,7 @@ fn executor_for(command: &RuntimeCommand) -> Executor {
         | RuntimeCommand::DelegateClose { .. }
         | RuntimeCommand::DelegateGet { .. }
         | RuntimeCommand::DelegateList => Executor::Delegate,
+        RuntimeCommand::RunList | RuntimeCommand::RunGet { .. } => Executor::Run,
         RuntimeCommand::HostCapabilities
         | RuntimeCommand::HostClipboardWriteText { .. }
         | RuntimeCommand::HostNotificationShow { .. }
@@ -2150,8 +2330,9 @@ mod command_executor_partition {
     /// an executor decision in `every_runtime_command_has_exactly_one_executor`.
     fn representative(name: &str) -> RuntimeCommand {
         let fields: Value = match name {
-            "ping" | "tool.list" | "session.list" | "flow.list" | "delegate.list"
+            "ping" | "tool.list" | "session.list" | "flow.list" | "delegate.list" | "run.list"
             | "host.capabilities" | "workspace.reveal" => json!({}),
+            "run.get" => json!({ "run_id": "r" }),
             "host.clipboard.write_text" => json!({ "text": "copy me" }),
             "host.notification.show" => json!({ "title": "Nerve", "body": "Done" }),
             "host.folder.pick" => json!({ "title": "Choose project folder" }),
@@ -2237,6 +2418,7 @@ mod command_executor_partition {
         for executor in [
             Executor::AgentRun,
             Executor::Delegate,
+            Executor::Run,
             Executor::Host,
             Executor::Session,
             Executor::Auth,

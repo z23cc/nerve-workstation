@@ -13,7 +13,8 @@
 //! under the handle's `session` mutex, so a steer can never overlap turn 1 or
 //! another steer. The close signal is a `Condvar` the parked start thread waits on.
 
-use crate::delegate_session::DelegateSession;
+use crate::delegate_runtime::DelegateUsage;
+use crate::delegate_session::{DelegateSession, TurnResult};
 use crate::delegate_session_codex::CodexSession;
 use nerve_core::CancelToken;
 use serde_json::{Value, json};
@@ -141,6 +142,18 @@ impl LiveDriver {
     }
 }
 
+/// One delegated turn's outcome, accumulated across a live session's turns for L0
+/// run capture (`trust-substrate.md` §3 L0). Plain data — no raw output tape (that
+/// lives behind the streamed `on_progress` filter and is a later increment); just
+/// the lifecycle facts (`ok` + usage/cost) the host already observes per turn, from
+/// which `seal_live_run` builds the run's `TurnStarted`/`UsageUpdated`/`TurnFinished`
+/// events. Accumulating plain data here keeps capture off the cancel/teardown path.
+pub(crate) struct CapturedTurn {
+    pub(crate) ok: bool,
+    pub(crate) usage: Option<DelegateUsage>,
+    pub(crate) cost_usd: Option<f64>,
+}
+
 /// One live delegated session, keyed by the originating `delegate.start` job id.
 pub(crate) struct LiveHandle {
     /// The catalog agent kind ("claude"/"codex"), cached at construction and fixed
@@ -160,6 +173,12 @@ pub(crate) struct LiveHandle {
     /// runs under a token linked to this one, so a close/cancel promptly interrupts
     /// the in-flight turn and reaps the child instead of waiting out the turn timeout.
     session_cancel: CancelToken,
+    /// L0 run-capture accumulator: one [`CapturedTurn`] per completed turn (turn 1 +
+    /// each steer), drained by [`Self::take_turns`] at close so the host seals one
+    /// content-addressed [`Run`](crate::run_store) for the whole live session. Its
+    /// own mutex (not the `session` lock) so recording a turn never contends with an
+    /// in-flight turn or a fleet snapshot.
+    turns: Mutex<Vec<CapturedTurn>>,
 }
 
 impl LiveHandle {
@@ -170,7 +189,30 @@ impl LiveHandle {
             close_requested: Mutex::new(false),
             close_cv: Condvar::new(),
             session_cancel: CancelToken::new(),
+            turns: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Record one completed turn's outcome for L0 run capture. Private and called
+    /// only at points that guarantee it lands before [`take_turns`](Self::take_turns)
+    /// can drain at close: turn 1 from [`LiveSessions::register`] (before the handle
+    /// enters the registry, so no steer can reach it first) and each steer turn from
+    /// inside [`Self::steer`] (while the `session` lock is held — close's `shutdown`
+    /// must re-acquire that lock before `take_turns` runs, so a just-finished steer
+    /// is always recorded first). Locks only `turns` (never nested the other way), so
+    /// the brief `session → turns` order it runs under cannot deadlock.
+    fn record_turn(&self, turn: &TurnResult) {
+        crate::sync::lock_recover(&self.turns).push(CapturedTurn {
+            ok: turn.ok,
+            usage: turn.usage,
+            cost_usd: turn.cost_usd,
+        });
+    }
+
+    /// Drain the accumulated turns for sealing at close. Leaves the accumulator empty
+    /// so a double-seal would capture nothing rather than duplicate the tape.
+    pub(crate) fn take_turns(&self) -> Vec<CapturedTurn> {
+        std::mem::take(&mut *crate::sync::lock_recover(&self.turns))
     }
 
     /// A non-blocking, read-only summary of this session for `delegate.list` /
@@ -234,7 +276,13 @@ impl LiveHandle {
         let result = session.steer(message, link.token(), on_progress);
         drop(link);
         match result {
-            Ok(turn) => Ok((turn, agent)),
+            // Record this turn for L0 capture WHILE still holding the `session` lock:
+            // a close's `shutdown` must re-acquire that lock to reap, so this push is
+            // guaranteed to land before the parked thread's `take_turns` drains.
+            Ok(turn) => {
+                self.record_turn(&turn);
+                Ok((turn, agent))
+            }
             // A cancelled/interrupted turn leaves the session half-consumed. Tear it
             // down here (reap + clear the slot) so it is no longer steerable, and
             // signal close so the parked start thread wakes and the start job goes
@@ -340,9 +388,18 @@ pub(crate) struct LiveSessions {
 
 impl LiveSessions {
     /// Register a freshly-started session under its start-job id, returning the
-    /// shared handle the parked thread parks on.
-    pub(crate) fn register(&self, session_id: &str, driver: LiveDriver) -> Arc<LiveHandle> {
+    /// shared handle the parked thread parks on. `first_turn` is turn 1's outcome,
+    /// recorded for L0 capture **before** the handle enters the registry — so it is
+    /// always the run's first recorded turn, ahead of any steer that could race in
+    /// once the handle is reachable.
+    pub(crate) fn register(
+        &self,
+        session_id: &str,
+        driver: LiveDriver,
+        first_turn: &crate::delegate_session::TurnResult,
+    ) -> Arc<LiveHandle> {
         let handle = Arc::new(LiveHandle::new(driver));
+        handle.record_turn(first_turn);
         crate::sync::lock_recover(&self.sessions)
             .insert(session_id.to_string(), Arc::clone(&handle));
         handle
@@ -526,7 +583,13 @@ mod tests {
         let registry = LiveSessions::default();
         let session = DelegateSession::from_child_for_test(spawn_sleeper());
         let pgid = session.child_pid();
-        let handle = registry.register("job-1", LiveDriver::Claude(session));
+        let first_turn = TurnResult {
+            ok: true,
+            result: "turn 1".into(),
+            usage: None,
+            cost_usd: None,
+        };
+        let handle = registry.register("job-1", LiveDriver::Claude(session), &first_turn);
 
         let list = registry.list();
         let delegates = list["delegates"].as_array().expect("delegates array");
@@ -555,5 +618,39 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("process group {pgid} leaked after shutdown");
+    }
+
+    /// L0 capture: a live handle accumulates one [`CapturedTurn`] per recorded turn
+    /// and [`take_turns`](LiveHandle::take_turns) drains them (so a double-seal can
+    /// never duplicate the tape). Off the `session` lock, so it does not disturb the
+    /// steer/close machinery.
+    #[test]
+    fn record_turn_accumulates_and_take_turns_drains() {
+        let session = DelegateSession::from_child_for_test(spawn_sleeper());
+        let handle = LiveHandle::new(LiveDriver::Claude(session));
+        handle.record_turn(&TurnResult {
+            ok: true,
+            result: "turn 1".into(),
+            usage: None,
+            cost_usd: None,
+        });
+        handle.record_turn(&TurnResult {
+            ok: false,
+            result: "turn 2".into(),
+            usage: Some(DelegateUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }),
+            cost_usd: Some(0.5),
+        });
+        let turns = handle.take_turns();
+        assert_eq!(turns.len(), 2);
+        assert!(turns[0].ok && !turns[1].ok);
+        assert_eq!(turns[1].usage.map(|u| u.input_tokens), Some(10));
+        // Draining empties the accumulator — a second seal records nothing.
+        assert!(handle.take_turns().is_empty());
+        handle.shutdown();
     }
 }

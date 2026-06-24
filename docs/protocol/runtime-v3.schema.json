@@ -314,6 +314,200 @@
         }
       ]
     },
+    "Event": {
+      "description": "One node in a run's append-only tape: a logical sequence number plus the typed\nstep. `seq` is a monotonic logical clock (0,1,2,…) assigned at capture, *not* a\nwall-clock — so a replay reproduces byte-identical ordering and hashes. The\n`kind` is a nested object (`{\"seq\":N,\"kind\":{\"kind\":\"...\",...}}`) rather than\nflattened: a stable, schemars-clean `$ref` to [`EventKind`] that keeps the\nexported protocol schema deterministic.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EventKind"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "EventKind": {
+      "description": "One typed, replayable step in a captured run's tape (`trust-substrate.md`\n§5 `Event.kind`). Internally tagged (`{\"kind\": \"...\", ...}`), mirroring\n[`crate::FlowDecisionKind`] / [`crate::AgentEventKind`] so the audit trail is\ngolden-diffable. The set is intentionally small and **execution-grounded** —\nonly events a real delegated CLI run actually produces today. Tool-lifecycle\nkinds (`tool_started` / `tool_finished`) are deliberately absent: the external\nCLIs emit raw text, not parsed tool structure, so a reserved-but-unfilled kind\nwould be dead protocol. Additive: new kinds may be appended.",
+      "oneOf": [
+        {
+          "description": "The run began: which agent, the delegated task text, and the working dir.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "run_started",
+              "type": "string"
+            },
+            "task": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "agent",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A turn of the delegated agent began. `turn` is a 0-based logical index.",
+          "properties": {
+            "kind": {
+              "const": "turn_started",
+              "type": "string"
+            },
+            "turn": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A raw stdout/stderr line from the delegated CLI — the tape unit. `turn`\nattributes it to the turn that produced it.",
+          "properties": {
+            "kind": {
+              "const": "output",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "turn": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Per-turn token/cost rollup, emitted only when the agent reported usage.\nAll counts are `u64`; cost is integer micro-USD (never a float) so the\nhashed canonical bytes are stable.",
+          "properties": {
+            "cache_creation_tokens": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "cache_read_tokens": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "cost_micro_usd": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "input_tokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "usage_updated",
+              "type": "string"
+            },
+            "output_tokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "turn": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn",
+            "input_tokens",
+            "output_tokens"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A turn finished. `ok` is the turn's success as the host observed it.",
+          "properties": {
+            "kind": {
+              "const": "turn_finished",
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "turn": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn",
+            "ok"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The run finished: overall success, the process exit code when known, and\nwhether it was killed by the wall-clock timeout.",
+          "properties": {
+            "exit_code": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "run_finished",
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "timed_out": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "ok"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "FailPolicy": {
       "description": "What the engine does when a step's worker fails (`ok == false` or errored).",
       "oneOf": [
@@ -716,6 +910,28 @@
         }
       ]
     },
+    "LedgerEntry": {
+      "description": "One entry on the content-addressed spine: this event's own digest plus the\nchained digest committing to it and every prior event\n(`chained[n] = sha256(chained[n-1] || event_hash[n])`). A verifier re-derives\nthe spine from the [`Run::events`] to confirm the tape is untampered.",
+      "properties": {
+        "chained_hash": {
+          "type": "string"
+        },
+        "event_hash": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "event_hash",
+        "chained_hash"
+      ],
+      "type": "object"
+    },
     "RiskTier": {
       "description": "Coarse risk classification for a tool, ordered least-to-most privileged.\nAdvisory protocol data consumed by a future permission engine (P4); it does\nnot gate execution today.",
       "oneOf": [
@@ -735,6 +951,74 @@
           "type": "string"
         }
       ]
+    },
+    "Run": {
+      "description": "A captured, replayable agent run — the L0 unit of trust. The ordered\n[`Self::events`] tape is the record; [`Self::ledger`] is its content-addressed\nspine; [`Self::root_hash`] (the spine head, `\"\"` for an empty tape) is the\nsingle content address. `started_at_ms` / `finished_at_ms` are host wall-clock\nmetadata for display and are **excluded from the hashed bytes** (only `events`\nare hashed), so they never perturb the content address.",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "finished": {
+          "default": false,
+          "type": "boolean"
+        },
+        "finished_at_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ledger": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LedgerEntry"
+          },
+          "type": "array"
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root_hash": {
+          "default": "",
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "session_id",
+        "agent",
+        "started_at_ms",
+        "events"
+      ],
+      "type": "object"
     },
     "RuntimeCapabilities": {
       "properties": {
@@ -1326,6 +1610,36 @@
           },
           "required": [
             "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "List captured Runs — the L0 flight-recorder index (`trust-substrate.md`\n§6). Read-only; mirrors `delegate.list` / `flow.list`. Pure protocol\nvocabulary: the host reads the persisted `RunStore`; `nerve-core` has no\nstore. The result is `{ \"runs\": [ <Run>, … ] }`, newest `run_id` first.",
+          "properties": {
+            "kind": {
+              "const": "run.list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Fetch one captured Run by its content-addressed id (`trust-substrate.md`\n§6). Read-only; an unknown id is an error. The result is the full\n[`crate::provenance::Run`] (its event tape + content-addressed ledger), so\na client can replay or re-verify it.",
+          "properties": {
+            "kind": {
+              "const": "run.get",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id"
           ],
           "type": "object"
         },
@@ -2106,6 +2420,37 @@
           "type": "object"
         },
         {
+          "description": "A delegated run's tape has been sealed and persisted to the `RunStore` —\nthe L0 flight-recorder \"run recorded\" announcement (`trust-substrate.md`\n§6). `root_hash` is the content address committing to the whole ordered\ntape (`\"\"` if empty); a client fetches the full [`crate::provenance::Run`]\nvia `run.get`. **Global/unscoped** ([`Self::session_id`] returns `None`, like\n[`Self::Auth`] / [`Self::Wechat`]): a sealed run is a fleet-wide ledger event,\nso it is broadcast to every connected client and a fleet flight-recorder\ndashboard catches EVERY recorded run — not only the session it watches. The\n`session_id` field still names the originating `delegate.start` session for\nattribution. Additive; the payload is intentionally tiny (ids + root hash +\ncount), never the whole tape.",
+          "properties": {
+            "event_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "root_hash": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "run_id",
+            "root_hash",
+            "event_count"
+          ],
+          "type": "object"
+        },
+        {
           "description": "A flow run (the Conductor, design §4) has started. Carries the declarative\n[`Strategy`] so a client can render the DAG shape before any node runs. All\n`flow_*` events carry the `flow_id` (which is the flow job's id).",
           "properties": {
             "flow_id": {
@@ -2748,6 +3093,37 @@
             "job_id",
             "agent",
             "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A delegated run's tape has been sealed and persisted to the `RunStore` —\nthe L0 flight-recorder \"run recorded\" announcement (`trust-substrate.md`\n§6). `root_hash` is the content address committing to the whole ordered\ntape (`\"\"` if empty); a client fetches the full [`crate::provenance::Run`]\nvia `run.get`. **Global/unscoped** ([`Self::session_id`] returns `None`, like\n[`Self::Auth`] / [`Self::Wechat`]): a sealed run is a fleet-wide ledger event,\nso it is broadcast to every connected client and a fleet flight-recorder\ndashboard catches EVERY recorded run — not only the session it watches. The\n`session_id` field still names the originating `delegate.start` session for\nattribution. Additive; the payload is intentionally tiny (ids + root hash +\ncount), never the whole tape.",
+          "properties": {
+            "event_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "root_hash": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "run_id",
+            "root_hash",
+            "event_count"
           ],
           "type": "object"
         },
@@ -3847,6 +4223,10 @@
       "$ref": "#/$defs/HostCapabilities"
     },
     "jsonValue": true,
+    "run": {
+      "$ref": "#/$defs/Run",
+      "description": "L0 provenance shape root: a `run.get` returns a [`crate::provenance::Run`],\nwhich transitively pulls `Event` / `EventKind` / `LedgerEntry` into the\nexported schema (they are not reachable from any wire field on their own —\n`run_recorded` carries only ids + the root hash)."
+    },
     "runtimeCommand": {
       "$ref": "#/$defs/RuntimeCommand"
     },
@@ -3898,6 +4278,7 @@
     "runtimeCommand",
     "approvalMode",
     "runtimeEvent",
+    "run",
     "runtimeEventNotification",
     "runtimeInfo",
     "hostCapabilities",

@@ -160,7 +160,9 @@ These extend — never weaken — invariants 1–9.
 ```
 nerve-core       deterministic kernel — CatalogProvider port → immutable CatalogSnapshot;
   ▲   ▲          tools (search/read/tree/codemap/repomap/navigate/edit/build_context/scout);
-  │   │          dispatch hub entry (handle_tool_call*). Golden-tested. Depends on nothing internal.
+  │   │          dispatch hub entry (handle_tool_call*). Golden-tested. Depends only on
+  │   │          `nerve-proto` (pure, zero-internal-dep serde shapes) for the L0 provenance
+  │   │          schema it content-addresses (`provenance.rs`, INV-R2) — no other internal dep.
   │   │
   │   └── nerve-agent   LLM layer — LlmProvider trait + Anthropic/OpenAI-Responses/xAI adapters,
   │                     multi-provider OAuth + credential store, Orchestrator loop, ToolBox port.
@@ -177,6 +179,13 @@ nerve-tui (+ future GUI/mobile)   clients of the versioned runtime protocol — 
 
 `nerve-agent` and `nerve-runtime` are **siblings** (both depend only on `nerve-core`); the binary
 marries them via the `ToolBox` port (`RuntimeToolBox` in `agent.rs`).
+
+> **`nerve-proto` is below the kernel.** The wasm-safe, zero-internal-dependency protocol-vocabulary
+> crate is the one internal crate `nerve-core` may depend on: it carries pure serde data only (no
+> tree-sitter / LLM / IO), so the kernel reusing its L0 `Run`/`Event`/`LedgerEntry` shapes for
+> content-addressing (`nerve_core::provenance`) introduces no non-determinism and no cycle
+> (`nerve-proto` depends on nothing internal). This keeps the Run/Ledger schema *portable protocol
+> data* (INV-R5) while the hashing that fills it stays *pure and golden-tested* in the kernel (INV-R2).
 
 ## 5. Seam scorecard
 

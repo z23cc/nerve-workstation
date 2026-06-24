@@ -54,6 +54,8 @@ impl RuntimeCommand {
             Self::DelegateClose { .. } => "delegate.close",
             Self::DelegateGet { .. } => "delegate.get",
             Self::DelegateList => "delegate.list",
+            Self::RunList => "run.list",
+            Self::RunGet { .. } => "run.get",
             Self::FlowStart { .. } => "flow.start",
             Self::FlowSteer { .. } => "flow.steer",
             Self::FlowReplay { .. } => "flow.replay",
@@ -101,6 +103,8 @@ impl RuntimeCommand {
             | Self::DelegateClose { .. }
             | Self::DelegateGet { .. }
             | Self::DelegateList
+            | Self::RunList
+            | Self::RunGet { .. }
             | Self::FlowStart { .. }
             | Self::FlowSteer { .. }
             | Self::FlowReplay { .. }

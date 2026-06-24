@@ -16,6 +16,7 @@ pub mod models;
 pub mod navigate;
 pub(crate) mod path_match;
 pub mod port;
+pub mod provenance;
 pub(crate) mod ranking;
 pub mod read;
 pub mod recipe;
@@ -68,6 +69,7 @@ pub use navigate::{
     PathStep, TracePathRequest, TracePathResponse, trace_path, trace_path_cancellable,
 };
 pub use port::CatalogProvider;
+pub use provenance::{build_ledger, build_run, hash_event};
 pub use read::read_file;
 pub use repomap::{RepoMapRequest, get_repo_map, get_repo_map_cancellable};
 pub use search::{search_snapshot, search_snapshot_cancellable};

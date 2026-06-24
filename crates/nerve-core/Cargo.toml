@@ -13,10 +13,19 @@ default = []
 aho-corasick.workspace = true
 globset.workspace = true
 memchr.workspace = true
+# Pure, zero-internal-dep protocol-vocabulary crate (wasm-safe serde data). The
+# kernel depends on it ONLY for the L0 provenance SHAPES (`Run`/`Event`/…) it
+# content-addresses in `provenance.rs`; this adds no non-determinism (INV-R2) and
+# no cycle (nerve-proto depends on nothing internal). See architecture-north-star §4.
+nerve-proto.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Cryptographic hash for content-addressing the run/event ledger (L0). Pure Rust,
+# wasm-safe. Distinct from the non-crypto FNV-1a in `edit/text.rs` (whitespace-lossy,
+# wrong for an audit trail receipts depend on).
+sha2.workspace = true
 thiserror.workspace = true
 tiktoken-rs.workspace = true
 similar = "2"

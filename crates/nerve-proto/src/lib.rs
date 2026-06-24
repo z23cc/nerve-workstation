@@ -23,6 +23,7 @@ pub mod job;
 pub mod protocol;
 #[doc(hidden)]
 pub mod protocol_codegen;
+pub mod provenance;
 pub mod risk;
 pub mod tool_spec;
 
@@ -43,5 +44,6 @@ pub use job::{
     RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
 };
 pub use protocol::{HostCapabilities, HostCapabilitySupport};
+pub use provenance::{Event, EventKind, LedgerEntry, RUN_SCHEMA_VERSION, Run};
 pub use risk::{RiskTier, ToolCapability};
 pub use tool_spec::RuntimeToolSpec;

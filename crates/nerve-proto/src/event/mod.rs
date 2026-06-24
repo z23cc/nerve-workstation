@@ -109,6 +109,23 @@ pub enum RuntimeEvent {
         agent: String,
         text: String,
     },
+    /// A delegated run's tape has been sealed and persisted to the `RunStore` —
+    /// the L0 flight-recorder "run recorded" announcement (`trust-substrate.md`
+    /// §6). `root_hash` is the content address committing to the whole ordered
+    /// tape (`""` if empty); a client fetches the full [`crate::provenance::Run`]
+    /// via `run.get`. **Global/unscoped** ([`Self::session_id`] returns `None`, like
+    /// [`Self::Auth`] / [`Self::Wechat`]): a sealed run is a fleet-wide ledger event,
+    /// so it is broadcast to every connected client and a fleet flight-recorder
+    /// dashboard catches EVERY recorded run — not only the session it watches. The
+    /// `session_id` field still names the originating `delegate.start` session for
+    /// attribution. Additive; the payload is intentionally tiny (ids + root hash +
+    /// count), never the whole tape.
+    RunRecorded {
+        session_id: String,
+        run_id: String,
+        root_hash: String,
+        event_count: u64,
+    },
     /// A flow run (the Conductor, design §4) has started. Carries the declarative
     /// [`Strategy`] so a client can render the DAG shape before any node runs. All
     /// `flow_*` events carry the `flow_id` (which is the flow job's id).
@@ -602,6 +619,22 @@ mod tests {
             serde_json::from_value::<RuntimeEvent>(value).expect("round-trip"),
             round
         );
+    }
+
+    #[test]
+    fn run_recorded_round_trips_and_is_session_scoped() {
+        let event = RuntimeEvent::run_recorded("job-7", "abc123", "deadbeef", 12);
+        let value = serde_json::to_value(&event).expect("run_recorded json");
+        assert_eq!(value["type"], "run_recorded");
+        assert_eq!(value["session_id"], "job-7");
+        assert_eq!(value["run_id"], "abc123");
+        assert_eq!(value["root_hash"], "deadbeef");
+        assert_eq!(value["event_count"], 12);
+        // Global/unscoped: broadcast to every client (like Auth/Wechat) so a fleet
+        // dashboard catches every sealed run, not only the session it watches.
+        assert_eq!(event.session_id(), None);
+        let back: RuntimeEvent = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, event);
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "delegate.close",
     "delegate.get",
     "delegate.list",
+    "run.list",
+    "run.get",
     "flow.start",
     "flow.steer",
     "flow.replay",
@@ -264,6 +266,18 @@ pub enum RuntimeCommand {
     /// agent_session_id }, … ] }`, sorted by `session_id`.
     #[serde(rename = "delegate.list")]
     DelegateList,
+    /// List captured Runs — the L0 flight-recorder index (`trust-substrate.md`
+    /// §6). Read-only; mirrors `delegate.list` / `flow.list`. Pure protocol
+    /// vocabulary: the host reads the persisted `RunStore`; `nerve-core` has no
+    /// store. The result is `{ "runs": [ <Run>, … ] }`, newest `run_id` first.
+    #[serde(rename = "run.list")]
+    RunList,
+    /// Fetch one captured Run by its content-addressed id (`trust-substrate.md`
+    /// §6). Read-only; an unknown id is an error. The result is the full
+    /// [`crate::provenance::Run`] (its event tape + content-addressed ledger), so
+    /// a client can replay or re-verify it.
+    #[serde(rename = "run.get")]
+    RunGet { run_id: String },
     /// Start a declarative orchestration workflow (the Conductor, design §4) as one
     /// cancellable **job**: the host job manager runs the deterministic flow engine
     /// (C1) and the `job_id` IS the `flow_id`. The `workflow` is either an inline
@@ -778,6 +792,30 @@ mod tests {
             json.get("role").is_none(),
             "default role is skipped: {json}"
         );
+    }
+
+    #[test]
+    fn run_commands_round_trip_and_are_named() {
+        let list: RuntimeCommand =
+            serde_json::from_value(serde_json::json!({ "kind": "run.list" }))
+                .expect("parse run.list");
+        assert_eq!(list.name(), "run.list");
+        assert_eq!(list.tool_name(), None);
+        assert!(matches!(list, RuntimeCommand::RunList));
+
+        let get: RuntimeCommand =
+            serde_json::from_value(serde_json::json!({ "kind": "run.get", "run_id": "abc123" }))
+                .expect("parse run.get");
+        assert_eq!(get.name(), "run.get");
+        assert_eq!(get.tool_name(), None);
+        match get {
+            RuntimeCommand::RunGet { run_id } => assert_eq!(run_id, "abc123"),
+            other => panic!("unexpected: {}", other.name()),
+        }
+
+        for name in ["run.list", "run.get"] {
+            assert!(RUNTIME_COMMAND_NAMES.contains(&name), "{name} missing");
+        }
     }
 
     #[test]

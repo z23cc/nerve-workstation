@@ -126,6 +126,9 @@ where
             | RuntimeCommand::DelegateList => Err(RuntimeError::adapter(
                 "delegate commands are executed by the host delegate runtime, not the core runtime",
             )),
+            RuntimeCommand::RunList | RuntimeCommand::RunGet { .. } => Err(RuntimeError::adapter(
+                "run commands are executed by the host run store, not the core runtime",
+            )),
             RuntimeCommand::FlowStart { .. }
             | RuntimeCommand::FlowSteer { .. }
             | RuntimeCommand::FlowReplay { .. }

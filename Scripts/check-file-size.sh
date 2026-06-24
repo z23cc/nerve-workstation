@@ -25,8 +25,12 @@ cd "$ROOT"
 over=0
 while IFS= read -r f; do
   [[ -f "$f" ]] || continue
-  # Lines before the first `#[cfg(test)]` (or whole file if none).
-  n="$(awk '/^[[:space:]]*#\[cfg\(test\)\]/{print NR-1; exit} END{print NR}' "$f" | head -1)"
+  # Lines before the first test-module attribute (or whole file if none). Recognizes
+  # both `#[cfg(test)]` and the platform-gated `#[cfg(all(test, ...))]` form some
+  # modules use (e.g. unix-only tests), so a bottom-of-file test module is never
+  # miscounted as production. Matching more test-attr forms only ever SHRINKS a
+  # count, so this can never make a previously-passing file fail.
+  n="$(awk '/^[[:space:]]*#\[cfg\((all\()?test[,)]/{print NR-1; exit} END{print NR}' "$f" | head -1)"
   if (( n > CAP )); then
     printf '  %5d  %s\n' "$n" "$f"
     over=$((over + 1))

@@ -8,6 +8,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
+// v6 (trust-substrate, L0 flight-recorder): additive read-only `run.list` /
+// `run.get` commands + the `run_recorded` event + the `provenance` shapes
+// (`Run` / `Event` / `EventKind` / `LedgerEntry`) reachable from the exported
+// schema. New serde-tagged variants and new schema-roots only — no broken or
+// removed fields, so a v5 client keeps working.
 // v5 (trust-substrate, credibility floor): additive read-only `delegate.get` /
 // `delegate.list` commands — enumerate/fetch the live external-agent (delegate)
 // sessions the daemon is parking, so a cockpit can observe its whole fleet over
@@ -17,7 +22,7 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // agent-orchestration design §4). All additions are new serde-tagged variants
 // reusing AgentEventKind / SessionApprovalDecision / ApprovalRequested — no
 // broken or removed fields, so a v3 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "5";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "6";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";
@@ -262,6 +267,11 @@ pub struct RuntimeProtocolSchema {
     pub runtime_command: RuntimeCommand,
     pub approval_mode: ApprovalMode,
     pub runtime_event: RuntimeEvent,
+    /// L0 provenance shape root: a `run.get` returns a [`crate::provenance::Run`],
+    /// which transitively pulls `Event` / `EventKind` / `LedgerEntry` into the
+    /// exported schema (they are not reachable from any wire field on their own —
+    /// `run_recorded` carries only ids + the root hash).
+    pub run: crate::provenance::Run,
     pub runtime_event_notification: RuntimeEventNotification,
     pub runtime_info: RuntimeInfo,
     pub host_capabilities: HostCapabilities,
