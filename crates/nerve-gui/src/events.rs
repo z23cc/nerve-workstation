@@ -158,3 +158,108 @@ fn format_arguments(arguments: &serde_json::Value) -> String {
     }
     serde_json::to_string_pretty(arguments).unwrap_or_else(|_| arguments.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Chat;
+
+    /// A host-constructible empty chat (struct literal avoids the wasm-only
+    /// `js_sys::Date::now()` in `Chat::new_with_backend`).
+    fn empty_chat() -> Chat {
+        Chat {
+            title: "t".into(),
+            backend: "claude".into(),
+            agent: "claude".into(),
+            session: None,
+            turn_job: None,
+            turns: Vec::new(),
+            streaming: false,
+            updated_ms: 0.0,
+        }
+    }
+
+    #[test]
+    fn append_assistant_text_opens_one_streaming_turn_then_coalesces() {
+        let mut c = empty_chat();
+        append_assistant_text(&mut c, "hello ");
+        append_assistant_text(&mut c, "world");
+        assert_eq!(c.turns.len(), 1, "chunks coalesce into a single streaming turn");
+        assert!(matches!(c.turns[0].role, Role::Assistant));
+        assert!(c.turns[0].streaming);
+        assert_eq!(c.turns[0].text, "hello world");
+    }
+
+    #[test]
+    fn append_after_a_finished_turn_opens_a_fresh_turn() {
+        let mut c = empty_chat();
+        append_assistant_text(&mut c, "first");
+        end_turn(&mut c);
+        append_assistant_text(&mut c, "second");
+        assert_eq!(c.turns.len(), 2);
+        assert_eq!(c.turns[1].text, "second");
+    }
+
+    #[test]
+    fn end_turn_clears_streaming_and_turn_job() {
+        let mut c = empty_chat();
+        c.streaming = true;
+        c.turn_job = Some("job-1".into());
+        append_assistant_text(&mut c, "answer");
+        end_turn(&mut c);
+        assert!(!c.streaming);
+        assert!(c.turn_job.is_none());
+        assert!(!c.turns.last().unwrap().streaming);
+    }
+
+    #[test]
+    fn message_and_reasoning_route_to_distinct_fields() {
+        let mut c = empty_chat();
+        apply_agent_event(AgentEventKind::Reasoning { text: "thinking".into() }, &mut c);
+        apply_agent_event(AgentEventKind::Message { text: "answer".into() }, &mut c);
+        let turn = c.turns.last().expect("turn");
+        assert_eq!(turn.reasoning, "thinking");
+        assert_eq!(turn.text, "answer");
+    }
+
+    #[test]
+    fn tool_started_then_finished_updates_the_same_card() {
+        let mut c = empty_chat();
+        apply_agent_event(
+            AgentEventKind::ToolStarted {
+                tool: "read_file".into(),
+                arguments: serde_json::json!({ "path": "src/lib.rs" }),
+            },
+            &mut c,
+        );
+        apply_agent_event(
+            AgentEventKind::ToolFinished {
+                tool: "read_file".into(),
+                ok: true,
+                output: "ok".into(),
+            },
+            &mut c,
+        );
+        let tools = &c.turns.last().expect("turn").tools;
+        assert_eq!(tools.len(), 1, "finish updates the started card, not a new one");
+        assert_eq!(tools[0].ok, Some(true));
+        assert_eq!(tools[0].output, "ok");
+        assert!(tools[0].input.contains("path"));
+    }
+
+    #[test]
+    fn tool_finished_without_a_start_pushes_a_card() {
+        let mut c = empty_chat();
+        apply_agent_event(
+            AgentEventKind::ToolFinished {
+                tool: "edit".into(),
+                ok: false,
+                output: "boom".into(),
+            },
+            &mut c,
+        );
+        let tools = &c.turns.last().expect("turn").tools;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].ok, Some(false));
+    }
+}
