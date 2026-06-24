@@ -1,13 +1,18 @@
-use crate::{RiskTier, WorkflowDef};
+use crate::outcome::{LabelSource, Outcome};
+use crate::verdict::{CheckKind, VerdictStatus};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+mod aux;
 mod delegate;
 mod runtime_command_impl;
 
+pub use aux::{
+    ApprovalMode, FlowSource, LedgerRef, OtelSource, SessionApprovalDecision, WorkerSelector,
+};
 pub use delegate::{DelegateAutonomy, DelegateRole};
 
 /// Runtime command kinds accepted by the human-facing daemon job protocol.
@@ -37,6 +42,18 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "delegate.list",
     "run.list",
     "run.get",
+    "replay.start",
+    "ledger.query",
+    "verify.start",
+    "verify.get",
+    "verify.list",
+    "policy.get",
+    "policy.decisions",
+    "receipt.get",
+    "otel.ingest",
+    "outcome.label",
+    "outcome.get",
+    "outcome.query",
     "flow.start",
     "flow.steer",
     "flow.replay",
@@ -278,6 +295,99 @@ pub enum RuntimeCommand {
     /// a client can replay or re-verify it.
     #[serde(rename = "run.get")]
     RunGet { run_id: String },
+    /// L0c — deterministically replay a captured Run: re-drive its recorded event
+    /// tape (no model call) and assert the replayed spine head equals the recorded
+    /// one. Runs as a job emitting `replay_progress` / `replay_finished`.
+    #[serde(rename = "replay.start")]
+    ReplayStart { run_id: String },
+    /// L1 — query the append-only cross-run evidence ledger (read-only). Optional
+    /// filters narrow by run / agent / diff / verdict outcome / record kind.
+    #[serde(rename = "ledger.query")]
+    LedgerQuery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff_hash: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<VerdictStatus>,
+        // NOT `kind`: that field name collides with the enum's internal `tag = "kind"`
+        // discriminant. Filter by ledger record kind under a distinct wire name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
+    /// L2 — re-run the org's own checks over a Run's diff in the pinned closure,
+    /// producing an execution-grounded Verdict. The authority is BORROWED from the
+    /// org's CI (INV-R3); Nerve never invents a correctness verdict.
+    #[serde(rename = "verify.start")]
+    VerifyStart {
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reruns: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only: Option<Vec<CheckKind>>,
+    },
+    /// L2 — fetch one sealed Verdict by id (read-only).
+    #[serde(rename = "verify.get")]
+    VerifyGet { verdict_id: String },
+    /// L2 — list sealed Verdicts, optionally for one run (read-only).
+    #[serde(rename = "verify.list")]
+    VerifyList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
+    /// L3 — return the sealed policy-as-code document in force (read-only).
+    #[serde(rename = "policy.get")]
+    PolicyGet,
+    /// L3 — list recorded policy grant/denial decisions, optionally for one session.
+    #[serde(rename = "policy.decisions")]
+    PolicyDecisions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    /// L4 — fetch a signed, portable Verification Receipt by id (read-only). The
+    /// Receipt is third-party re-verifiable offline.
+    #[serde(rename = "receipt.get")]
+    ReceiptGet { receipt_id: String },
+    /// L5 — ingest an external OTel-GenAI trace into a `Partial`-attestation Run, so
+    /// even agents Nerve did not instrument are partially attested from their traces.
+    #[serde(rename = "otel.ingest")]
+    OtelIngest {
+        #[serde(flatten)]
+        source: OtelSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+    },
+    /// L6 — append a human/CI outcome label (merged / reverted / incident /
+    /// shipped-no-regress) to a run's outcome record (the cross-agent corpus).
+    #[serde(rename = "outcome.label")]
+    OutcomeLabel {
+        run_id: String,
+        outcome: Outcome,
+        source: LabelSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict_ref: Option<String>,
+    },
+    /// L6 — fetch one run's outcome record (read-only).
+    #[serde(rename = "outcome.get")]
+    OutcomeGet { run_id: String },
+    /// L6 — query the outcome corpus, optionally by agent / outcome (read-only).
+    #[serde(rename = "outcome.query")]
+    OutcomeQuery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<Outcome>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
     /// Start a declarative orchestration workflow (the Conductor, design §4) as one
     /// cancellable **job**: the host job manager runs the deterministic flow engine
     /// (C1) and the `job_id` IS the `flow_id`. The `workflow` is either an inline
@@ -428,135 +538,6 @@ pub enum RuntimeCommand {
     WechatStatus,
 }
 
-/// The workflow a [`RuntimeCommand::FlowStart`] runs: either an **inline**
-/// [`WorkflowDef`] or a **named reference** to a loaded `WorkflowDef` data file
-/// (design §4 / §6, the P3 workflow-defs surface). Untagged so a client can send
-/// either `{ "workflow": { ... } }` or `{ "workflow_ref": "name" }` inside the
-/// `flow.start` command without an extra discriminant.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(untagged)]
-pub enum FlowSource {
-    /// An inline workflow definition (the whole strategy as data). Boxed so the
-    /// large inline-def variant doesn't bloat every command value (the named-ref
-    /// variant is tiny).
-    Inline { workflow: Box<WorkflowDef> },
-    /// A named workflow resolved from a loaded data file (loaded, not compiled).
-    Named { workflow_ref: String },
-}
-
-/// Which recorded ledger a [`RuntimeCommand::FlowReplay`] replays (design §4/§5).
-/// Untagged so a client sends either `{ "flow_id": "job-7" }` (resolve the ledger
-/// from the `FlowStore` by flow id — the common case) or `{ "ledger_path": "…" }`
-/// (an explicit `.nerve/flows/<id>/ledger.jsonl`-shaped path), without an extra
-/// discriminant. Deliberately MINIMAL — a closed two-arm enum, not a query language.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(untagged)]
-pub enum LedgerRef {
-    /// Resolve the recorded ledger from the `FlowStore` by its `flow_id`.
-    FlowId { flow_id: String },
-    /// Replay a ledger at an explicit filesystem path (e.g. a copied tape).
-    Path { ledger_path: String },
-}
-
-/// Which live branch a [`RuntimeCommand::FlowSteer`] targets (design §4, the
-/// `WorkerSelector` row). Deliberately MINIMAL: a flow branch is identified by its
-/// deterministic node id, or — when `node_id` is unset — "the single live worker"
-/// (the common case for a `Single`/`Pipeline` flow, which has exactly one live
-/// branch at a time). An ambiguous unset selector against a multi-branch live flow
-/// is refused by the host with a clear message; the closed enum keeps the steer
-/// surface from drifting into a query language.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-pub struct WorkerSelector {
-    /// The deterministic node id of the branch to steer (e.g. `"node-0"` for a
-    /// `Single` flow, `"stage-1"` for a pipeline's second stage). `None` targets
-    /// the only live worker, erroring if more than one is live.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-}
-
-impl WorkerSelector {
-    /// A selector targeting a specific node id.
-    #[must_use]
-    pub fn node(node_id: impl Into<String>) -> Self {
-        Self {
-            node_id: Some(node_id.into()),
-        }
-    }
-
-    /// Whether this is the default ("only live worker") selector — used to keep an
-    /// unset `target` off the wire (serde `skip_serializing_if`).
-    #[must_use]
-    pub fn is_default(&self) -> bool {
-        self.node_id.is_none()
-    }
-}
-
-/// Decision supplied by a human/client for a session approval request.
-///
-/// `Allow`/`Deny` apply to this call only; `AllowAlways`/`DenyAlways` additionally
-/// signal the host to remember the decision for future calls (P2 wires the
-/// remembering; P1 only distinguishes allow-vs-deny via [`Self::allows`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum SessionApprovalDecision {
-    /// Allow this call only.
-    Allow,
-    /// Deny this call only.
-    Deny,
-    /// Allow this call and remember the allow for future matching calls.
-    AllowAlways,
-    /// Deny this call and remember the deny for future matching calls.
-    DenyAlways,
-}
-
-impl SessionApprovalDecision {
-    /// Whether the decision permits the call (either the one-shot or remembered
-    /// allow). Consumers should compare with this rather than `== Allow` so the
-    /// remembered variant is not silently treated as a deny.
-    #[must_use]
-    pub fn allows(&self) -> bool {
-        matches!(self, Self::Allow | Self::AllowAlways)
-    }
-
-    /// Whether the host should persist this decision for future matching calls.
-    #[must_use]
-    pub fn remember(&self) -> bool {
-        matches!(self, Self::AllowAlways | Self::DenyAlways)
-    }
-}
-
-/// Per-session approval posture controlling how high a [`RiskTier`] the gate may
-/// auto-approve without prompting. Pure protocol data; the host gate (P2) maps
-/// each tool's tier against [`Self::max_auto_tier`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalMode {
-    /// Prompt for everything above read-only.
-    AlwaysAsk,
-    /// Auto-approve reads and edits; prompt for exec.
-    Write,
-    /// Auto-approve everything, including exec.
-    Yolo,
-}
-
-impl ApprovalMode {
-    /// Highest tier this mode auto-approves without prompting: anything at or
-    /// below it is allowed, anything above it requires an approval round-trip.
-    #[must_use]
-    pub fn max_auto_tier(self) -> RiskTier {
-        match self {
-            Self::AlwaysAsk => RiskTier::ReadOnly,
-            Self::Write => RiskTier::Edit,
-            Self::Yolo => RiskTier::Exec,
-        }
-    }
-}
-
 fn default_arguments() -> BTreeMap<String, Value> {
     BTreeMap::new()
 }
@@ -578,6 +559,7 @@ impl AuthStartFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RiskTier;
 
     #[test]
     fn session_set_model_round_trips() {

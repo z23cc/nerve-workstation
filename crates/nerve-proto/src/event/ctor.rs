@@ -343,6 +343,21 @@ impl RuntimeEvent {
             // session a given client happens to be watching. (Routes consistently with
             // its `DelegateProgress` stream, which is likewise broadcast.)
             | Self::RunRecorded { .. }
+            // Trust-substrate L0c–L6 events are fleet-wide ledger announcements
+            // (replay progress, ledger appends, verdicts, policy decisions, receipts,
+            // gate decisions, OTel ingests, outcome labels): broadcast like
+            // `RunRecorded` / `Auth` so any dashboard sees every one. Job-carrying
+            // replay events follow the `DelegateProgress`/`JobProgress` broadcast
+            // convention (job events are not session-scoped).
+            | Self::ReplayProgress { .. }
+            | Self::ReplayFinished { .. }
+            | Self::LedgerAppended { .. }
+            | Self::VerificationCompleted { .. }
+            | Self::PolicyDecisionRecorded { .. }
+            | Self::ReceiptIssued { .. }
+            | Self::GateDecided { .. }
+            | Self::RunIngested { .. }
+            | Self::OutcomeLabeled { .. }
             // WeChat events are global/unscoped, like `Auth`: returning `None`
             // routes them to every connected client (login + bridge status visible
             // on any surface, not tied to a session the client happens to watch).

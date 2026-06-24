@@ -23,6 +23,9 @@ fn golden_run_hash() {
                 agent: "codex".into(),
                 task: "add a regression test for the parser".into(),
                 cwd: Some("/repo".into()),
+                // None -> skip_serialized, so the locked content address is unchanged
+                // by the L0c additive field (RISK #8 regression lock).
+                inputs: None,
             },
         ),
         ev(1, EventKind::TurnStarted { turn: 0 }),
@@ -70,6 +73,7 @@ fn golden_run_hash() {
         Some(2_000),
         true,
         events,
+        nerve_core::provenance::RunInputs::default(),
     );
 
     // run_id IS the content address of the tape (== root_hash) at L0.

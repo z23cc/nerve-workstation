@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "AdvisoryJudge": {
+      "description": "An **advisory**, explicitly non-load-bearing LLM-derived label attached to a\n[`LedgerKind::Verdict`] record (INV-R1: *court reporter, not judge*). It never\ngates a merge and never overrides the execution-grounded\n[`crate::verdict::VerdictStatus`]; it is recorded only so the corpus can later\nbe calibrated against real outcomes. `confidence_bp` is integer basis-points\n(0..=10000, i.e. hundredths of a percent) — never a float — so the record's\ncanonical bytes stay stable and the type derives `Eq`.",
+      "properties": {
+        "confidence_bp": {
+          "description": "The judge's self-reported confidence in basis-points (0..=10000).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "label": {
+          "description": "The advisory verdict label as the judge model named it (free-form).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "confidence_bp"
+      ],
+      "type": "object"
+    },
     "AgentEventKind": {
       "description": "Payload of a [`RuntimeEvent::Agent`] — one step of the agent loop. Defined as\ntransport-neutral data; the host maps its own agent events onto these.",
       "oneOf": [
@@ -175,6 +195,14 @@
         }
       ]
     },
+    "Attestation": {
+      "description": "How completely a run was attested. `Full` (the default) is a Nerve-captured run;\n`Partial` is reconstructed from an external OTel trace and cannot be replayed.",
+      "enum": [
+        "full",
+        "partial"
+      ],
+      "type": "string"
+    },
     "AuthEventKind": {
       "description": "Authentication lifecycle event kind. Defined as pure protocol data; hosts map\nconcrete credential/login implementation details onto these states.",
       "enum": [
@@ -231,6 +259,188 @@
         }
       },
       "type": "object"
+    },
+    "Capability": {
+      "description": "A coarse capability class a [`CapabilityRule`] grants to a delegated agent's\ntool/action (`trust-substrate.md` §3 L3). The classes are deliberately broad —\nthe policy plane is a *coarse* admission gate, not a fine-grained sandbox (that\nhermetic-isolation job belongs to L2's `SandboxLauncher`). `Exec` is the\n[`Default`] because an unclassified action is treated as the most consequential\n(executing code) until policy says otherwise — fail-closed. Additive: new\nclasses may be appended.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Read repository / filesystem state without mutating it.",
+          "type": "string"
+        },
+        {
+          "const": "write",
+          "description": "Mutate repository / filesystem state (edits, writes).",
+          "type": "string"
+        },
+        {
+          "const": "egress",
+          "description": "Reach the network / send data outbound (egress).",
+          "type": "string"
+        },
+        {
+          "const": "exec",
+          "description": "Execute code / spawn processes — the fail-closed default.",
+          "type": "string"
+        }
+      ]
+    },
+    "CapabilityRule": {
+      "description": "One admission rule in a [`PolicyDoc`]: the [`Capability`] this `tool`/`action`\npair is granted, optionally scoped to a single `agent`. The host resolves an\nincoming tool call against the ordered rules to classify it before recording a\n[`PolicyDecisionRecord`].",
+      "properties": {
+        "action": {
+          "description": "The action within the tool this rule applies to.",
+          "type": "string"
+        },
+        "agent": {
+          "description": "Optionally scope the rule to a single agent; `None` = any agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capability": {
+          "$ref": "#/$defs/Capability",
+          "default": "exec",
+          "description": "The capability class granted — defaults to [`Capability::Exec`]."
+        },
+        "tool": {
+          "description": "The tool this rule applies to (e.g. the MCP tool name).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "action"
+      ],
+      "type": "object"
+    },
+    "CheckKind": {
+      "description": "What kind of check a [`CheckResult`] reports — the org-bar dimension being\nre-verified. Serialized `snake_case` (`{\"kind\":\"test\"}`). `Copy` because it is a\nfieldless tag. The set is execution-grounded — only check classes the runner can\nactually drive today. Additive: new kinds may be appended.",
+      "oneOf": [
+        {
+          "const": "test",
+          "description": "The org's test suite (or a named subset of it).",
+          "type": "string"
+        },
+        {
+          "const": "typecheck",
+          "description": "A type-checker pass (e.g. `tsc`, `mypy`, `cargo check`).",
+          "type": "string"
+        },
+        {
+          "const": "build",
+          "description": "A build / compile step.",
+          "type": "string"
+        },
+        {
+          "const": "lint",
+          "description": "A linter / formatter gate.",
+          "type": "string"
+        },
+        {
+          "const": "property",
+          "description": "A property-based test run.",
+          "type": "string"
+        },
+        {
+          "const": "mutation",
+          "description": "A mutation-testing run.",
+          "type": "string"
+        },
+        {
+          "const": "contamination",
+          "description": "A contamination / leakage check (e.g. secrets, train/test bleed).",
+          "type": "string"
+        }
+      ]
+    },
+    "CheckResult": {
+      "description": "One check's outcome inside a [`Verdict`]. `name` is the human-facing check label\n(e.g. `\"cargo test\"`); `kind` classifies it; `status` is the re-run result.\n`reproducible` records whether the check yielded the same result across reruns.\n`runs` / `passed` count the rerun attempts and how many passed (so a verifier can\nre-derive flakiness). `output_hash` is the content address of the captured check\noutput (filled by `nerve-core`, `\"\"` until sealed). `duration_ms` is integer\nmilliseconds (never a float) so the hashed canonical bytes are stable.",
+      "properties": {
+        "duration_ms": {
+          "description": "Integer milliseconds the check took (host metadata; never a float).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_code": {
+          "description": "The process exit code when the check ran as a subprocess and one was observed.",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/CheckKind",
+          "description": "Which org-bar dimension this check exercises."
+        },
+        "name": {
+          "description": "Human-facing check label (e.g. the command name).",
+          "type": "string"
+        },
+        "output_hash": {
+          "description": "Content address of the captured check output (`\"\"` until sealed).",
+          "type": "string"
+        },
+        "passed": {
+          "description": "How many of the [`Self::runs`] attempts passed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reproducible": {
+          "description": "Whether the check produced the same result across all reruns.",
+          "type": "boolean"
+        },
+        "runs": {
+          "description": "How many rerun attempts were made.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus",
+          "description": "The re-run status (pass/fail/flaky/error)."
+        },
+        "timed_out": {
+          "description": "Whether the check was killed by the wall-clock timeout.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "status",
+        "reproducible"
+      ],
+      "type": "object"
+    },
+    "CheckStatus": {
+      "description": "The status of a single re-run [`CheckResult`]. Serialized `snake_case`\n(`{\"status\":\"pass\"}`). `Copy` because it is a fieldless tag. `Flaky` means the\ncheck did not produce a stable result across reruns (it both passed and failed),\nwhich a verdict treats as inconclusive rather than a clean pass.",
+      "oneOf": [
+        {
+          "const": "pass",
+          "description": "The check passed reproducibly across all reruns.",
+          "type": "string"
+        },
+        {
+          "const": "fail",
+          "description": "The check failed reproducibly across all reruns.",
+          "type": "string"
+        },
+        {
+          "const": "flaky",
+          "description": "The check produced inconsistent results across reruns (not reproducible).",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "The check could not be executed (harness/infrastructure error, not a\npass/fail signal from the code under test).",
+          "type": "string"
+        }
+      ]
     },
     "ContextSplit": {
       "description": "How a [`Strategy::MapReduce`] splits its shared context across map workers.\nDefined-ahead for C5; C1 never reads it.",
@@ -336,7 +546,7 @@
       "description": "One typed, replayable step in a captured run's tape (`trust-substrate.md`\n§5 `Event.kind`). Internally tagged (`{\"kind\": \"...\", ...}`), mirroring\n[`crate::FlowDecisionKind`] / [`crate::AgentEventKind`] so the audit trail is\ngolden-diffable. The set is intentionally small and **execution-grounded** —\nonly events a real delegated CLI run actually produces today. Tool-lifecycle\nkinds (`tool_started` / `tool_finished`) are deliberately absent: the external\nCLIs emit raw text, not parsed tool structure, so a reserved-but-unfilled kind\nwould be dead protocol. Additive: new kinds may be appended.",
       "oneOf": [
         {
-          "description": "The run began: which agent, the delegated task text, and the working dir.",
+          "description": "The run began: which agent, the delegated task text, and the working dir.\n`inputs` is the L0c pinned closure (repo snapshot + toolchain digest) hashed\nin-band; absent on a legacy/unpinned run, so an omitted `inputs` reproduces\nthe pre-L0c content address byte-for-byte.",
           "properties": {
             "agent": {
               "type": "string"
@@ -345,6 +555,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "inputs": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunInputs"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "kind": {
@@ -507,6 +727,19 @@
           "type": "object"
         }
       ]
+    },
+    "EvidenceRequirement": {
+      "description": "A required piece of evidence a [`PolicyDoc`] demands beyond the merge-bar checks\n(e.g. a signed receipt, a replay manifest). `kind` is a free-form discriminator\nthe host interprets; kept minimal and additive so the policy vocabulary can grow\nwithout a schema bump.",
+      "properties": {
+        "kind": {
+          "description": "The evidence discriminator (host-interpreted).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
     },
     "FailPolicy": {
       "description": "What the engine does when a step's worker fails (`ok == false` or errored).",
@@ -910,6 +1143,50 @@
         }
       ]
     },
+    "LabelSource": {
+      "description": "Where an [`OutcomeLabel`] came from (`trust-substrate.md` §3 L6). Internally\ntagged on `source` (`{\"source\": \"...\"}`). Provenance of the *label*, distinct\nfrom the [`Outcome`] it asserts — a human disposition and a CI-derived one are\nthe same disposition from different witnesses.",
+      "oneOf": [
+        {
+          "description": "A person recorded the disposition (e.g. a reviewer marking a revert).",
+          "properties": {
+            "source": {
+              "const": "human",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A CI signal recorded it (e.g. the merge pipeline).",
+          "properties": {
+            "source": {
+              "const": "ci",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Passive telemetry / monitoring inferred it (e.g. an incident alert).",
+          "properties": {
+            "source": {
+              "const": "observation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "LedgerEntry": {
       "description": "One entry on the content-addressed spine: this event's own digest plus the\nchained digest committing to it and every prior event\n(`chained[n] = sha256(chained[n-1] || event_hash[n])`). A verifier re-derives\nthe spine from the [`Run::events`] to confirm the tape is untampered.",
       "properties": {
@@ -929,6 +1206,905 @@
         "seq",
         "event_hash",
         "chained_hash"
+      ],
+      "type": "object"
+    },
+    "LedgerHead": {
+      "description": "The current head of the cross-run ledger: the number of records appended and\nthe head record's `record_hash` (`\"\"` for an empty log). Persisted alongside the\nlog so a host can append the next record without re-reading the whole chain; a\nverifier confirms `count`/`head_hash` by re-deriving the chain.",
+      "properties": {
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head_hash": {
+          "default": "",
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "count"
+      ],
+      "type": "object"
+    },
+    "LedgerKind": {
+      "description": "One trust-relevant fact recorded on the cross-run ledger (`trust-substrate.md`\n§3 L1). Internally tagged (`{\"kind\": \"...\", ...}`), mirroring\n[`crate::provenance::EventKind`] so the audit trail is golden-diffable. The set\nis intentionally small and execution-grounded; additive — new kinds may be\nappended. [`Self::Verdict`] reuses the canonical [`crate::verdict`] types rather\nthan redefining check/verdict shapes (single source of truth).",
+      "oneOf": [
+        {
+          "description": "A captured run was sealed and persisted. Binds the run's content address\n(`run_root_hash`), the agent, a hash of the task text, and the event count.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "event_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "run_recorded",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "run_root_hash": {
+              "type": "string"
+            },
+            "task_hash": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "run_root_hash",
+            "agent",
+            "task_hash",
+            "event_count"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A diff produced by a run was recorded, with its content hash and line stats.",
+          "properties": {
+            "added": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "diff_hash": {
+              "type": "string"
+            },
+            "files": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "diff_recorded",
+              "type": "string"
+            },
+            "removed": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "diff_hash",
+            "files",
+            "added",
+            "removed"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A policy plane allow/deny decision was recorded. `detail_hash` (when present)\ncommits to the decision's redacted rationale/args, kept out-of-band.",
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "decision": {
+              "$ref": "#/$defs/PolicyDecisionOutcome"
+            },
+            "detail_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "policy_decision",
+              "type": "string"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "policy_version",
+            "capability",
+            "decision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An execution-grounded verdict was reached for a run's diff. The load-bearing\n`verdict` and `checks` reuse the canonical [`crate::verdict`] types;\n`advisory_llm_judge`, when present, is non-load-bearing (INV-R1).",
+          "properties": {
+            "advisory_llm_judge": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AdvisoryJudge"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "checks": {
+              "items": {
+                "$ref": "#/$defs/CheckResult"
+              },
+              "type": "array"
+            },
+            "diff_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "verdict",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "verdict": {
+              "$ref": "#/$defs/VerdictStatus"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "verdict",
+            "checks"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A signed verification receipt was issued for a run. Binds the receipt id, the\nhash of the pinned inputs, the policy version in force, and the verdict it\nborrowed from the org's own checks.",
+          "properties": {
+            "inputs_hash": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "receipt_issued",
+              "type": "string"
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "receipt_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "verdict": {
+              "$ref": "#/$defs/VerdictStatus"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "receipt_id",
+            "inputs_hash",
+            "policy_version",
+            "verdict"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LedgerRecord": {
+      "description": "One node on the append-only cross-run ledger: a monotonic logical sequence\nnumber, the typed fact, and the chain links. `record_hash` is the digest over\nthis record's identity (seq + kind); `prev_hash` is the predecessor's\n`record_hash` (`\"\"` for the first record) so a verifier re-derives the chain\nfrom [`LedgerRecord`]s alone. `appended_at_ms` is host wall-clock metadata for\ndisplay and is **excluded from the hashed bytes**, so it never perturbs the\nchain. `seq` is a logical clock (0,1,2,…) assigned at append, *not* a\nwall-clock — so a replay reproduces byte-identical ordering and hashes.",
+      "properties": {
+        "appended_at_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/LedgerKind"
+        },
+        "prev_hash": {
+          "type": "string"
+        },
+        "record_hash": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "seq",
+        "kind",
+        "record_hash",
+        "prev_hash"
+      ],
+      "type": "object"
+    },
+    "LedgerRef": {
+      "description": "A pointer into the cross-run transparency [`crate::ledger`] log committing the\nrun: the `log_id`, the entry's `seq`, the entry's own `entry_hash`, and the\n`prev_hash` it chains from. Lets a receipt holder independently locate and\nre-verify the ledger inclusion of the run.",
+      "properties": {
+        "entry_hash": {
+          "description": "The appended record's own content hash.",
+          "type": "string"
+        },
+        "log_id": {
+          "description": "Identifier of the ledger log the run was appended to.",
+          "type": "string"
+        },
+        "prev_hash": {
+          "description": "The hash the appended record chains from (the prior head).",
+          "type": "string"
+        },
+        "seq": {
+          "description": "The appended record's sequence number within the log.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "log_id",
+        "seq",
+        "entry_hash",
+        "prev_hash"
+      ],
+      "type": "object"
+    },
+    "MergeBar": {
+      "description": "The bar a change must clear to merge: the names of the required checks (matched\nagainst the L2 verdict's [`crate::verdict::CheckResult::name`]s). An empty list\nmeans no required checks are declared — the gate exercises no bar.",
+      "properties": {
+        "required_checks": {
+          "default": [],
+          "description": "Names of the checks that must pass for a change to clear the bar.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Outcome": {
+      "description": "The ground-truth disposition of a captured change (`trust-substrate.md` §3 L6).\nInternally tagged on `outcome` (`{\"outcome\": \"...\"}`) so a label's disposition\nis golden-diffable and additive (new dispositions may be appended). This is an\n**observation**, not a judgment — it records what the org saw happen, never\nwhether the code was \"correct\" (INV-R1).",
+      "oneOf": [
+        {
+          "description": "The change landed on the target branch.",
+          "properties": {
+            "outcome": {
+              "const": "merged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A previously merged change was rolled back.",
+          "properties": {
+            "outcome": {
+              "const": "reverted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The change was implicated in a production incident.",
+          "properties": {
+            "outcome": {
+              "const": "incident",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The change shipped and produced no observed regression.",
+          "properties": {
+            "outcome": {
+              "const": "shipped_no_regress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OutcomeLabel": {
+      "description": "One entry on a run's append-only outcome tape: a logical sequence number, the\nobserved [`Outcome`], its [`LabelSource`], and tamper-evident chaining hashes.\n`seq` is a monotonic logical clock (0,1,2,…) assigned at append, *not* a\nwall-clock — so a replay reproduces byte-identical ordering and hashes.\n`label_hash` is this label's own digest and `chained_hash` commits to it plus\nevery prior label; both are filled by `nerve-core::outcome`. `observed_at_ms`\nis display-only host metadata and is **excluded from the hashed bytes**.",
+      "properties": {
+        "actor": {
+          "description": "Optional actor that recorded the label (a username, bot id, or monitor).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chained_hash": {
+          "default": "",
+          "description": "The chained digest committing to this label and every prior one.",
+          "type": "string"
+        },
+        "label_hash": {
+          "default": "",
+          "description": "This label's own content digest (filled by `nerve-core::outcome`).",
+          "type": "string"
+        },
+        "note": {
+          "description": "Optional free-text note attached to the label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at_ms": {
+          "description": "Host wall-clock instant the label was observed (display metadata; excluded\nfrom the hashed bytes so it never perturbs the content address).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome",
+          "description": "The observed disposition of the change."
+        },
+        "seq": {
+          "description": "0-based logical position of this label within its [`OutcomeRecord`] tape.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/LabelSource",
+          "description": "Where this label came from."
+        },
+        "verdict_ref": {
+          "description": "Optional reference to the verdict this disposition relates to (a\n`verdict_id`); kept a plain `Option<String>` so the corpus carries no hard\ntype dependency on the verdict layer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "outcome",
+        "source",
+        "observed_at_ms"
+      ],
+      "type": "object"
+    },
+    "OutcomeRecord": {
+      "description": "The outcome corpus for a single captured run: the append-only [`Self::labels`]\ntape plus its content-addressed [`Self::labels_root`] (the spine head, `\"\"` for\nan empty tape). Optional `session_id` / `agent` / `receipt_id` denormalize the\nrun's identity for query without a join; all are plain `Option<String>` so the\ncorpus has no compile-time dependency on the receipt or session layers.",
+      "properties": {
+        "agent": {
+          "description": "Optional agent that produced the run (denormalized for query).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "default": [],
+          "description": "The ordered, append-only label tape.",
+          "items": {
+            "$ref": "#/$defs/OutcomeLabel"
+          },
+          "type": "array"
+        },
+        "labels_root": {
+          "default": "",
+          "description": "The spine head committing to the whole label tape (`\"\"` when empty).",
+          "type": "string"
+        },
+        "receipt_id": {
+          "description": "Optional receipt issued for the run (denormalized for query).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "description": "The captured run these labels are about (the L0 `run_id`).",
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "Additive schema version of this record (see [`OUTCOME_SCHEMA_VERSION`]).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "description": "Optional originating session id (denormalized for query).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "OutcomeSummary": {
+      "description": "A rolled-up count over a set of [`OutcomeRecord`]s — the corpus dashboard\nfigures. `labeled_runs` counts runs with at least one label; the four\ndisposition counts tally labels by [`Outcome`]. All `u64`, no floats, so the\nsummary is byte-stable and the type derives `Eq`.",
+      "properties": {
+        "incident": {
+          "description": "Count of [`Outcome::Incident`] labels.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "labeled_runs": {
+          "description": "Runs carrying at least one label.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "merged": {
+          "description": "Count of [`Outcome::Merged`] labels.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reverted": {
+          "description": "Count of [`Outcome::Reverted`] labels.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shipped_no_regress": {
+          "description": "Count of [`Outcome::ShippedNoRegress`] labels.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_runs": {
+          "description": "Total runs considered.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_runs",
+        "labeled_runs",
+        "merged",
+        "reverted",
+        "incident",
+        "shipped_no_regress"
+      ],
+      "type": "object"
+    },
+    "PolicyDecisionOutcome": {
+      "description": "The outcome of a recorded policy decision (`trust-substrate.md` §3 L3). A\ntwo-valued allow/deny so the ledger's policy facts are golden-diffable; the\nhuman-readable rationale lives in the decision record's `detail_hash`, not here.",
+      "oneOf": [
+        {
+          "const": "allow",
+          "description": "The capability request was permitted.",
+          "type": "string"
+        },
+        {
+          "const": "deny",
+          "description": "The capability request was refused.",
+          "type": "string"
+        }
+      ]
+    },
+    "PolicyDecisionRecord": {
+      "description": "One captured policy gate decision: the host classified an agent's tool call\nagainst the [`PolicyDoc`] (`policy_version`) and `allow`/`deny`'d it. `args_hash`\nis the content address of the (canonicalized) call arguments, filled by\n`nerve-core::policy::hash_args` — the raw args are not stored here, only the\ndigest, so the record is portable and privacy-preserving. The evidence ledger\n(L1) commits to these so the policy's exercise is provable (INV-R1: recording a\ndecision, not judging the change).",
+      "properties": {
+        "agent": {
+          "default": "",
+          "description": "The agent whose call was gated (empty if unattributed).",
+          "type": "string"
+        },
+        "args_hash": {
+          "default": "",
+          "description": "Content address of the canonicalized call arguments (empty if none).",
+          "type": "string"
+        },
+        "capability": {
+          "$ref": "#/$defs/Capability",
+          "description": "The capability class the call was classified as."
+        },
+        "decision": {
+          "description": "The verdict: `allow` or `deny` (free-form, host-interpreted).",
+          "type": "string"
+        },
+        "policy_version": {
+          "description": "The [`PolicyDoc::policy_version`] this decision was made against.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Human-readable reason for the decision.",
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "Policy schema version — see [`POLICY_SCHEMA_VERSION`].",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "description": "The delegate session this decision belongs to.",
+          "type": "string"
+        },
+        "tool": {
+          "description": "The tool that was called.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "policy_version",
+        "session_id",
+        "tool",
+        "capability",
+        "decision",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "PolicyDoc": {
+      "description": "The org's sealed policy-as-code document — the L3 unit of trust. It declares the\nper-tool [`CapabilityRule`]s, the [`MergeBar`], and any [`EvidenceRequirement`]s.\n`policy_version` is a content address stamped by `nerve-core::policy::seal_policy`\n(it is zeroed before hashing the rest, then filled with the digest), so the same\npolicy body always yields the same version. [`Default`] yields the empty\n(deny-by-default) policy.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "description": "The per-tool/action capability grants.",
+          "items": {
+            "$ref": "#/$defs/CapabilityRule"
+          },
+          "type": "array"
+        },
+        "merge_bar": {
+          "$ref": "#/$defs/MergeBar",
+          "default": {
+            "required_checks": []
+          },
+          "description": "The merge bar a change must clear."
+        },
+        "policy_version": {
+          "default": "",
+          "description": "Content-addressed policy version, stamped at seal time (empty until sealed).",
+          "type": "string"
+        },
+        "required_evidence": {
+          "default": [],
+          "description": "Additional evidence the policy requires.",
+          "items": {
+            "$ref": "#/$defs/EvidenceRequirement"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "description": "Policy schema version — see [`POLICY_SCHEMA_VERSION`].",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "Receipt": {
+      "description": "A portable, signed Verification Receipt — the L4 unit of trust. Wraps the\ncontent-addressed [`ReceiptStatement`] in a DSSE-style [`ReceiptSignature`].\n`receipt_id` is the statement's content id; a holder can re-derive it and verify\nthe signature entirely offline with the embedded `public_key`.",
+      "properties": {
+        "receipt_id": {
+          "description": "The content id of [`Self::statement`] (also the receipt's identity).",
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "The receipt schema version (see [`RECEIPT_SCHEMA_VERSION`]).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/ReceiptSignature",
+          "description": "The DSSE-style signature over the canonical statement bytes."
+        },
+        "statement": {
+          "$ref": "#/$defs/ReceiptStatement",
+          "description": "The signed statement payload."
+        }
+      },
+      "required": [
+        "schema_version",
+        "receipt_id",
+        "statement",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "ReceiptCheck": {
+      "description": "One re-verified check summarized into the receipt: the org check `name`, its\n[`CheckKind`], the per-check [`VerdictStatus`], whether the re-run was\n`reproducible`, and an optional content hash of the captured evidence (logs /\nartifacts). Reuses [`crate::verdict`]'s kind + status vocabulary verbatim\n(**[FIX-C]**) — the receipt is a portable projection of the verdict, not a fork.",
+      "properties": {
+        "evidence_hash": {
+          "description": "Optional SHA-256 of the captured evidence (logs / artifacts) for this check.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/CheckKind",
+          "description": "What kind of check this is — reused from [`crate::verdict::CheckKind`]."
+        },
+        "name": {
+          "description": "The org check's stable name (matches the verdict's check name).",
+          "type": "string"
+        },
+        "reproducible": {
+          "description": "Whether re-running the check reproduced its recorded outcome.",
+          "type": "boolean"
+        },
+        "verdict": {
+          "$ref": "#/$defs/VerdictStatus",
+          "description": "Per-check verdict — reused from [`crate::verdict::VerdictStatus`]."
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "verdict",
+        "reproducible"
+      ],
+      "type": "object"
+    },
+    "ReceiptProvenance": {
+      "description": "The provenance binding of a receipt: which [`crate::provenance::Run`] it attests\n(`run_id`), the content hash of that run's pinned inputs (`inputs_hash`), and\noptional pins to the toolchain digest, the policy version in force, and the\ntransparency-[`LedgerRef`] committing the run. This is a *thinner* binding than\nthe L0c replay verdict — it commits provenance identity, not the full event tape.",
+      "properties": {
+        "inputs_hash": {
+          "description": "Content hash of the run's pinned inputs (repo snapshot + toolchain).",
+          "type": "string"
+        },
+        "ledger_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LedgerRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional pointer to the transparency-ledger entry committing the run."
+        },
+        "policy_version": {
+          "description": "Optional version of the policy doc in force when the run was gated.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "description": "The attested run's identifier.",
+          "type": "string"
+        },
+        "toolchain_digest": {
+          "description": "Optional digest pinning the toolchain used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "run_id",
+        "inputs_hash"
+      ],
+      "type": "object"
+    },
+    "ReceiptSignature": {
+      "description": "The DSSE-style signature envelope over the canonical [`ReceiptStatement`] bytes:\nthe `payload_type`, the signing `backend` (e.g. `ed25519` / `sigstore`), the\n`keyid`, the base64 `sig`, and optional `public_key` / Sigstore `bundle`. The\npure verifier in `nerve-core::receipt` re-derives the PAE and checks `sig`.",
+      "properties": {
+        "backend": {
+          "description": "The signing backend identifier (e.g. `ed25519`, `sigstore`).",
+          "type": "string"
+        },
+        "bundle": {
+          "description": "Optional Sigstore bundle (Fulcio cert + Rekor entry) when keyless.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyid": {
+          "description": "The signing key identifier.",
+          "type": "string"
+        },
+        "payload_type": {
+          "description": "The DSSE payload type the signature commits to.",
+          "type": "string"
+        },
+        "public_key": {
+          "description": "Optional base64 public key for offline verification.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sig": {
+          "description": "The base64-encoded detached signature over the PAE-encoded statement.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload_type",
+        "backend",
+        "keyid",
+        "sig"
+      ],
+      "type": "object"
+    },
+    "ReceiptStatement": {
+      "description": "The signed payload of a receipt — the in-toto-style statement. Binds the\n[`ReceiptProvenance`], the re-verified [`ReceiptCheck`]s, the aggregate\n[`VerdictStatus`] (empty checks ⇒ `Inconclusive`, **[FIX-C]**), the\n[`ReplayManifest`], and the host-supplied `issued_at_ms`. Canonicalized and\nhashed by `nerve-core::receipt` to produce the statement id and the signed bytes.",
+      "properties": {
+        "checks": {
+          "description": "The re-verified checks summarized into the statement.",
+          "items": {
+            "$ref": "#/$defs/ReceiptCheck"
+          },
+          "type": "array"
+        },
+        "issued_at_ms": {
+          "description": "Host wall-clock issuance time in ms (display metadata; not part of the id).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "predicate_type": {
+          "description": "The predicate type identifying this attestation kind.",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ReceiptProvenance",
+          "description": "The run-provenance binding the statement attests."
+        },
+        "replay_manifest": {
+          "$ref": "#/$defs/ReplayManifest2",
+          "description": "The replay binding proving the run reproduces its recorded root hash."
+        },
+        "verdict": {
+          "$ref": "#/$defs/VerdictStatus",
+          "description": "The aggregate verdict over the checks — reused from [`crate::verdict`]."
+        }
+      },
+      "required": [
+        "predicate_type",
+        "provenance",
+        "checks",
+        "verdict",
+        "replay_manifest",
+        "issued_at_ms"
+      ],
+      "type": "object"
+    },
+    "ReplayManifest": {
+      "description": "The verdict of a deterministic replay (L0c `replay.start`): the recorded vs.\nre-derived spine head and whether they matched. `matched == false` is a real\n(recorded) divergence verdict, not a transport error.",
+      "properties": {
+        "diverged_at_seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "event_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "matched": {
+          "type": "boolean"
+        },
+        "recorded_root_hash": {
+          "type": "string"
+        },
+        "replayed_root_hash": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "recorded_root_hash",
+        "replayed_root_hash",
+        "matched",
+        "event_count"
+      ],
+      "type": "object"
+    },
+    "ReplayManifest2": {
+      "description": "The receipt's replay binding: the run schema version replayed, the recorded\n`root_hash` it reproduced, the `event_count`, and the optional replay `command`.\nA thinner provenance binding than the canonical L0c [`crate::provenance::ReplayManifest`]\n(different fields, different purpose) — kept distinct and re-exported as\n`ReceiptReplayManifest` to avoid the name collision.",
+      "properties": {
+        "command": {
+          "description": "Optional command line that drives the replay.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_count": {
+          "description": "The number of events in the replayed tape.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "root_hash": {
+          "description": "The recorded content-address root hash the replay reproduced.",
+          "type": "string"
+        },
+        "run_schema_version": {
+          "description": "The provenance schema version of the replayed run.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_schema_version",
+        "root_hash",
+        "event_count"
       ],
       "type": "object"
     },
@@ -958,6 +2134,10 @@
         "agent": {
           "type": "string"
         },
+        "attestation": {
+          "$ref": "#/$defs/Attestation",
+          "description": "How completely the run was attested: `Full` = captured by Nerve's recorder;\n`Partial` = reconstructed from an external OTel trace (L5 ingest). Skipped\nwhen `Full`, so existing serialized runs round-trip byte-identically."
+        },
         "events": {
           "items": {
             "$ref": "#/$defs/Event"
@@ -975,6 +2155,11 @@
             "integer",
             "null"
           ]
+        },
+        "inputs": {
+          "$ref": "#/$defs/RunInputs",
+          "default": {},
+          "description": "Denormalized mirror of the run's pinned closure (also carried in-band on the\n`RunStarted` event, which IS hashed). This top-level copy is for display/query\nand is **not** hashed — so adding it never perturbs an existing run's\n`root_hash` (L0c, additive)."
         },
         "ledger": {
           "default": [],
@@ -1018,6 +2203,25 @@
         "started_at_ms",
         "events"
       ],
+      "type": "object"
+    },
+    "RunInputs": {
+      "description": "The pinned closure a run executed in (`trust-substrate.md` §5 inputs): the\ncontent address of the repo snapshot at start plus a digest over the resolved\ntoolchain/lockfiles. Hashed in-band on the `RunStarted` event so the run's\ncontent address commits to *what ran*, not just the agent's output — the basis\nof the \"bit-for-bit replayable from recorded inputs\" claim (L0c).",
+      "properties": {
+        "image_digest": {
+          "description": "OCI image digest of a fully-reproduced environment, when available. `None`\ntoday (the strong-isolation `EnvironmentPinner` seam is deferred infra).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo_snapshot_hash": {
+          "type": "string"
+        },
+        "toolchain_digest": {
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "RuntimeCapabilities": {
@@ -1640,6 +2844,337 @@
           "required": [
             "kind",
             "run_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L0c — deterministically replay a captured Run: re-drive its recorded event\ntape (no model call) and assert the replayed spine head equals the recorded\none. Runs as a job emitting `replay_progress` / `replay_finished`.",
+          "properties": {
+            "kind": {
+              "const": "replay.start",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L1 — query the append-only cross-run evidence ledger (read-only). Optional\nfilters narrow by run / agent / diff / verdict outcome / record kind.",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "diff_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "ledger.query",
+              "type": "string"
+            },
+            "limit": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VerdictStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "record_kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L2 — re-run the org's own checks over a Run's diff in the pinned closure,\nproducing an execution-grounded Verdict. The authority is BORROWED from the\norg's CI (INV-R3); Nerve never invents a correctness verdict.",
+          "properties": {
+            "kind": {
+              "const": "verify.start",
+              "type": "string"
+            },
+            "only": {
+              "items": {
+                "$ref": "#/$defs/CheckKind"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "reruns": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L2 — fetch one sealed Verdict by id (read-only).",
+          "properties": {
+            "kind": {
+              "const": "verify.get",
+              "type": "string"
+            },
+            "verdict_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "verdict_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L2 — list sealed Verdicts, optionally for one run (read-only).",
+          "properties": {
+            "kind": {
+              "const": "verify.list",
+              "type": "string"
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L3 — return the sealed policy-as-code document in force (read-only).",
+          "properties": {
+            "kind": {
+              "const": "policy.get",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L3 — list recorded policy grant/denial decisions, optionally for one session.",
+          "properties": {
+            "kind": {
+              "const": "policy.decisions",
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L4 — fetch a signed, portable Verification Receipt by id (read-only). The\nReceipt is third-party re-verifiable offline.",
+          "properties": {
+            "kind": {
+              "const": "receipt.get",
+              "type": "string"
+            },
+            "receipt_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt_id"
+          ],
+          "type": "object"
+        },
+        {
+          "anyOf": [
+            {
+              "description": "An inline OTel trace payload (a spans document).",
+              "properties": {
+                "trace": true
+              },
+              "required": [
+                "trace"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A filesystem path to an OTel trace export.",
+              "properties": {
+                "trace_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "trace_path"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "L5 — ingest an external OTel-GenAI trace into a `Partial`-attestation Run, so\neven agents Nerve did not instrument are partially attested from their traces.",
+          "properties": {
+            "kind": {
+              "const": "otel.ingest",
+              "type": "string"
+            },
+            "workspace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L6 — append a human/CI outcome label (merged / reverted / incident /\nshipped-no-regress) to a run's outcome record (the cross-agent corpus).",
+          "properties": {
+            "actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "outcome.label",
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "$ref": "#/$defs/Outcome"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/LabelSource"
+            },
+            "verdict_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "outcome",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L6 — fetch one run's outcome record (read-only).",
+          "properties": {
+            "kind": {
+              "const": "outcome.get",
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L6 — query the outcome corpus, optionally by agent / outcome (read-only).",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "outcome.query",
+              "type": "string"
+            },
+            "limit": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Outcome"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
           ],
           "type": "object"
         },
@@ -2451,6 +3986,264 @@
           "type": "object"
         },
         {
+          "description": "L0c — one step of a deterministic replay re-driving a recorded tape. Job-scoped.",
+          "properties": {
+            "chained_hash": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "replay_progress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "job_id",
+            "seq",
+            "chained_hash"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L0c — a replay finished; carries the recorded-vs-replayed verdict. Job-scoped.",
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "manifest": {
+              "$ref": "#/$defs/ReplayManifest"
+            },
+            "type": {
+              "const": "replay_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "job_id",
+            "manifest"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L1 — an entry was appended to the cross-run evidence ledger. Global/unscoped.",
+          "properties": {
+            "head_hash": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "record_hash": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "ledger_appended",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "kind",
+            "record_hash",
+            "head_hash"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L2 — an execution-grounded verdict was sealed for a run. Global/unscoped.",
+          "properties": {
+            "check_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/VerdictStatus"
+            },
+            "type": {
+              "const": "verification_completed",
+              "type": "string"
+            },
+            "verdict_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "verdict_id",
+            "status",
+            "check_count"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L3 — a policy grant/denial decision was recorded as evidence. Global/unscoped.",
+          "properties": {
+            "ledger_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "record": {
+              "$ref": "#/$defs/PolicyDecisionRecord"
+            },
+            "type": {
+              "const": "policy_decision_recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "record"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L4 — a signed Verification Receipt was issued for a run. Global/unscoped.",
+          "properties": {
+            "receipt_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "receipt_issued",
+              "type": "string"
+            },
+            "verdict": {
+              "$ref": "#/$defs/VerdictStatus"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "run_id",
+            "receipt_id",
+            "verdict"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L5 — a merge-gate decision was emitted for a run's receipt. Global/unscoped.",
+          "properties": {
+            "exit_code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "receipt_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "gate_decided",
+              "type": "string"
+            },
+            "verdict": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "receipt_id",
+            "verdict",
+            "exit_code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L5 — an external OTel trace was ingested into a (Partial) run. Global/unscoped.",
+          "properties": {
+            "attestation": {
+              "type": "string"
+            },
+            "events": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_ingested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "events",
+            "attestation"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L6 — a human/CI outcome label was appended to a run's record. Global/unscoped.",
+          "properties": {
+            "label_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "labels_root": {
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/Outcome"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "outcome_labeled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "outcome",
+            "labels_root",
+            "label_count"
+          ],
+          "type": "object"
+        },
+        {
           "description": "A flow run (the Conductor, design §4) has started. Carries the declarative\n[`Strategy`] so a client can render the DAG shape before any node runs. All\n`flow_*` events carry the `flow_id` (which is the flow job's id).",
           "properties": {
             "flow_id": {
@@ -3124,6 +4917,264 @@
             "run_id",
             "root_hash",
             "event_count"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L0c — one step of a deterministic replay re-driving a recorded tape. Job-scoped.",
+          "properties": {
+            "chained_hash": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "replay_progress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "job_id",
+            "seq",
+            "chained_hash"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L0c — a replay finished; carries the recorded-vs-replayed verdict. Job-scoped.",
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "manifest": {
+              "$ref": "#/$defs/ReplayManifest"
+            },
+            "type": {
+              "const": "replay_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "job_id",
+            "manifest"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L1 — an entry was appended to the cross-run evidence ledger. Global/unscoped.",
+          "properties": {
+            "head_hash": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "record_hash": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "ledger_appended",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seq",
+            "kind",
+            "record_hash",
+            "head_hash"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L2 — an execution-grounded verdict was sealed for a run. Global/unscoped.",
+          "properties": {
+            "check_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/VerdictStatus"
+            },
+            "type": {
+              "const": "verification_completed",
+              "type": "string"
+            },
+            "verdict_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "verdict_id",
+            "status",
+            "check_count"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L3 — a policy grant/denial decision was recorded as evidence. Global/unscoped.",
+          "properties": {
+            "ledger_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "record": {
+              "$ref": "#/$defs/PolicyDecisionRecord"
+            },
+            "type": {
+              "const": "policy_decision_recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "record"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L4 — a signed Verification Receipt was issued for a run. Global/unscoped.",
+          "properties": {
+            "receipt_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "receipt_issued",
+              "type": "string"
+            },
+            "verdict": {
+              "$ref": "#/$defs/VerdictStatus"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "run_id",
+            "receipt_id",
+            "verdict"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L5 — a merge-gate decision was emitted for a run's receipt. Global/unscoped.",
+          "properties": {
+            "exit_code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "receipt_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "gate_decided",
+              "type": "string"
+            },
+            "verdict": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "receipt_id",
+            "verdict",
+            "exit_code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L5 — an external OTel trace was ingested into a (Partial) run. Global/unscoped.",
+          "properties": {
+            "attestation": {
+              "type": "string"
+            },
+            "events": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run_ingested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "events",
+            "attestation"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "L6 — a human/CI outcome label was appended to a run's record. Global/unscoped.",
+          "properties": {
+            "label_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "labels_root": {
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/Outcome"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "outcome_labeled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "outcome",
+            "labels_root",
+            "label_count"
           ],
           "type": "object"
         },
@@ -3969,6 +6020,95 @@
       ],
       "description": "A minimal task template (design §3, open question 3): a plain prompt plus\noptional `{{name}}` placeholders substituted from named ledger outputs. **No\nexpression language** — named-output substitution only, deliberately."
     },
+    "Verdict": {
+      "description": "A sealed re-verification of a captured [`crate::Run`] — the L2 unit of trust. The\n[`Self::checks`] are the org-bar checks re-run inside the recorded closure;\n[`Self::status`] is the borrowed aggregate verdict. `verdict_id` is the content\naddress of the verdict's *identity* (run + diff + checkspec + closure + checks),\nassigned at seal; `verdict_hash` is the digest committing to the sealed record\n(both filled by `nerve-core`, `\"\"` until sealed). `checkspec_hash` pins the\ndefinition of *which* checks were run, and `closure_digest` pins the environment\nthey ran in, so a verifier can confirm the bar and the closure independently.\n`verified_at_ms` is host wall-clock metadata, **excluded from the hashed bytes**.",
+      "properties": {
+        "checks": {
+          "description": "The org-bar checks re-run inside the recorded closure.",
+          "items": {
+            "$ref": "#/$defs/CheckResult"
+          },
+          "type": "array"
+        },
+        "checkspec_hash": {
+          "description": "Content address pinning *which* checks were run (the checkspec).",
+          "type": "string"
+        },
+        "closure_digest": {
+          "description": "Content address pinning the environment the checks ran in.",
+          "type": "string"
+        },
+        "diff_hash": {
+          "description": "Content address of the diff under verification, when one is bound.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "description": "The captured run this verdict re-verifies.",
+          "type": "string"
+        },
+        "schema_version": {
+          "description": "Verdict schema version (see [`VERDICT_SCHEMA_VERSION`]).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/VerdictStatus",
+          "description": "The borrowed aggregate verdict over [`Self::checks`]."
+        },
+        "verdict_hash": {
+          "description": "Digest committing to the sealed record (filled at seal).",
+          "type": "string"
+        },
+        "verdict_id": {
+          "description": "Content address of the verdict's identity (filled at seal).",
+          "type": "string"
+        },
+        "verified_at_ms": {
+          "description": "Host wall-clock millis at seal (metadata; excluded from hashed bytes).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "verdict_id",
+        "run_id",
+        "status",
+        "checkspec_hash",
+        "checks"
+      ],
+      "type": "object"
+    },
+    "VerdictStatus": {
+      "description": "The aggregate verdict of a whole [`Verdict`] — whether the run cleared the org's\nbar. Serialized `snake_case` (`{\"status\":\"passed\"}`). `Copy` because it is a\nfieldless tag. `Inconclusive` is the honest \"no bar exercised / not reproducible\"\nstate (e.g. an empty checkspec or a flaky required check) — distinct from\n`Failed` (the bar was exercised and not met) and `Error` (the harness broke).",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "Every required check passed reproducibly — the org's bar was cleared.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "At least one required check failed reproducibly — the bar was not met.",
+          "type": "string"
+        },
+        {
+          "const": "inconclusive",
+          "description": "No bar was exercised, or a required check was flaky/non-reproducible.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "The verification harness itself errored and could not render a verdict.",
+          "type": "string"
+        }
+      ]
+    },
     "WechatEventKind": {
       "description": "The typed payload of a [`RuntimeEvent::Wechat`] — one WeChat-bridge lifecycle\nstep. A closed, additive-versioned enum (mirroring [`AuthEventKind`]) so a\nclient renders login progress, the running state, and the message log from one\nevent family. Defined as transport-neutral data; the host maps its gateway\nstates onto these.",
       "oneOf": [
@@ -4165,7 +6305,7 @@
       ]
     },
     "WorkerSelector": {
-      "description": "Which live branch a [`RuntimeCommand::FlowSteer`] targets (design §4, the\n`WorkerSelector` row). Deliberately MINIMAL: a flow branch is identified by its\ndeterministic node id, or — when `node_id` is unset — \"the single live worker\"\n(the common case for a `Single`/`Pipeline` flow, which has exactly one live\nbranch at a time). An ambiguous unset selector against a multi-branch live flow\nis refused by the host with a clear message; the closed enum keeps the steer\nsurface from drifting into a query language.",
+      "description": "Which live branch a [`RuntimeCommand::FlowSteer`](super::RuntimeCommand::FlowSteer)\ntargets (design §4, the `WorkerSelector` row). Deliberately MINIMAL: a flow branch\nis identified by its deterministic node id, or — when `node_id` is unset — \"the\nsingle live worker\" (the common case for a `Single`/`Pipeline` flow, which has\nexactly one live branch at a time). An ambiguous unset selector against a\nmulti-branch live flow is refused by the host with a clear message; the closed\nenum keeps the steer surface from drifting into a query language.",
       "properties": {
         "node_id": {
           "description": "The deterministic node id of the branch to steer (e.g. `\"node-0\"` for a\n`Single` flow, `\"stage-1\"` for a pipeline's second stage). `None` targets\nthe only live worker, erroring if more than one is live.",
@@ -4223,6 +6363,30 @@
       "$ref": "#/$defs/HostCapabilities"
     },
     "jsonValue": true,
+    "ledgerHead": {
+      "$ref": "#/$defs/LedgerHead"
+    },
+    "ledgerRecord": {
+      "$ref": "#/$defs/LedgerRecord"
+    },
+    "outcomeRecord": {
+      "$ref": "#/$defs/OutcomeRecord"
+    },
+    "outcomeSummary": {
+      "$ref": "#/$defs/OutcomeSummary"
+    },
+    "policyDecision": {
+      "$ref": "#/$defs/PolicyDecisionRecord"
+    },
+    "policyDoc": {
+      "$ref": "#/$defs/PolicyDoc"
+    },
+    "receipt": {
+      "$ref": "#/$defs/Receipt"
+    },
+    "replayManifest": {
+      "$ref": "#/$defs/ReplayManifest"
+    },
     "run": {
       "$ref": "#/$defs/Run",
       "description": "L0 provenance shape root: a `run.get` returns a [`crate::provenance::Run`],\nwhich transitively pulls `Event` / `EventKind` / `LedgerEntry` into the\nexported schema (they are not reachable from any wire field on their own —\n`run_recorded` carries only ids + the root hash)."
@@ -4271,6 +6435,10 @@
     },
     "runtimeToolsListResponse": {
       "$ref": "#/$defs/RuntimeToolsListResponse"
+    },
+    "verdict": {
+      "$ref": "#/$defs/Verdict",
+      "description": "Trust-substrate L0c–L6 schema roots: shapes not otherwise reachable from a\nwire command/event field, surfaced so the exported schema documents them for\nthird-party (offline) re-verification of receipts/ledger/verdicts."
     }
   },
   "required": [
@@ -4279,6 +6447,15 @@
     "approvalMode",
     "runtimeEvent",
     "run",
+    "verdict",
+    "ledgerRecord",
+    "ledgerHead",
+    "policyDoc",
+    "policyDecision",
+    "receipt",
+    "outcomeRecord",
+    "outcomeSummary",
+    "replayManifest",
     "runtimeEventNotification",
     "runtimeInfo",
     "hostCapabilities",

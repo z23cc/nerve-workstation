@@ -1,5 +1,7 @@
 mod ctor;
 
+use crate::outcome::Outcome;
+use crate::verdict::VerdictStatus;
 use crate::{RiskTier, RuntimeJobError, Strategy};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
@@ -125,6 +127,66 @@ pub enum RuntimeEvent {
         run_id: String,
         root_hash: String,
         event_count: u64,
+    },
+    /// L0c — one step of a deterministic replay re-driving a recorded tape. Job-scoped.
+    ReplayProgress {
+        job_id: String,
+        seq: u64,
+        chained_hash: String,
+    },
+    /// L0c — a replay finished; carries the recorded-vs-replayed verdict. Job-scoped.
+    ReplayFinished {
+        job_id: String,
+        manifest: crate::provenance::ReplayManifest,
+    },
+    /// L1 — an entry was appended to the cross-run evidence ledger. Global/unscoped.
+    LedgerAppended {
+        seq: u64,
+        kind: String,
+        record_hash: String,
+        head_hash: String,
+    },
+    /// L2 — an execution-grounded verdict was sealed for a run. Global/unscoped.
+    VerificationCompleted {
+        run_id: String,
+        verdict_id: String,
+        status: VerdictStatus,
+        check_count: u64,
+    },
+    /// L3 — a policy grant/denial decision was recorded as evidence. Global/unscoped.
+    PolicyDecisionRecorded {
+        record: crate::policy::PolicyDecisionRecord,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ledger_seq: Option<u64>,
+    },
+    /// L4 — a signed Verification Receipt was issued for a run. Global/unscoped.
+    ReceiptIssued {
+        session_id: String,
+        run_id: String,
+        receipt_id: String,
+        verdict: VerdictStatus,
+    },
+    /// L5 — a merge-gate decision was emitted for a run's receipt. Global/unscoped.
+    GateDecided {
+        run_id: String,
+        receipt_id: String,
+        verdict: String,
+        exit_code: i32,
+    },
+    /// L5 — an external OTel trace was ingested into a (Partial) run. Global/unscoped.
+    RunIngested {
+        run_id: String,
+        events: u64,
+        attestation: String,
+    },
+    /// L6 — a human/CI outcome label was appended to a run's record. Global/unscoped.
+    OutcomeLabeled {
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        outcome: Outcome,
+        labels_root: String,
+        label_count: u64,
     },
     /// A flow run (the Conductor, design §4) has started. Carries the declarative
     /// [`Strategy`] so a client can render the DAG shape before any node runs. All

@@ -20,12 +20,17 @@ pub mod command;
 pub mod event;
 pub mod flow;
 pub mod job;
+pub mod ledger;
+pub mod outcome;
+pub mod policy;
 pub mod protocol;
 #[doc(hidden)]
 pub mod protocol_codegen;
 pub mod provenance;
+pub mod receipt;
 pub mod risk;
 pub mod tool_spec;
+pub mod verdict;
 
 pub use command::{
     ApprovalMode, AuthStartFlow, DelegateAutonomy, DelegateRole, FlowSource, LedgerRef,
@@ -43,7 +48,26 @@ pub use job::{
     RuntimeJobCancelRequest, RuntimeJobError, RuntimeJobGetRequest, RuntimeJobListRequest,
     RuntimeJobSnapshot, RuntimeJobStartRequest, RuntimeJobStatus,
 };
+pub use ledger::{
+    AdvisoryJudge, LEDGER_SCHEMA_VERSION, LedgerHead, LedgerKind, LedgerRecord,
+    PolicyDecisionOutcome,
+};
+pub use outcome::{
+    LabelSource, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeLabel, OutcomeRecord, OutcomeSummary,
+};
+pub use policy::{
+    Capability, CapabilityRule, EvidenceRequirement, MergeBar, POLICY_SCHEMA_VERSION,
+    PolicyDecisionRecord, PolicyDoc,
+};
 pub use protocol::{HostCapabilities, HostCapabilitySupport};
 pub use provenance::{Event, EventKind, LedgerEntry, RUN_SCHEMA_VERSION, Run};
+pub use receipt::{
+    LedgerRef as ReceiptLedgerRef, RECEIPT_PREDICATE_TYPE, RECEIPT_SCHEMA_VERSION, Receipt,
+    ReceiptCheck, ReceiptProvenance, ReceiptSignature, ReceiptStatement,
+    ReplayManifest as ReceiptReplayManifest,
+};
 pub use risk::{RiskTier, ToolCapability};
 pub use tool_spec::RuntimeToolSpec;
+pub use verdict::{
+    CheckKind, CheckResult, CheckStatus, VERDICT_SCHEMA_VERSION, Verdict, VerdictStatus,
+};

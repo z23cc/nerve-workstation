@@ -56,6 +56,18 @@ impl RuntimeCommand {
             Self::DelegateList => "delegate.list",
             Self::RunList => "run.list",
             Self::RunGet { .. } => "run.get",
+            Self::ReplayStart { .. } => "replay.start",
+            Self::LedgerQuery { .. } => "ledger.query",
+            Self::VerifyStart { .. } => "verify.start",
+            Self::VerifyGet { .. } => "verify.get",
+            Self::VerifyList { .. } => "verify.list",
+            Self::PolicyGet => "policy.get",
+            Self::PolicyDecisions { .. } => "policy.decisions",
+            Self::ReceiptGet { .. } => "receipt.get",
+            Self::OtelIngest { .. } => "otel.ingest",
+            Self::OutcomeLabel { .. } => "outcome.label",
+            Self::OutcomeGet { .. } => "outcome.get",
+            Self::OutcomeQuery { .. } => "outcome.query",
             Self::FlowStart { .. } => "flow.start",
             Self::FlowSteer { .. } => "flow.steer",
             Self::FlowReplay { .. } => "flow.replay",
@@ -105,6 +117,18 @@ impl RuntimeCommand {
             | Self::DelegateList
             | Self::RunList
             | Self::RunGet { .. }
+            | Self::ReplayStart { .. }
+            | Self::LedgerQuery { .. }
+            | Self::VerifyStart { .. }
+            | Self::VerifyGet { .. }
+            | Self::VerifyList { .. }
+            | Self::PolicyGet
+            | Self::PolicyDecisions { .. }
+            | Self::ReceiptGet { .. }
+            | Self::OtelIngest { .. }
+            | Self::OutcomeLabel { .. }
+            | Self::OutcomeGet { .. }
+            | Self::OutcomeQuery { .. }
             | Self::FlowStart { .. }
             | Self::FlowSteer { .. }
             | Self::FlowReplay { .. }

@@ -344,6 +344,11 @@ impl JobManager {
             Executor::AgentRun => self.run_agent_command(&job_id, command, &token),
             Executor::Delegate => self.run_delegate_command(&job_id, command, &token),
             Executor::Run => self.run_run_command(command),
+            Executor::Trust => Err(nerve_runtime::RuntimeError::adapter(format!(
+                "trust-substrate command `{}` is accepted protocol vocabulary; its host \
+                 handler is wired in the next wave",
+                command.name()
+            ))),
             Executor::Host => self.run_host_command(command, &token),
             Executor::Session => self.sessions.handle_command(command, &token),
             Executor::Auth => self.auth.handle_command(command, &token),
@@ -1156,6 +1161,10 @@ impl JobManager {
             agent: agent_name.to_string(),
             task: task.to_string(),
             cwd: Some(cwd.display().to_string()),
+            // L0c pinned inputs (repo-snapshot + toolchain digest) are wired in the
+            // capture path in a follow-up; absent here, so the content address is
+            // unchanged from pre-L0c (None -> skip_serialized).
+            inputs: None,
         });
         writer.push(nerve_core::provenance::EventKind::TurnStarted { turn: 0 });
         let launch = {
@@ -1247,6 +1256,7 @@ impl JobManager {
             agent: agent.to_string(),
             task: task.to_string(),
             cwd: Some(cwd.display().to_string()),
+            inputs: None,
         });
         let mut last_ok = true;
         for (index, captured) in turns.iter().enumerate() {
@@ -1458,6 +1468,12 @@ enum Executor {
     /// The host L0 run store (`run.*` family): enumerate/fetch captured Runs from
     /// the persisted [`RunStore`](crate::run_store) (read-only).
     Run,
+    /// The trust-substrate L0c–L6 command families (`replay.*` / `ledger.*` /
+    /// `verify.*` / `policy.*` / `receipt.*` / `otel.*` / `outcome.*`). The protocol
+    /// vocabulary + pure kernels + persistent stores all exist (contract wave); the
+    /// host handlers are wired in the next wave, so this executor currently returns a
+    /// clear "handler pending" error rather than fabricating a result.
+    Trust,
     /// The runtime host/native shell side-effects (`host.*` / `workspace.*`).
     Host,
     /// The host `SessionManager` (`session.*` family).
@@ -2251,6 +2267,18 @@ fn executor_for(command: &RuntimeCommand) -> Executor {
         | RuntimeCommand::DelegateGet { .. }
         | RuntimeCommand::DelegateList => Executor::Delegate,
         RuntimeCommand::RunList | RuntimeCommand::RunGet { .. } => Executor::Run,
+        RuntimeCommand::ReplayStart { .. }
+        | RuntimeCommand::LedgerQuery { .. }
+        | RuntimeCommand::VerifyStart { .. }
+        | RuntimeCommand::VerifyGet { .. }
+        | RuntimeCommand::VerifyList { .. }
+        | RuntimeCommand::PolicyGet
+        | RuntimeCommand::PolicyDecisions { .. }
+        | RuntimeCommand::ReceiptGet { .. }
+        | RuntimeCommand::OtelIngest { .. }
+        | RuntimeCommand::OutcomeLabel { .. }
+        | RuntimeCommand::OutcomeGet { .. }
+        | RuntimeCommand::OutcomeQuery { .. } => Executor::Trust,
         RuntimeCommand::HostCapabilities
         | RuntimeCommand::HostClipboardWriteText { .. }
         | RuntimeCommand::HostNotificationShow { .. }
@@ -2383,6 +2411,19 @@ mod command_executor_partition {
             "flow.get" | "flow.close" => json!({ "flow_id": "f" }),
             "flow.respond" => json!({ "flow_id": "f", "request_id": "r", "decision": "allow" }),
             "wechat.login" | "wechat.start" | "wechat.stop" | "wechat.status" => json!({}),
+            "replay.start" => json!({ "run_id": "r" }),
+            "ledger.query" | "policy.get" | "policy.decisions" | "verify.list" => json!({}),
+            "verify.start" => json!({ "run_id": "r" }),
+            "verify.get" => json!({ "verdict_id": "v" }),
+            "receipt.get" => json!({ "receipt_id": "r" }),
+            "otel.ingest" => json!({ "trace": {} }),
+            "outcome.label" => json!({
+                "run_id": "r",
+                "outcome": { "outcome": "merged" },
+                "source": { "source": "human" }
+            }),
+            "outcome.get" => json!({ "run_id": "r" }),
+            "outcome.query" => json!({}),
             other => panic!(
                 "RUNTIME_COMMAND_NAMES gained `{other}` with no representative here; add one and \
                  wire the variant to exactly one executor in `run_job`"
@@ -2426,6 +2467,7 @@ mod command_executor_partition {
             Executor::AgentRun,
             Executor::Delegate,
             Executor::Run,
+            Executor::Trust,
             Executor::Host,
             Executor::Session,
             Executor::Auth,

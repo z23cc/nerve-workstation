@@ -22,7 +22,14 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // agent-orchestration design §4). All additions are new serde-tagged variants
 // reusing AgentEventKind / SessionApprovalDecision / ApprovalRequested — no
 // broken or removed fields, so a v3 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "6";
+// v7 (trust-substrate L0c–L6): additive replay.start / ledger.query / verify.* /
+// policy.* / receipt.get / otel.ingest / outcome.* commands; replay_progress /
+// replay_finished / ledger_appended / verification_completed / policy_decision_recorded /
+// receipt_issued / gate_decided / run_ingested / outcome_labeled events; pinned
+// RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
+// policy / receipt / outcome schema roots. Additive serde-tagged variants and new
+// schema-roots only — a v6 client keeps working.
+pub const RUNTIME_PROTOCOL_VERSION: &str = "7";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";
@@ -272,6 +279,18 @@ pub struct RuntimeProtocolSchema {
     /// exported schema (they are not reachable from any wire field on their own —
     /// `run_recorded` carries only ids + the root hash).
     pub run: crate::provenance::Run,
+    /// Trust-substrate L0c–L6 schema roots: shapes not otherwise reachable from a
+    /// wire command/event field, surfaced so the exported schema documents them for
+    /// third-party (offline) re-verification of receipts/ledger/verdicts.
+    pub verdict: crate::verdict::Verdict,
+    pub ledger_record: crate::ledger::LedgerRecord,
+    pub ledger_head: crate::ledger::LedgerHead,
+    pub policy_doc: crate::policy::PolicyDoc,
+    pub policy_decision: crate::policy::PolicyDecisionRecord,
+    pub receipt: crate::receipt::Receipt,
+    pub outcome_record: crate::outcome::OutcomeRecord,
+    pub outcome_summary: crate::outcome::OutcomeSummary,
+    pub replay_manifest: crate::provenance::ReplayManifest,
     pub runtime_event_notification: RuntimeEventNotification,
     pub runtime_info: RuntimeInfo,
     pub host_capabilities: HostCapabilities,

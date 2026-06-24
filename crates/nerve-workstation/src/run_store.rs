@@ -18,7 +18,7 @@
 //! hashing they call live in `nerve-core::provenance` (INV-R2).
 
 use anyhow::{Context, Result, anyhow};
-use nerve_core::provenance::{Event, EventKind, RUN_SCHEMA_VERSION, Run};
+use nerve_core::provenance::{Event, EventKind, RUN_SCHEMA_VERSION, Run, RunInputs};
 use nerve_runtime::RuntimeError;
 use serde_json::{Value, json};
 use std::fs;
@@ -181,6 +181,9 @@ impl RunWriter {
             Some(now_ms()),
             finished,
             self.events,
+            // L0c pinned inputs are threaded into the writer in a follow-up; default
+            // (unpinned) today, so the content address is unchanged from pre-L0c.
+            RunInputs::default(),
         );
         let store = store?;
         match store.write_record(&run) {
@@ -325,6 +328,7 @@ mod tests {
             agent: "codex".into(),
             task: "add a test".into(),
             cwd: Some("/repo".into()),
+            inputs: None,
         });
         writer.push(EventKind::TurnStarted { turn: 0 });
         writer.push(EventKind::Output {
@@ -371,6 +375,7 @@ mod tests {
             Some(456),
             true,
             loaded.events.clone(),
+            RunInputs::default(),
         );
         assert_eq!(rebuilt.root_hash, loaded.root_hash);
     }
@@ -395,8 +400,10 @@ mod tests {
                         agent: "codex".into(),
                         task: task.into(),
                         cwd: None,
+                        inputs: None,
                     },
                 }],
+                RunInputs::default(),
             );
             // Distinct tasks -> distinct content addresses -> distinct files.
             assert!(!run.run_id.is_empty());
@@ -448,7 +455,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = RunStore::new(dir.path().to_path_buf());
         for bad in ["../escape", "a/b", "", "dots.here"] {
-            let mut run = nerve_core::build_run("s", "codex", None, 1, None, true, vec![]);
+            let mut run = nerve_core::build_run(
+                "s",
+                "codex",
+                None,
+                1,
+                None,
+                true,
+                vec![],
+                RunInputs::default(),
+            );
             run.run_id = bad.to_string();
             assert!(
                 store.write_record(&run).is_err(),

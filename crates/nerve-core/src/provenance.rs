@@ -20,7 +20,10 @@
 // Re-export the shapes this module content-addresses so a consumer of the kernel
 // builds an event tape (and reads back a sealed `Run`) through `nerve_core` alone,
 // without taking its own `nerve-proto` dependency.
-pub use nerve_proto::provenance::{Event, EventKind, LedgerEntry, RUN_SCHEMA_VERSION, Run};
+pub use nerve_proto::provenance::{
+    Attestation, Event, EventKind, LedgerEntry, RUN_SCHEMA_VERSION, ReplayManifest, Run, RunInputs,
+    ToolchainPin,
+};
 use sha2::{Digest, Sha256};
 
 /// Lowercase-hex SHA-256 of one event's canonical JSON. Deterministic: every
@@ -73,6 +76,41 @@ pub fn build_run(
     finished_at_ms: Option<u64>,
     finished: bool,
     events: Vec<Event>,
+    inputs: RunInputs,
+) -> Run {
+    build_run_attested(
+        session_id,
+        agent,
+        root,
+        started_at_ms,
+        finished_at_ms,
+        finished,
+        events,
+        inputs,
+        Attestation::Full,
+    )
+}
+
+/// Seal a tape into a [`Run`] with an explicit [`Attestation`] — `Full` for a
+/// Nerve-captured run, `Partial` for one reconstructed from an external OTel trace
+/// (L5). The `inputs` mirror and `attestation` are stored for display/query and are
+/// **not** hashed, so they never perturb the content address (only `events` are
+/// hashed). [`build_run`] delegates here with `Attestation::Full`.
+#[must_use]
+#[allow(clippy::too_many_arguments)] // reason: one cohesive seal call; the run
+// identity (session/agent/root), host timestamps, the tape, the pinned inputs, and
+// the attestation tier are independent inputs — bundling them adds indirection
+// without isolating a separate responsibility.
+pub fn build_run_attested(
+    session_id: impl Into<String>,
+    agent: impl Into<String>,
+    root: Option<String>,
+    started_at_ms: u64,
+    finished_at_ms: Option<u64>,
+    finished: bool,
+    events: Vec<Event>,
+    inputs: RunInputs,
+    attestation: Attestation,
 ) -> Run {
     let (ledger, root_hash) = build_ledger(&events);
     Run {
@@ -87,6 +125,8 @@ pub fn build_run(
         ledger,
         root_hash,
         finished,
+        inputs,
+        attestation,
     }
 }
 
@@ -116,6 +156,7 @@ mod tests {
                     agent: "codex".into(),
                     task: "add a test".into(),
                     cwd: Some("/repo".into()),
+                    inputs: None,
                 },
             ),
             ev(1, EventKind::TurnStarted { turn: 0 }),
@@ -172,6 +213,7 @@ mod tests {
                 agent: "codex".into(),
                 task: "DIFFERENT".into(),
                 cwd: Some("/repo".into()),
+                inputs: None,
             },
         );
         let (_, tampered_root) = build_ledger(&tampered);
@@ -196,6 +238,7 @@ mod tests {
             Some(2000),
             true,
             tape.clone(),
+            RunInputs::default(),
         );
         assert_eq!(run_a.run_id, run_a.root_hash);
         assert_eq!(run_a.schema_version, RUN_SCHEMA_VERSION);
@@ -210,6 +253,7 @@ mod tests {
             Some(123_456),
             true,
             tape,
+            RunInputs::default(),
         );
         assert_eq!(run_a.root_hash, run_b.root_hash);
         assert_eq!(run_a.run_id, run_b.run_id);

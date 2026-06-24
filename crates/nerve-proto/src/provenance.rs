@@ -21,12 +21,13 @@
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// On-disk + on-wire provenance schema version. Bumped only for additive,
 /// backward-compatible changes to the [`Run`] shape (mirrors `WorkflowDef`'s
 /// `schema_version`); a reader rejects a record from a newer major it cannot
 /// understand rather than silently dropping fields.
-pub const RUN_SCHEMA_VERSION: u32 = 1;
+pub const RUN_SCHEMA_VERSION: u32 = 2;
 
 /// One typed, replayable step in a captured run's tape (`trust-substrate.md`
 /// §5 `Event.kind`). Internally tagged (`{"kind": "...", ...}`), mirroring
@@ -41,11 +42,16 @@ pub const RUN_SCHEMA_VERSION: u32 = 1;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
     /// The run began: which agent, the delegated task text, and the working dir.
+    /// `inputs` is the L0c pinned closure (repo snapshot + toolchain digest) hashed
+    /// in-band; absent on a legacy/unpinned run, so an omitted `inputs` reproduces
+    /// the pre-L0c content address byte-for-byte.
     RunStarted {
         agent: String,
         task: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inputs: Option<RunInputs>,
     },
     /// A turn of the delegated agent began. `turn` is a 0-based logical index.
     TurnStarted { turn: u64 },
@@ -129,6 +135,79 @@ pub struct Run {
     pub root_hash: String,
     #[serde(default)]
     pub finished: bool,
+    /// Denormalized mirror of the run's pinned closure (also carried in-band on the
+    /// `RunStarted` event, which IS hashed). This top-level copy is for display/query
+    /// and is **not** hashed — so adding it never perturbs an existing run's
+    /// `root_hash` (L0c, additive).
+    #[serde(default)]
+    pub inputs: RunInputs,
+    /// How completely the run was attested: `Full` = captured by Nerve's recorder;
+    /// `Partial` = reconstructed from an external OTel trace (L5 ingest). Skipped
+    /// when `Full`, so existing serialized runs round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "is_full_attestation")]
+    pub attestation: Attestation,
+}
+
+/// The pinned closure a run executed in (`trust-substrate.md` §5 inputs): the
+/// content address of the repo snapshot at start plus a digest over the resolved
+/// toolchain/lockfiles. Hashed in-band on the `RunStarted` event so the run's
+/// content address commits to *what ran*, not just the agent's output — the basis
+/// of the "bit-for-bit replayable from recorded inputs" claim (L0c).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct RunInputs {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo_snapshot_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub toolchain_digest: String,
+    /// OCI image digest of a fully-reproduced environment, when available. `None`
+    /// today (the strong-isolation `EnvironmentPinner` seam is deferred infra).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<String>,
+}
+
+/// The resolved toolchain a [`RunInputs::toolchain_digest`] is computed over:
+/// tool→version and lockfile→content-hash maps. `BTreeMap` for deterministic
+/// (sorted) iteration so the digest is byte-stable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct ToolchainPin {
+    #[serde(default)]
+    pub tools: BTreeMap<String, String>,
+    #[serde(default)]
+    pub lockfiles: BTreeMap<String, String>,
+}
+
+/// The verdict of a deterministic replay (L0c `replay.start`): the recorded vs.
+/// re-derived spine head and whether they matched. `matched == false` is a real
+/// (recorded) divergence verdict, not a transport error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct ReplayManifest {
+    pub run_id: String,
+    pub recorded_root_hash: String,
+    pub replayed_root_hash: String,
+    pub matched: bool,
+    pub event_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diverged_at_seq: Option<u64>,
+}
+
+/// How completely a run was attested. `Full` (the default) is a Nerve-captured run;
+/// `Partial` is reconstructed from an external OTel trace and cannot be replayed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Attestation {
+    #[default]
+    Full,
+    Partial,
+}
+
+/// Whether an [`Attestation`] is the default `Full` — the `skip_serializing_if`
+/// predicate that keeps existing serialized runs byte-identical.
+fn is_full_attestation(attestation: &Attestation) -> bool {
+    *attestation == Attestation::Full
 }
 
 #[cfg(test)]
@@ -143,6 +222,7 @@ mod tests {
                     agent: "codex".into(),
                     task: "t".into(),
                     cwd: None,
+                    inputs: None,
                 },
                 "run_started",
             ),
@@ -234,6 +314,8 @@ mod tests {
             }],
             root_hash: "ee".into(),
             finished: true,
+            inputs: RunInputs::default(),
+            attestation: Attestation::Full,
         };
         let value = serde_json::to_value(&run).expect("run json");
         let back: Run = serde_json::from_value(value).expect("round-trip");

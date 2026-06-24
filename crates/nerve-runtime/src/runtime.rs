@@ -126,8 +126,22 @@ where
             | RuntimeCommand::DelegateList => Err(RuntimeError::adapter(
                 "delegate commands are executed by the host delegate runtime, not the core runtime",
             )),
-            RuntimeCommand::RunList | RuntimeCommand::RunGet { .. } => Err(RuntimeError::adapter(
-                "run commands are executed by the host run store, not the core runtime",
+            RuntimeCommand::RunList
+            | RuntimeCommand::RunGet { .. }
+            | RuntimeCommand::ReplayStart { .. }
+            | RuntimeCommand::LedgerQuery { .. }
+            | RuntimeCommand::VerifyStart { .. }
+            | RuntimeCommand::VerifyGet { .. }
+            | RuntimeCommand::VerifyList { .. }
+            | RuntimeCommand::PolicyGet
+            | RuntimeCommand::PolicyDecisions { .. }
+            | RuntimeCommand::ReceiptGet { .. }
+            | RuntimeCommand::OtelIngest { .. }
+            | RuntimeCommand::OutcomeLabel { .. }
+            | RuntimeCommand::OutcomeGet { .. }
+            | RuntimeCommand::OutcomeQuery { .. } => Err(RuntimeError::adapter(
+                "trust-substrate (run/replay/ledger/verify/policy/receipt/otel/outcome) \
+                 commands are executed by the host, not the core runtime",
             )),
             RuntimeCommand::FlowStart { .. }
             | RuntimeCommand::FlowSteer { .. }
