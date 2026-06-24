@@ -263,6 +263,9 @@ impl CodexSession {
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(&str),
     ) -> Result<LineOutcome, SessionError> {
+        // Tape the verbatim line for L0 run capture before any parse/filter, so the
+        // recorded run replays the exact app-server stream the child produced.
+        acc.raw_lines.push(raw.to_string());
         // Re-escape bare control bytes so a stray <0x20 in a string value can't make
         // serde reject the line (and silently drop a delta/completion) — the claude
         // driver applies the same guard to its shared line source.

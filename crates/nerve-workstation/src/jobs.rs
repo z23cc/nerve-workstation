@@ -1221,11 +1221,10 @@ impl JobManager {
 
     /// Seal a live delegated session's captured turns (claude/codex) into one
     /// content-addressed Run and announce it (best-effort). Each [`CapturedTurn`]
-    /// becomes `TurnStarted` → optional `UsageUpdated` → `TurnFinished`, bracketed by
-    /// `RunStarted` / `RunFinished`. The raw per-line output tape is NOT captured on
-    /// the live path yet (it sits behind the streamed `on_progress` filter); this
-    /// records the run's lifecycle + usage, the foundation a later brick extends with
-    /// the live raw tape. `finished` is false when the session ended by cancellation.
+    /// becomes `TurnStarted` → the turn's verbatim raw-output `Output` lines →
+    /// optional `UsageUpdated` → `TurnFinished`, bracketed by `RunStarted` /
+    /// `RunFinished` — the full raw tape, matching the one-shot path. `finished` is
+    /// false when the session ended by cancellation.
     #[allow(clippy::too_many_arguments)] // reason: one cohesive seal call; the run
     // identity (job_id/agent), the start context (task/cwd/started_at_ms), the
     // captured turns, and the finished flag are independent inputs, and bundling them
@@ -1253,6 +1252,14 @@ impl JobManager {
         for (index, captured) in turns.iter().enumerate() {
             let turn = index as u64;
             writer.push(EventKind::TurnStarted { turn });
+            // The verbatim raw tape this turn produced (the live-path analogue of the
+            // one-shot path's per-line Output events) — interleaved per turn.
+            for line in &captured.raw_lines {
+                writer.push(EventKind::Output {
+                    turn,
+                    text: line.clone(),
+                });
+            }
             if let Some(usage) = &captured.usage {
                 writer.push(delegate_usage_event(turn, usage, captured.cost_usd));
             }

@@ -72,6 +72,11 @@ pub(crate) struct TurnResult {
     pub(crate) usage: Option<DelegateUsage>,
     /// Run cost in USD this turn's `result` line carried, when present.
     pub(crate) cost_usd: Option<f64>,
+    /// Verbatim stdout lines the child emitted during this turn — the L0 raw tape
+    /// (the live-path analogue of the one-shot path's per-line `Output` events).
+    /// Captured for replay/audit; carried through to the run-capture seal, never
+    /// re-parsed and never put on the protocol result JSON.
+    pub(crate) raw_lines: Vec<String>,
 }
 
 impl TurnResult {
@@ -290,6 +295,9 @@ impl DelegateSession {
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(&str),
     ) -> LineOutcome {
+        // Tape the verbatim line for L0 run capture before any parse/filter, so the
+        // recorded run replays the exact stream the child produced.
+        acc.raw_lines.push(raw.to_string());
         let line = reescape_control_chars(raw);
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             return LineOutcome::Continue;
@@ -389,16 +397,20 @@ enum LineOutcome {
 }
 
 /// Per-turn accumulator: the latest assistant text (the streamed answer) folded
-/// with whatever the `result` line carries.
+/// with whatever the `result` line carries, plus the verbatim raw stdout lines (the
+/// L0 tape) seen this turn.
 #[derive(Default)]
 struct TurnAccumulator {
     last_assistant: String,
+    raw_lines: Vec<String>,
 }
 
 impl TurnAccumulator {
     /// Build the [`TurnResult`] from the `result` line, preferring its `result`
-    /// text but falling back to the last streamed assistant text.
-    fn finish(&self, value: &Value) -> TurnResult {
+    /// text but falling back to the last streamed assistant text. Takes `&mut self`
+    /// to move the accumulated raw tape into the result (the accumulator is dropped
+    /// right after, so the move avoids cloning a potentially large tape).
+    fn finish(&mut self, value: &Value) -> TurnResult {
         let ok = value.get("subtype").and_then(Value::as_str) == Some("success")
             && !value
                 .get("is_error")
@@ -416,6 +428,7 @@ impl TurnAccumulator {
             result,
             usage,
             cost_usd,
+            raw_lines: std::mem::take(&mut self.raw_lines),
         }
     }
 }
@@ -655,8 +668,9 @@ mod tests {
 
     #[test]
     fn turn_accumulator_prefers_result_text_then_falls_back() {
-        let acc = TurnAccumulator {
+        let mut acc = TurnAccumulator {
             last_assistant: "streamed".to_string(),
+            ..Default::default()
         };
         let with_result = acc.finish(&json!({
             "type": "result",
@@ -691,7 +705,7 @@ mod tests {
 
     #[test]
     fn error_result_is_not_ok() {
-        let acc = TurnAccumulator::default();
+        let mut acc = TurnAccumulator::default();
         let turn = acc.finish(&json!({
             "type": "result",
             "subtype": "error_during_execution",
@@ -721,6 +735,7 @@ mod tests {
                 cache_creation_tokens: 0,
             }),
             cost_usd: Some(0.1),
+            raw_lines: vec!["{\"type\":\"result\"}".to_string()],
         };
         let json = turn.to_json("claude", "sess-1");
         assert_eq!(json["agent"], "claude");
@@ -729,5 +744,7 @@ mod tests {
         assert_eq!(json["result"], "done");
         assert_eq!(json["usage"]["input_tokens"], 1);
         assert_eq!(json["cost_usd"], 0.1);
+        // The raw tape is carried on the turn but never leaks into the result JSON.
+        assert!(json.get("raw_lines").is_none());
     }
 }

@@ -152,6 +152,9 @@ pub(crate) struct CapturedTurn {
     pub(crate) ok: bool,
     pub(crate) usage: Option<DelegateUsage>,
     pub(crate) cost_usd: Option<f64>,
+    /// Verbatim raw stdout lines this turn produced (the L0 tape), carried from the
+    /// driver's `TurnResult` so `seal_live_run` can emit per-line `Output` events.
+    pub(crate) raw_lines: Vec<String>,
 }
 
 /// One live delegated session, keyed by the originating `delegate.start` job id.
@@ -206,6 +209,7 @@ impl LiveHandle {
             ok: turn.ok,
             usage: turn.usage,
             cost_usd: turn.cost_usd,
+            raw_lines: turn.raw_lines.clone(),
         });
     }
 
@@ -588,6 +592,7 @@ mod tests {
             result: "turn 1".into(),
             usage: None,
             cost_usd: None,
+            raw_lines: Vec::new(),
         };
         let handle = registry.register("job-1", LiveDriver::Claude(session), &first_turn);
 
@@ -633,6 +638,7 @@ mod tests {
             result: "turn 1".into(),
             usage: None,
             cost_usd: None,
+            raw_lines: vec!["{\"type\":\"assistant\"}".into()],
         });
         handle.record_turn(&TurnResult {
             ok: false,
@@ -644,10 +650,14 @@ mod tests {
                 cache_creation_tokens: 0,
             }),
             cost_usd: Some(0.5),
+            raw_lines: vec!["{\"type\":\"result\"}".into(), "extra".into()],
         });
         let turns = handle.take_turns();
         assert_eq!(turns.len(), 2);
         assert!(turns[0].ok && !turns[1].ok);
+        // The raw tape is carried per turn for seal_live_run to emit Output events.
+        assert_eq!(turns[0].raw_lines.len(), 1);
+        assert_eq!(turns[1].raw_lines, vec!["{\"type\":\"result\"}", "extra"]);
         assert_eq!(turns[1].usage.map(|u| u.input_tokens), Some(10));
         // Draining empties the accumulator — a second seal records nothing.
         assert!(handle.take_turns().is_empty());

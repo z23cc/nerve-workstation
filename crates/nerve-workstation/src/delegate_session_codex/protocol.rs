@@ -65,6 +65,10 @@ pub(super) struct TurnAccumulator {
     pub(super) turn_id: String,
     ok: bool,
     usage: Option<DelegateUsage>,
+    /// Verbatim app-server JSON-RPC lines seen this turn — the L0 raw tape, pushed
+    /// by the read loop (`mod.rs`) before parsing. Moved into the `TurnResult` at
+    /// [`finish`](Self::finish).
+    pub(super) raw_lines: Vec<String>,
 }
 
 impl TurnAccumulator {
@@ -131,13 +135,15 @@ impl TurnAccumulator {
         }
     }
 
-    /// Build the [`TurnResult`] from the accumulated stream state.
-    pub(super) fn finish(&self) -> TurnResult {
+    /// Build the [`TurnResult`] from the accumulated stream state. Takes `&mut self`
+    /// to move the raw tape out (the accumulator is dropped right after).
+    pub(super) fn finish(&mut self) -> TurnResult {
         TurnResult {
             ok: self.ok,
             result: self.message.clone(),
             usage: self.usage,
             cost_usd: None,
+            raw_lines: std::mem::take(&mut self.raw_lines),
         }
     }
 }
