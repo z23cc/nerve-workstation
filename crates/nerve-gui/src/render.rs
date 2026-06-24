@@ -218,6 +218,31 @@ fn markdown_to_html(src: &str) -> RenderedMarkdown {
                 });
             }
             Event::Html(raw) | Event::InlineHtml(raw) => events.push(Event::Text(raw)),
+            // Neutralize dangerous URL schemes in links/images — pulldown_cmark does
+            // not filter them, so a model could emit `[x](javascript:…)` that becomes
+            // a clickable XSS vector in the rendered DOM.
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => events.push(Event::Start(Tag::Link {
+                link_type,
+                dest_url: sanitize_url(dest_url),
+                title,
+                id,
+            })),
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => events.push(Event::Start(Tag::Image {
+                link_type,
+                dest_url: sanitize_url(dest_url),
+                title,
+                id,
+            })),
             other => events.push(other),
         }
     }
@@ -289,5 +314,90 @@ fn escape_html(out: &mut String, value: &str) {
             '\'' => out.push_str(r"&#39;"),
             _ => out.push(ch),
         }
+    }
+}
+
+/// Replace a dangerous URL scheme with a harmless placeholder. pulldown_cmark
+/// passes link/image URLs through verbatim, so this is the GUI's guard against XSS
+/// in model-authored markdown (the rendered HTML goes into `inner_html`).
+fn sanitize_url<'a>(url: pulldown_cmark::CowStr<'a>) -> pulldown_cmark::CowStr<'a> {
+    if is_dangerous_url(&url) {
+        pulldown_cmark::CowStr::Borrowed("#")
+    } else {
+        url
+    }
+}
+
+/// Whether `url` uses an executable/inline scheme, ignoring leading whitespace,
+/// control chars, and case (so `java\tscript:`, ` JavaScript:` etc. are caught).
+fn is_dangerous_url(url: &str) -> bool {
+    let normalized: String = url
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !ch.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized.starts_with("javascript:")
+        || normalized.starts_with("data:")
+        || normalized.starts_with("vbscript:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_html_in_markdown_is_escaped() {
+        let r = markdown_to_html("<script>alert(1)</script>\n\nhi");
+        assert!(
+            !r.html.contains("<script"),
+            "raw <script> must be escaped, got: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn dangerous_url_schemes_are_neutralized() {
+        for md in [
+            "[click](javascript:alert(1))",
+            "![x](javascript:alert(1))",
+            "[x](vbscript:msgbox(1))",
+            "[x](JAVASCRIPT:alert(1))",
+            "[x](java\tscript:alert(1))",
+            "[x](data:text/html,<script>alert(1)</script>)",
+        ] {
+            let r = markdown_to_html(md);
+            let low = r.html.to_ascii_lowercase();
+            assert!(
+                !low.contains("javascript:")
+                    && !low.contains("vbscript:")
+                    && !low.contains("data:"),
+                "dangerous scheme leaked for {md:?}: {}",
+                r.html
+            );
+        }
+    }
+
+    #[test]
+    fn safe_urls_are_preserved() {
+        let r = markdown_to_html("[ok](https://example.com/path)");
+        assert!(
+            r.html.contains("https://example.com/path"),
+            "safe URLs must be kept, got: {}",
+            r.html
+        );
+        // Relative links are fine too.
+        let r = markdown_to_html("[rel](./docs/readme.md)");
+        assert!(r.html.contains("./docs/readme.md"), "got: {}", r.html);
+    }
+
+    #[test]
+    fn is_dangerous_url_detection() {
+        assert!(is_dangerous_url("javascript:alert(1)"));
+        assert!(is_dangerous_url("  JavaScript:alert(1)"));
+        assert!(is_dangerous_url("java\tscript:x"));
+        assert!(is_dangerous_url("data:text/html,x"));
+        assert!(!is_dangerous_url("https://example.com"));
+        assert!(!is_dangerous_url("/abs/path"));
+        assert!(!is_dangerous_url("mailto:x@y.z"));
     }
 }
