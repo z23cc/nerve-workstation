@@ -121,7 +121,9 @@ where
             )),
             RuntimeCommand::DelegateStart { .. }
             | RuntimeCommand::DelegateSteer { .. }
-            | RuntimeCommand::DelegateClose { .. } => Err(RuntimeError::adapter(
+            | RuntimeCommand::DelegateClose { .. }
+            | RuntimeCommand::DelegateGet { .. }
+            | RuntimeCommand::DelegateList => Err(RuntimeError::adapter(
                 "delegate commands are executed by the host delegate runtime, not the core runtime",
             )),
             RuntimeCommand::FlowStart { .. }

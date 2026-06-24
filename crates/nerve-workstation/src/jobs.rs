@@ -476,6 +476,11 @@ impl JobManager {
                 message,
             } => self.run_delegate_steer(&session_id, &message, token),
             RuntimeCommand::DelegateClose { session_id } => self.run_delegate_close(&session_id),
+            RuntimeCommand::DelegateList => Ok(self.live_sessions.list()),
+            RuntimeCommand::DelegateGet { session_id } => self
+                .live_sessions
+                .get_snapshot(&session_id)
+                .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string())),
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected a delegate.* command",
             )),
@@ -2000,7 +2005,9 @@ fn executor_for(command: &RuntimeCommand) -> Executor {
         RuntimeCommand::AgentRun { .. } => Executor::AgentRun,
         RuntimeCommand::DelegateStart { .. }
         | RuntimeCommand::DelegateSteer { .. }
-        | RuntimeCommand::DelegateClose { .. } => Executor::Delegate,
+        | RuntimeCommand::DelegateClose { .. }
+        | RuntimeCommand::DelegateGet { .. }
+        | RuntimeCommand::DelegateList => Executor::Delegate,
         RuntimeCommand::HostCapabilities
         | RuntimeCommand::HostClipboardWriteText { .. }
         | RuntimeCommand::HostNotificationShow { .. }
@@ -2087,8 +2094,8 @@ mod command_executor_partition {
     /// an executor decision in `every_runtime_command_has_exactly_one_executor`.
     fn representative(name: &str) -> RuntimeCommand {
         let fields: Value = match name {
-            "ping" | "tool.list" | "session.list" | "flow.list" | "host.capabilities"
-            | "workspace.reveal" => json!({}),
+            "ping" | "tool.list" | "session.list" | "flow.list" | "delegate.list"
+            | "host.capabilities" | "workspace.reveal" => json!({}),
             "host.clipboard.write_text" => json!({ "text": "copy me" }),
             "host.notification.show" => json!({ "title": "Nerve", "body": "Done" }),
             "host.folder.pick" => json!({ "title": "Choose project folder" }),
@@ -2116,7 +2123,7 @@ mod command_executor_partition {
             "auth.complete" => json!({ "login_id": "l" }),
             "delegate.start" => json!({ "agent": "codex", "task": "t" }),
             "delegate.steer" => json!({ "session_id": "s", "message": "m" }),
-            "delegate.close" => json!({ "session_id": "s" }),
+            "delegate.close" | "delegate.get" => json!({ "session_id": "s" }),
             "flow.start" => json!({
                 "workflow": {
                     "schema_version": 1,

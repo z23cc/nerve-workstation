@@ -8,11 +8,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
+// v5 (trust-substrate, credibility floor): additive read-only `delegate.get` /
+// `delegate.list` commands — enumerate/fetch the live external-agent (delegate)
+// sessions the daemon is parking, so a cockpit can observe its whole fleet over
+// the protocol instead of from a single client's local state. New serde-tagged
+// variants only; a v4 client keeps working.
 // v4 (C2): additive `flow.*` command family + `flow_*` events (the Conductor,
 // agent-orchestration design §4). All additions are new serde-tagged variants
 // reusing AgentEventKind / SessionApprovalDecision / ApprovalRequested — no
 // broken or removed fields, so a v3 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "4";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "5";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";

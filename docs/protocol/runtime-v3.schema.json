@@ -1300,6 +1300,36 @@
           "type": "object"
         },
         {
+          "description": "Fetch one live delegated session by id (the originating\n[`Self::DelegateStart`] job id). Read-only; mirrors `session.get` /\n`flow.get`. An unknown id is an error. The result is\n`{ \"delegate\": { session_id, agent, status, agent_session_id } }`.",
+          "properties": {
+            "kind": {
+              "const": "delegate.get",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "List the live delegated sessions the host is parking, so a cockpit can\nobserve its whole external-agent fleet over the protocol (not just from a\nsingle client's local state). Read-only; mirrors `session.list` /\n`flow.list`. The result is `{ \"delegates\": [ { session_id, agent, status,\nagent_session_id }, … ] }`, sorted by `session_id`.",
+          "properties": {
+            "kind": {
+              "const": "delegate.list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
           "anyOf": [
             {
               "description": "An inline workflow definition (the whole strategy as data). Boxed so the\nlarge inline-def variant doesn't bloat every command value (the named-ref\nvariant is tiny).",

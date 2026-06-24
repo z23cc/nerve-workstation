@@ -165,7 +165,7 @@ fn initialize_returns_runtime_info() {
     let responses = dispatch(&router, &output, rpc(json!(1), "initialize", json!({})));
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["result"]["protocol"], "nerve-runtime");
-    assert_eq!(responses[0]["result"]["protocolVersion"], "4");
+    assert_eq!(responses[0]["result"]["protocolVersion"], "5");
     assert_eq!(responses[0]["result"]["serverInfo"]["name"], "nerve");
     assert_eq!(
         responses[0]["result"]["capabilities"]["jobs"]["methods"][0],

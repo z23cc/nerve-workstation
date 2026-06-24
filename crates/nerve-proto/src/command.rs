@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+mod delegate;
 mod runtime_command_impl;
+
+pub use delegate::{DelegateAutonomy, DelegateRole};
 
 /// Runtime command kinds accepted by the human-facing daemon job protocol.
 pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
@@ -30,6 +33,8 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "delegate.start",
     "delegate.steer",
     "delegate.close",
+    "delegate.get",
+    "delegate.list",
     "flow.start",
     "flow.steer",
     "flow.replay",
@@ -246,6 +251,19 @@ pub enum RuntimeCommand {
     /// [`Self::DelegateStart`] job id (see [`Self::DelegateSteer`]).
     #[serde(rename = "delegate.close")]
     DelegateClose { session_id: String },
+    /// Fetch one live delegated session by id (the originating
+    /// [`Self::DelegateStart`] job id). Read-only; mirrors `session.get` /
+    /// `flow.get`. An unknown id is an error. The result is
+    /// `{ "delegate": { session_id, agent, status, agent_session_id } }`.
+    #[serde(rename = "delegate.get")]
+    DelegateGet { session_id: String },
+    /// List the live delegated sessions the host is parking, so a cockpit can
+    /// observe its whole external-agent fleet over the protocol (not just from a
+    /// single client's local state). Read-only; mirrors `session.list` /
+    /// `flow.list`. The result is `{ "delegates": [ { session_id, agent, status,
+    /// agent_session_id }, … ] }`, sorted by `session_id`.
+    #[serde(rename = "delegate.list")]
+    DelegateList,
     /// Start a declarative orchestration workflow (the Conductor, design §4) as one
     /// cancellable **job**: the host job manager runs the deterministic flow engine
     /// (C1) and the `job_id` IS the `flow_id`. The `workflow` is either an inline
@@ -459,55 +477,6 @@ impl WorkerSelector {
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.node_id.is_none()
-    }
-}
-
-/// Autonomy posture handed to a delegated external agent CLI, mapping to each
-/// vendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`,
-/// gemini `--approval-mode` (read-only | edit | full). Defaults to the most
-/// restricted ([`Self::ReadOnly`]) so an omitted field never grants more than read
-/// access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum DelegateAutonomy {
-    /// The delegated agent may only read; no edits, no command execution.
-    #[default]
-    ReadOnly,
-    /// The delegated agent may read and edit workspace files.
-    Edit,
-    /// The delegated agent may read, edit, and run commands.
-    Full,
-}
-
-/// The *role* a delegated agent plays (DA-7): a curated behavior preset the host
-/// materializes on top of the raw agent CLI. Defaults to [`Self::Standard`] (no
-/// preset — the `task`/`autonomy` are used verbatim).
-///
-/// [`Self::Scout`] is a read-only **repository-exploration** preset: the host
-/// wraps the task in an explore-and-cite instruction and forces read-only
-/// autonomy, so the agent returns compact `path:line-range` citations instead of
-/// editing — a cheap context sub-agent that keeps the caller's context window
-/// clean (the FastContext pattern, run on an existing CLI). The role is plain
-/// vocabulary here; the host (`delegate_roles`) owns the prompt + posture it maps to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum DelegateRole {
-    /// No preset: the task and autonomy are passed through unchanged.
-    #[default]
-    Standard,
-    /// Read-only repository-exploration preset — forces read-only autonomy and an
-    /// explore-and-cite instruction (see the type docs).
-    Scout,
-}
-
-impl DelegateRole {
-    /// Whether this is the default ([`Self::Standard`]) — used to keep an unset
-    /// `role` off the wire (serde `skip_serializing_if`).
-    #[must_use]
-    pub fn is_default(&self) -> bool {
-        matches!(self, Self::Standard)
     }
 }
 

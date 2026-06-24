@@ -16,6 +16,7 @@
 use crate::delegate_session::DelegateSession;
 use crate::delegate_session_codex::CodexSession;
 use nerve_core::CancelToken;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -142,6 +143,11 @@ impl LiveDriver {
 
 /// One live delegated session, keyed by the originating `delegate.start` job id.
 pub(crate) struct LiveHandle {
+    /// The catalog agent kind ("claude"/"codex"), cached at construction and fixed
+    /// for the session's life. Held outside the `session` mutex so a read-only
+    /// `delegate.list`/`delegate.get` snapshot can report the agent without locking
+    /// (and thus without blocking on an in-flight turn that holds that mutex).
+    agent_kind: &'static str,
     /// The live driver. `None` once closed/reaped, so a late steer sees a clear
     /// "closed" error rather than touching a dead child.
     session: Mutex<Option<LiveDriver>>,
@@ -159,11 +165,39 @@ pub(crate) struct LiveHandle {
 impl LiveHandle {
     fn new(session: LiveDriver) -> Self {
         Self {
+            agent_kind: session.agent(),
             session: Mutex::new(Some(session)),
             close_requested: Mutex::new(false),
             close_cv: Condvar::new(),
             session_cancel: CancelToken::new(),
         }
+    }
+
+    /// A non-blocking, read-only summary of this session for `delegate.list` /
+    /// `delegate.get`: `{ session_id, agent, status, agent_session_id }`.
+    ///
+    /// `agent` is the cached driver kind. `status` is `live` (driver present),
+    /// `closed` (driver reaped), or `busy` (a turn currently holds the session
+    /// lock) — read via `try_lock`, so snapshotting the fleet NEVER blocks on an
+    /// in-flight turn (which holds the `session` mutex for its whole duration).
+    /// `agent_session_id` is the agent's own captured id (claude session / codex
+    /// thread) when the driver is reachable, for later resume-by-id.
+    pub(crate) fn snapshot(&self, session_id: &str) -> Value {
+        let summarize = |slot: &Option<LiveDriver>| match slot.as_ref() {
+            Some(driver) => ("live", driver.session_id().map(str::to_string)),
+            None => ("closed", None),
+        };
+        let (status, agent_session_id) = match self.session.try_lock() {
+            Ok(slot) => summarize(&slot),
+            Err(std::sync::TryLockError::Poisoned(poison)) => summarize(&poison.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => ("busy", None),
+        };
+        json!({
+            "session_id": session_id,
+            "agent": self.agent_kind,
+            "status": status,
+            "agent_session_id": agent_session_id,
+        })
     }
 
     /// The catalog agent name the live driver speaks, or `Err(closed)` if the
@@ -339,6 +373,32 @@ impl LiveSessions {
         handle.request_close();
         Ok(())
     }
+
+    /// Snapshot every live delegated session for `delegate.list`, sorted by id for
+    /// deterministic output: `{ "delegates": [ {…}, … ] }`. Clones the handle
+    /// `Arc`s under the registry lock then snapshots each WITHOUT holding it (and
+    /// each snapshot is itself non-blocking), so a long in-flight turn can never
+    /// stall the listing or the registry. Mirrors `flow.list` / `session.list`.
+    pub(crate) fn list(&self) -> Value {
+        let mut entries: Vec<(String, Arc<LiveHandle>)> = crate::sync::lock_recover(&self.sessions)
+            .iter()
+            .map(|(id, handle)| (id.clone(), Arc::clone(handle)))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let delegates: Vec<Value> = entries
+            .iter()
+            .map(|(id, handle)| handle.snapshot(id))
+            .collect();
+        json!({ "delegates": delegates })
+    }
+
+    /// Snapshot one live delegated session by id for `delegate.get`:
+    /// `{ "delegate": {…} }`. An unknown id is an error. Mirrors `flow.get` /
+    /// `session.get`.
+    pub(crate) fn get_snapshot(&self, session_id: &str) -> Result<Value, LiveError> {
+        let handle = self.get(session_id)?;
+        Ok(json!({ "delegate": handle.snapshot(session_id) }))
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -455,5 +515,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("process group {pgid} leaked after close()");
+    }
+
+    /// `delegate.list` / `delegate.get` expose the parked fleet over the protocol:
+    /// `list()` returns one `{ session_id, agent, status }` per registered session,
+    /// `get_snapshot()` returns the same entry under `"delegate"`, an unknown id is
+    /// `LiveError::Unknown`, and a torn-down driver reports `status: "closed"`.
+    #[test]
+    fn list_and_get_snapshot_report_registered_sessions() {
+        let registry = LiveSessions::default();
+        let session = DelegateSession::from_child_for_test(spawn_sleeper());
+        let pgid = session.child_pid();
+        let handle = registry.register("job-1", LiveDriver::Claude(session));
+
+        let list = registry.list();
+        let delegates = list["delegates"].as_array().expect("delegates array");
+        assert_eq!(delegates.len(), 1);
+        assert_eq!(delegates[0]["session_id"], json!("job-1"));
+        assert_eq!(delegates[0]["agent"], json!("claude"));
+        assert_eq!(delegates[0]["status"], json!("live"));
+
+        let got = registry.get_snapshot("job-1").expect("known session");
+        assert_eq!(got["delegate"]["session_id"], json!("job-1"));
+        assert_eq!(got["delegate"]["agent"], json!("claude"));
+        assert!(matches!(
+            registry.get_snapshot("nope"),
+            Err(LiveError::Unknown(_))
+        ));
+
+        // Reap the sleeper (no leak) and confirm the slot then reports `closed`.
+        handle.shutdown();
+        let after = registry.get_snapshot("job-1").expect("still registered");
+        assert_eq!(after["delegate"]["status"], json!("closed"));
+
+        for _ in 0..200 {
+            if !group_alive(pgid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("process group {pgid} leaked after shutdown");
     }
 }
