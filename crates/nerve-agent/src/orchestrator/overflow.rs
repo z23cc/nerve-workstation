@@ -33,14 +33,22 @@ const OVERFLOW_MARKERS: &[&str] = &[
 /// could recover from. Recognizes HTTP 413 and the provider overflow phrases in
 /// [`OVERFLOW_MARKERS`]. Conservative: anything unrecognized is *not* treated as
 /// recoverable, so an unrelated 4xx still fails fast.
+///
+/// Only `Http`/`Provider` text is classified: an overflow never legitimately
+/// surfaces as `Parse` (the HTTP layer checks status before parsing the body, so
+/// a 413 is an `Http` error and stream/error events are `Provider`), so a
+/// malformed-SSE body that merely quotes a marker can't trigger a lossy
+/// truncate-and-retry. The 413 match is anchored to the `HTTP {status}: {body}`
+/// shape the error formatter always produces, so a 4xx body that echoes "413"
+/// in its text is not misread as overflow.
 #[must_use]
 pub(super) fn is_context_overflow(error: &AgentError) -> bool {
     let text = match error {
-        AgentError::Http(msg) | AgentError::Provider(msg) | AgentError::Parse(msg) => msg.as_str(),
+        AgentError::Http(msg) | AgentError::Provider(msg) => msg.as_str(),
         _ => return false,
     };
     let lower = text.to_ascii_lowercase();
-    if lower.contains("http 413") || lower.contains("status 413") {
+    if lower.contains("http 413:") {
         return true;
     }
     OVERFLOW_MARKERS.iter().any(|marker| lower.contains(marker))
@@ -108,6 +116,28 @@ mod tests {
         assert!(!is_context_overflow(&http("HTTP 401: unauthorized")));
         assert!(!is_context_overflow(&AgentError::Cancelled));
         assert!(!is_context_overflow(&AgentError::Tool("bad tool".into())));
+    }
+
+    #[test]
+    fn parse_errors_are_not_overflow() {
+        // A malformed-SSE / invalid-JSON decode failure that happens to quote an
+        // overflow marker must NOT trigger a lossy truncate-and-retry: an overflow
+        // never legitimately surfaces as a Parse error.
+        assert!(!is_context_overflow(&AgentError::Parse(
+            "invalid SSE event JSON: ... reduce the length ...".into()
+        )));
+    }
+
+    #[test]
+    fn non_413_body_echoing_413_is_not_overflow() {
+        // The 413 match is anchored to the `HTTP 413:` status shape, so a 4xx
+        // whose *body* echoes "413" / "status 413" is not misread as overflow.
+        assert!(!is_context_overflow(&http(
+            "HTTP 400: bad request (error code 413 mentioned in body)"
+        )));
+        assert!(!is_context_overflow(&http(
+            "HTTP 400: upstream returned status 413 earlier"
+        )));
     }
 
     #[test]

@@ -359,7 +359,7 @@ impl StreamState {
             if slot.name.is_empty() {
                 continue;
             }
-            let arguments = parse_arguments(&slot.arguments).unwrap_or_else(|| json!({}));
+            let arguments = parse_arguments_final(&slot.arguments);
             tool_calls.push(ToolCall {
                 id: slot.id.clone(),
                 name: slot.name.clone(),
@@ -400,6 +400,20 @@ fn parse_arguments(raw: &str) -> Option<Value> {
         return Some(json!({}));
     }
     serde_json::from_str(trimmed).ok()
+}
+
+/// Final-path parse used once the stream has ended: an empty buffer yields `{}`,
+/// but an unparseable (e.g. truncated mid-JSON) buffer is preserved as
+/// `{"_raw": …}` so the tool schema rejects it loudly rather than the call being
+/// silently dispatched with no arguments. Mirrors the Anthropic / OpenAI
+/// providers. Distinct from [`parse_arguments`], whose `None` gate the mid-stream
+/// flush relies on to mean "not yet complete".
+fn parse_arguments_final(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return json!({});
+    }
+    serde_json::from_str(trimmed).unwrap_or_else(|_| json!({ "_raw": raw }))
 }
 
 /// Map an OpenAI `finish_reason` string to a [`FinishReason`].
@@ -608,6 +622,26 @@ mod tests {
         let response = state.finish();
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
         assert_eq!(response.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn finish_preserves_truncated_tool_args_as_raw() {
+        // A tool-call buffer that arrives but is never completed (the stream ends
+        // mid-JSON) must not be silently collapsed to `{}`: finish() preserves it
+        // as `{"_raw": …}` so the tool schema rejects it loudly, matching the
+        // Anthropic / OpenAI providers.
+        let mut state = StreamState::default();
+        drain(
+            &mut state,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_t","function":{"name":"edit","arguments":"{\"a\":"}}]}}]}"#,
+        );
+        let response = state.finish();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "edit");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({ "_raw": "{\"a\":" })
+        );
     }
 
     #[test]

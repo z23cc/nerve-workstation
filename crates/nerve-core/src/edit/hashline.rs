@@ -1,6 +1,6 @@
 //! `hashline` mode: line-anchored ops bound to a content hash.
 //!
-//! Each file section starts with `[PATH#HASH]`, where `HASH` is the 4-hex
+//! Each file section starts with `[PATH#HASH]`, where `HASH` is the 16-hex
 //! content tag of the file the model edited. The patcher recomputes the tag of
 //! the live file and refuses the edit ([`EditError::StaleHash`]) if it differs,
 //! so a stale edit can never silently corrupt a file.
@@ -148,7 +148,7 @@ fn parse_err(detail: String) -> EditError {
 fn parse_header(line: &str) -> Option<(String, String)> {
     let inner = line.strip_prefix('[')?.strip_suffix(']')?;
     let (path, hash) = inner.rsplit_once('#')?;
-    if path.is_empty() || hash.len() != 4 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+    if path.is_empty() || hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     Some((path.to_string(), hash.to_string()))
@@ -282,6 +282,21 @@ fn apply_ops(path: &str, original: &str, ops: &[Op]) -> Result<String, EditError
     ranges.sort_unstable();
     for pair in ranges.windows(2) {
         if pair[1].0 < pair[0].1 {
+            return Err(parse_err(
+                "overlapping operations on the same lines".to_string(),
+            ));
+        }
+    }
+
+    // A zero-length insert whose anchor lands strictly inside an open delete/
+    // replace range would otherwise be silently swallowed (the splice runs first
+    // under bottom-up ordering, then the range's split_off/truncate discards the
+    // just-inserted lines). Reject it. Strict `<` on both sides keeps the
+    // documented boundary inserts (INS.PRE N / INS.POST N "apply at original line
+    // N") allowed — only strictly-interior anchors are rejected.
+    for splice in splices.iter().filter(|s| s.remove == 0) {
+        let at = splice.at;
+        if ranges.iter().any(|&(open, close)| open < at && at < close) {
             return Err(parse_err(
                 "overlapping operations on the same lines".to_string(),
             ));
@@ -524,7 +539,9 @@ mod tests {
     #[test]
     fn stale_hash_is_rejected() {
         let reader = files(&[("a.txt", "current\n")]);
-        let patch = format!("{BEGIN}\n[a.txt#0000]\nSWAP 1.=1:\n+x\n{END}\n");
+        // A well-formed 16-hex tag that does not match the file's real tag must
+        // reach the StaleHash guard (not be rejected as a malformed header).
+        let patch = format!("{BEGIN}\n[a.txt#0000000000000000]\nSWAP 1.=1:\n+x\n{END}\n");
         let err = plan(&patch, &reader).expect_err("stale");
         assert!(matches!(err, EditError::StaleHash { .. }));
     }
@@ -549,5 +566,22 @@ mod tests {
     fn out_of_range_line_errors() {
         let err = run("a.txt", "only\n", "SWAP 5.=5:\n+x").expect_err("range");
         assert!(matches!(err, EditError::LineOutOfRange { .. }));
+    }
+
+    #[test]
+    fn insert_strictly_inside_deleted_range_is_rejected() {
+        // INS.POST 2 anchors at original line 2, strictly inside DEL 2.=3's
+        // (1, 3) splice range. Without the interior-insert guard the insert is
+        // silently swallowed (yielding "a\nc\nd\n"); it must now be rejected.
+        let err = run("a.txt", "a\nb\nc\nd\n", "DEL 2.=3\nINS.POST 2:\n+X").expect_err("overlap");
+        assert!(matches!(err, EditError::Parse { .. }));
+    }
+
+    #[test]
+    fn boundary_insert_against_adjacent_delete_is_allowed() {
+        // INS.POST 1 anchors at line 1 (= the open edge of DEL 2.=3's (1, 3)
+        // range) — a documented boundary insert, so it stays allowed.
+        let out = run("a.txt", "a\nb\nc\nd\n", "DEL 2.=3\nINS.POST 1:\n+X").expect("boundary");
+        assert_eq!(out, "a\nX\nd\n");
     }
 }

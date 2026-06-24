@@ -1,8 +1,6 @@
 //! Project-local long-term memory tool and startup hook.
 //!
-//! This module is intentionally standalone until the agent/session wiring lands.
-
-#![allow(dead_code)]
+//! Consumed by [`subagent`](crate::subagent) (memory hook + distillation seam).
 
 use nerve_agent::{
     AgentDef, AgentError, AgentResult, Hook, LlmProvider, Message, Orchestrator, ToolBox, ToolSpec,

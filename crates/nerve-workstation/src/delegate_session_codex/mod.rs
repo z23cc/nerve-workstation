@@ -38,7 +38,7 @@
 mod protocol;
 
 use crate::delegate_proxy::DelegateProxy;
-use crate::delegate_session::{SessionError, TurnResult};
+use crate::delegate_session::{SessionError, TurnResult, reescape_control_chars};
 use crate::sandbox::{PersistentChild, SandboxLauncher};
 use nerve_core::CancelToken;
 use nerve_runtime::DelegateAutonomy;
@@ -263,7 +263,11 @@ impl CodexSession {
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(&str),
     ) -> Result<LineOutcome, SessionError> {
-        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        // Re-escape bare control bytes so a stray <0x20 in a string value can't make
+        // serde reject the line (and silently drop a delta/completion) — the claude
+        // driver applies the same guard to its shared line source.
+        let line = reescape_control_chars(raw);
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             return Ok(LineOutcome::Continue);
         };
         match classify(&value) {
@@ -445,7 +449,10 @@ impl CodexSession {
         awaited: i64,
         cancel: &CancelToken,
     ) -> Result<Option<Value>, SessionError> {
-        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        // Same control-byte re-escaping as the in-turn parse site, so a malformed
+        // handshake line can't be silently dropped (which would stall read_turn).
+        let line = reescape_control_chars(raw);
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             return Ok(None);
         };
         match classify(&value) {
@@ -461,5 +468,45 @@ impl CodexSession {
             }
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Finding 10: a codex `item/agentMessage/delta` line carrying a bare control
+    /// byte inside its string value must NOT be silently dropped. The raw line fails
+    /// `serde_json::from_str`, but after `reescape_control_chars` it parses and the
+    /// delta is accumulated — exactly what the wrapped parse site in `ingest_line`
+    /// now does (this exercises that classify+ingest path on the re-escaped line).
+    #[test]
+    fn control_byte_in_codex_delta_is_reescaped_not_dropped() {
+        // A literal U+0001 inside the delta string. `serde_json` rejects a bare
+        // control byte in a string, so without re-escaping the line is dropped.
+        let raw =
+            "{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"hi\u{0001}there\"}}";
+        assert!(
+            serde_json::from_str::<serde_json::Value>(raw).is_err(),
+            "the raw control-byte line should be rejected before re-escaping"
+        );
+
+        let line = reescape_control_chars(raw);
+        let value: serde_json::Value =
+            serde_json::from_str(&line).expect("re-escaped line should parse");
+
+        let mut acc = TurnAccumulator::default();
+        let mut streamed = String::new();
+        let mut on_progress = |t: &str| streamed.push_str(t);
+        let outcome = match classify(&value) {
+            Inbound::Notification { method } => {
+                acc.ingest_notification(&method, &value, &mut on_progress)
+            }
+            other => panic!("expected a notification, got {other:?}"),
+        };
+        assert!(matches!(outcome, LineOutcome::Continue));
+        // The delta was accumulated (with the control byte preserved as an escape),
+        // not dropped: the assistant text survives instead of being lost.
+        assert_eq!(streamed, "hi\u{0001}there");
     }
 }

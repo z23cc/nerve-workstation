@@ -168,7 +168,7 @@ proptest! {
     #[test]
     fn hashline_wrong_tag_is_refused(
         tokens in prop::collection::vec(line_token(), 1..8),
-        bogus in "[0-9A-Fa-f]{4}",
+        bogus in "[0-9A-Fa-f]{16}",
     ) {
         let content = unique_lines(&tokens);
         let real = snapshot_tag(&content);

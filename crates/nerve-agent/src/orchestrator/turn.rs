@@ -233,11 +233,13 @@ fn reasoning_from(response: &ChatResponse) -> Option<Reasoning> {
 }
 
 /// Render a successful tool result as a string: pass JSON strings through
-/// verbatim, serialize anything else compactly.
+/// verbatim, serialize anything else compactly. Serializing a `serde_json::Value`
+/// is infallible (its `Display` impl emits the same compact JSON), so a direct
+/// `to_string()` suffices — no fallible serializer call is needed.
 fn value_to_string(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+        other => other.to_string(),
     }
 }
 

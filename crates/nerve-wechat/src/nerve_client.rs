@@ -189,7 +189,13 @@ impl Drop for DelegateNerve {
 }
 
 impl NerveControl for DelegateNerve {
-    fn handle(&self, existing: Option<&str>, text: &str) -> Result<NerveReply, BridgeError> {
+    fn handle(
+        &self,
+        _chat_key: &str,
+        _from_user_id: &str,
+        existing: Option<&str>,
+        text: &str,
+    ) -> Result<NerveReply, BridgeError> {
         let mut conn = self.conn.borrow_mut();
         let (session_key, params) = match existing {
             None => {

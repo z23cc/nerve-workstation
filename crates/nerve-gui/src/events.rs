@@ -16,7 +16,7 @@ pub(crate) fn route_event(
 ) {
     match event {
         RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, end_turn),
-        RuntimeEvent::SessionClosed { session_id } => with_session(chats, &session_id, end_turn),
+        RuntimeEvent::SessionClosed { session_id } => with_session(chats, &session_id, close_session),
         // A turn's job reaching a terminal state ends the turn — keyed by the
         // turn's job id (start job for turn 1, or the steer job). Without these,
         // only SessionIdle clears `streaming`, so any server-side failure (CLI
@@ -27,10 +27,14 @@ pub(crate) fn route_event(
             // renders as a finished (markdown) turn, not a perpetually-streaming one
             // with a dangling caret under the per-turn-signal renderer.
             append_assistant_text(c, &format!("\n\n⚠ {}", error.message));
-            end_turn(c);
+            end_turn_terminal(c, &job_id);
         }),
-        RuntimeEvent::JobCancelled { job_id } => with_turn_job(chats, &job_id, end_turn),
-        RuntimeEvent::JobCompleted { job_id } => with_turn_job(chats, &job_id, end_turn),
+        RuntimeEvent::JobCancelled { job_id } => {
+            with_turn_job(chats, &job_id, |c| end_turn_terminal(c, &job_id));
+        }
+        RuntimeEvent::JobCompleted { job_id } => {
+            with_turn_job(chats, &job_id, |c| end_turn_terminal(c, &job_id));
+        }
         RuntimeEvent::SessionAgent { session_id, event } => {
             with_session(chats, &session_id, |c| apply_agent_event(event, c));
         }
@@ -138,6 +142,27 @@ fn end_turn(chat: &mut Chat) {
     chat.streaming = false;
     chat.turn_job = None;
     edit_last_turn(chat, |t| t.streaming = false);
+}
+
+/// End the turn for a closed own-engine `session.*` session AND drop the now
+/// stale session id, so the next message opens a fresh backend session instead
+/// of targeting the removed id (which the daemon rejects).
+fn close_session(chat: &mut Chat) {
+    chat.session = None;
+    end_turn(chat);
+}
+
+/// End a turn on a terminal job event, also dropping a now-dead delegate
+/// session. A `delegate.start` job PARKS as the live session for its whole
+/// lifetime (see rpc.rs start_job_with_id / delegate_live.rs), so that job
+/// going terminal means the session is over — clear it so the next message
+/// starts a fresh delegate instead of steering a dead id. A `session.*`
+/// backend keeps its session alive across turn-job completion, so leave it.
+fn end_turn_terminal(chat: &mut Chat, job_id: &str) {
+    end_turn(chat);
+    if chat.backend == "delegate" && chat.session.as_deref() == Some(job_id) {
+        chat.session = None;
+    }
 }
 
 /// Fold a single `AgentEventKind` into the chat's current (streaming) assistant
@@ -248,6 +273,70 @@ mod tests {
         assert!(!c.streaming);
         assert!(c.turn_job.is_none());
         assert!(!c.turns.last().unwrap().get().streaming);
+    }
+
+    #[test]
+    fn close_session_clears_session_and_ends_turn() {
+        let mut c = empty_chat();
+        c.session = Some("s1".into());
+        c.streaming = true;
+        c.turn_job = Some("job-1".into());
+        append_assistant_text(&mut c, "answer");
+        close_session(&mut c);
+        assert!(c.session.is_none(), "closed session id is dropped");
+        assert!(!c.streaming);
+        assert!(c.turn_job.is_none());
+        assert!(!c.turns.last().unwrap().get().streaming);
+    }
+
+    #[test]
+    fn delegate_start_job_terminal_clears_dead_session() {
+        let mut c = empty_chat();
+        c.backend = "delegate".into();
+        // A delegate start job parks AS the live session, so session == turn_job.
+        c.session = Some("start-job".into());
+        c.turn_job = Some("start-job".into());
+        c.streaming = true;
+        end_turn_terminal(&mut c, "start-job");
+        assert!(c.session.is_none(), "dead delegate session is cleared");
+        assert!(!c.streaming);
+        assert!(c.turn_job.is_none());
+    }
+
+    #[test]
+    fn delegate_steer_job_terminal_keeps_live_session() {
+        let mut c = empty_chat();
+        c.backend = "delegate".into();
+        // A steer turn's job id differs from the parked live-session id.
+        c.session = Some("start-job".into());
+        c.turn_job = Some("steer-job".into());
+        c.streaming = true;
+        end_turn_terminal(&mut c, "steer-job");
+        assert_eq!(
+            c.session.as_deref(),
+            Some("start-job"),
+            "live delegate session survives a steer-turn completion"
+        );
+        assert!(!c.streaming);
+        assert!(c.turn_job.is_none());
+    }
+
+    #[test]
+    fn session_backend_terminal_keeps_session_even_when_ids_match() {
+        let mut c = empty_chat();
+        c.backend = "session".into();
+        // For the own-engine backend the session outlives a turn-job completion.
+        c.session = Some("sess-1".into());
+        c.turn_job = Some("sess-1".into());
+        c.streaming = true;
+        end_turn_terminal(&mut c, "sess-1");
+        assert_eq!(
+            c.session.as_deref(),
+            Some("sess-1"),
+            "non-delegate session is never cleared by a terminal job event"
+        );
+        assert!(!c.streaming);
+        assert!(c.turn_job.is_none());
     }
 
     #[test]

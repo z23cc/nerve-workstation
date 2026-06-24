@@ -17,7 +17,7 @@
 use crate::error::WeixinError;
 use crate::gateway::WeixinGateway;
 use crate::types::WeixinMessage;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -26,6 +26,10 @@ use thiserror::Error;
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 /// Backoff between transient-error retries in the run loop.
 const RETRY_BACKOFF: Duration = Duration::from_secs(3);
+/// Recency window for the message-id dedup ring. Bounds memory at O(SEEN_CAP) for
+/// the lifetime of a long-lived bridge thread while still suppressing the gateway's
+/// legitimate re-delivery of a `message_id` across consecutive polls.
+const SEEN_CAP: usize = 4096;
 
 /// Reply sent when an allowed owner sends a media-only message (image/file/voice):
 /// media relay is not implemented yet, so acknowledge rather than silently drop.
@@ -53,10 +57,18 @@ pub struct NerveReply {
 /// `delegate.start` (when `existing` is `None`) / `delegate.steer` (to resume),
 /// defaulting to read-only autonomy, over the runtime protocol.
 pub trait NerveControl {
-    /// Handle a user message for a chat. `existing` is the chat's nerve session id
-    /// if one is active (`None` → start a new session). Returns the reply text plus
-    /// the (possibly new) session id to remember.
-    fn handle(&self, existing: Option<&str>, text: &str) -> Result<NerveReply, BridgeError>;
+    /// Handle a user message for a chat. `chat_key` namespaces the conversation
+    /// (account + group/peer) and `from_user_id` is the WeChat sender — both are
+    /// passed through so relayed activity carries the real identity. `existing` is
+    /// the chat's nerve session id if one is active (`None` → start a new session).
+    /// Returns the reply text plus the (possibly new) session id to remember.
+    fn handle(
+        &self,
+        chat_key: &str,
+        from_user_id: &str,
+        existing: Option<&str>,
+        text: &str,
+    ) -> Result<NerveReply, BridgeError>;
 }
 
 /// Who may drive the agent. Empty = deny everyone (fail-closed).
@@ -121,7 +133,8 @@ pub struct Bridge<G: WeixinGateway, N: NerveControl> {
     account_id: String,
     bot_user_id: String,
     sessions: SessionMap,
-    seen: BTreeSet<String>,
+    seen: HashSet<String>,
+    seen_order: VecDeque<String>,
     cursor: String,
 }
 
@@ -142,9 +155,26 @@ impl<G: WeixinGateway, N: NerveControl> Bridge<G, N> {
             account_id: account_id.into(),
             bot_user_id: bot_user_id.into(),
             sessions: SessionMap::default(),
-            seen: BTreeSet::new(),
+            seen: HashSet::new(),
+            seen_order: VecDeque::new(),
             cursor: String::new(),
         }
+    }
+
+    /// Record `id` in the recency-bounded dedup ring; returns `false` when it was
+    /// already present (a duplicate to suppress). Evicts the oldest id once the ring
+    /// exceeds [`SEEN_CAP`], so memory stays O(SEEN_CAP) for a long-lived bridge.
+    fn remember_seen(&mut self, id: &str) -> bool {
+        if !self.seen.insert(id.to_string()) {
+            return false;
+        }
+        self.seen_order.push_back(id.to_string());
+        if self.seen_order.len() > SEEN_CAP
+            && let Some(old) = self.seen_order.pop_front()
+        {
+            self.seen.remove(&old);
+        }
+        true
     }
 
     /// Whether `msg` should drive the agent: not a self-echo, not already handled,
@@ -153,7 +183,7 @@ impl<G: WeixinGateway, N: NerveControl> Bridge<G, N> {
         if msg.from_user_id.is_empty() || msg.from_user_id == self.bot_user_id {
             return false;
         }
-        if !msg.message_id.is_empty() && !self.seen.insert(msg.message_id.clone()) {
+        if !msg.message_id.is_empty() && !self.remember_seen(&msg.message_id) {
             return false;
         }
         self.allowlist.allows(&msg.from_user_id)
@@ -172,7 +202,9 @@ impl<G: WeixinGateway, N: NerveControl> Bridge<G, N> {
             return Ok(false);
         };
         let key = chat_key(&self.account_id, msg);
-        let reply = self.nerve.handle(self.sessions.get(&key), &text)?;
+        let reply = self
+            .nerve
+            .handle(&key, &msg.from_user_id, self.sessions.get(&key), &text)?;
         self.sessions.insert(key, reply.session_id);
         self.gateway
             .send_text(&msg.from_user_id, &msg.session_id, &reply.text)?;
@@ -274,9 +306,18 @@ mod tests {
         }
     }
 
-    /// A nerve control that records (existing, text) calls and echoes a fixed session.
+    /// One recorded `handle` call: the chat key, sender, prior session, and text.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct NerveCall {
+        chat_key: String,
+        from_user_id: String,
+        existing: Option<String>,
+        text: String,
+    }
+
+    /// A nerve control that records `handle` calls and echoes a fixed session.
     struct FakeNerve {
-        calls: RefCell<Vec<(Option<String>, String)>>,
+        calls: RefCell<Vec<NerveCall>>,
     }
 
     impl FakeNerve {
@@ -288,10 +329,19 @@ mod tests {
     }
 
     impl NerveControl for FakeNerve {
-        fn handle(&self, existing: Option<&str>, text: &str) -> Result<NerveReply, BridgeError> {
-            self.calls
-                .borrow_mut()
-                .push((existing.map(str::to_string), text.to_string()));
+        fn handle(
+            &self,
+            chat_key: &str,
+            from_user_id: &str,
+            existing: Option<&str>,
+            text: &str,
+        ) -> Result<NerveReply, BridgeError> {
+            self.calls.borrow_mut().push(NerveCall {
+                chat_key: chat_key.to_string(),
+                from_user_id: from_user_id.to_string(),
+                existing: existing.map(str::to_string),
+                text: text.to_string(),
+            });
             Ok(NerveReply {
                 session_id: "sess-1".to_string(),
                 text: format!("ack: {text}"),
@@ -336,10 +386,16 @@ mod tests {
         let handled = b.poll_once().expect("poll");
         assert_eq!(handled, 1);
         assert_eq!(b.cursor, "c1");
-        // nerve called with no existing session, then the reply is sent back to the sender.
+        // nerve called with no existing session, carrying the real per-chat key and
+        // sender; then the reply is sent back to the sender.
         assert_eq!(
             b.nerve.calls.borrow().as_slice(),
-            &[(None, "fix it".to_string())]
+            &[NerveCall {
+                chat_key: "acct:d:u_owner".to_string(),
+                from_user_id: "u_owner".to_string(),
+                existing: None,
+                text: "fix it".to_string(),
+            }]
         );
         assert_eq!(
             b.gateway.sent.borrow().as_slice(),
@@ -429,6 +485,32 @@ mod tests {
     }
 
     #[test]
+    fn seen_ring_is_bounded_and_evicts_oldest() {
+        let mut b = bridge(&["u_owner"], vec![]);
+        // First sighting of a fresh id is remembered; an immediate repeat is suppressed.
+        assert!(b.remember_seen("id-0"));
+        assert!(!b.remember_seen("id-0"), "recent id must still dedup");
+
+        // Fill the ring past its cap so the oldest entry ("id-0") is evicted.
+        for n in 1..=SEEN_CAP {
+            assert!(b.remember_seen(&format!("id-{n}")));
+        }
+        assert!(b.seen.len() <= SEEN_CAP, "ring memory stays bounded");
+
+        // A just-added recent id still dedups...
+        assert!(
+            !b.remember_seen(&format!("id-{SEEN_CAP}")),
+            "the most recent id must still be suppressed"
+        );
+        // ...but the long-evicted oldest id is treated as new again (not suppressed
+        // forever), which is the bounded-window tradeoff.
+        assert!(
+            b.remember_seen("id-0"),
+            "an evicted old id is no longer suppressed"
+        );
+    }
+
+    #[test]
     fn follow_up_reuses_the_chat_session() {
         let mut b = bridge(
             &["u_owner"],
@@ -440,9 +522,26 @@ mod tests {
         b.poll_once().expect("poll1");
         b.poll_once().expect("poll2");
         let calls = b.nerve.calls.borrow();
-        assert_eq!(calls[0], (None, "first".to_string()));
-        // Second message in the same chat resumes the remembered session.
-        assert_eq!(calls[1], (Some("sess-1".to_string()), "second".to_string()));
+        assert_eq!(
+            calls[0],
+            NerveCall {
+                chat_key: "acct:d:u_owner".to_string(),
+                from_user_id: "u_owner".to_string(),
+                existing: None,
+                text: "first".to_string(),
+            }
+        );
+        // Second message in the same chat resumes the remembered session, still
+        // carrying the real chat key + sender.
+        assert_eq!(
+            calls[1],
+            NerveCall {
+                chat_key: "acct:d:u_owner".to_string(),
+                from_user_id: "u_owner".to_string(),
+                existing: Some("sess-1".to_string()),
+                text: "second".to_string(),
+            }
+        );
     }
 
     #[test]

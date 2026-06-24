@@ -189,7 +189,6 @@ pub(super) fn content_search_file<P: CatalogProvider + Sync>(
             display_path: &display_path,
             context_before,
             context_after,
-            pattern: &input.request.pattern,
             regex: input.regex,
             ac: input.ac,
             whole_word: input.request.whole_word,
@@ -311,7 +310,6 @@ pub(super) struct ContentMatchInput<'a> {
     display_path: &'a str,
     context_before: usize,
     context_after: usize,
-    pattern: &'a str,
     regex: Option<&'a Regex>,
     ac: Option<&'a AhoCorasick>,
     whole_word: bool,
@@ -378,39 +376,7 @@ pub(super) fn find_content_match_columns(
         }
         return Ok(columns);
     }
-    literal_match_columns(line, input.pattern, true, false, cancel)
-}
-
-pub(super) fn literal_match_columns(
-    text: &str,
-    pattern: &str,
-    case_sensitive: bool,
-    whole_word: bool,
-    cancel: &CancelToken,
-) -> Result<Vec<usize>, NerveError> {
-    if pattern.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut columns = Vec::new();
-    let mut offset = 0usize;
-    while offset <= text.len().saturating_sub(pattern.len()) {
-        cancel.check_cancelled()?;
-        let found = if case_sensitive {
-            text[offset..].find(pattern)
-        } else {
-            find_ascii_case_insensitive(&text.as_bytes()[offset..], pattern.as_bytes())
-        };
-        let Some(relative_start) = found else {
-            break;
-        };
-        let start = offset + relative_start;
-        let end = start + pattern.len();
-        if !whole_word || is_whole_word_match(text, start, end) {
-            columns.push(start);
-        }
-        offset = end;
-    }
-    Ok(columns)
+    unreachable!("content literal search always builds an aho-corasick matcher")
 }
 
 pub(super) fn apply_content_relevance_scores(
@@ -480,7 +446,6 @@ pub fn fuzz_match_content(
             display_path: "fuzz/fuzz.txt",
             context_before: 2,
             context_after: 2,
-            pattern,
             regex: compiled_regex.as_ref(),
             ac: ac.as_ref(),
             whole_word,

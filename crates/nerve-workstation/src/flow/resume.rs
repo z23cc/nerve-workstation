@@ -18,7 +18,9 @@
 //!
 //! Actually re-dispatching the pending nodes against live workers (so a restarted
 //! daemon finishes an interrupted flow) is deferred: it needs the in-process worker
-//! `ResumeState` seam wired through the engine and a mid-flight CLI node re-dispatched
+//! [`WorkerSession`](crate::worker::WorkerSession) seam wired through the engine (a live
+//! continuation re-dispatches pending nodes, producing fresh `WorkerSession`s) and a
+//! mid-flight CLI node re-dispatched
 //! from its last recorded instruction (never silently resumed — a CLI child cannot
 //! survive process death). The replay-to-boundary + pending computation here is the
 //! deterministic precondition for it, and is what the byte-identical gate guarantees
@@ -30,7 +32,7 @@
 )]
 
 use super::{Driver, ReplayResolver, replay_generation_provider};
-use crate::worker::{WorkerLedger, WorkerSession};
+use crate::worker::WorkerLedger;
 use nerve_core::CancelToken;
 use nerve_runtime::{Strategy, WorkflowDef};
 use std::sync::Arc;
@@ -141,11 +143,6 @@ impl crate::delegate_proxy::DelegateApprover for ResumeApprover {
         nerve_runtime::SessionApprovalDecision::Deny
     }
 }
-
-// A trivially-unused marker so the WorkerSession import documents the resume seam
-// (a live continuation re-dispatches pending nodes, producing fresh `WorkerSession`s).
-#[allow(dead_code)]
-type ResumeSession = Box<dyn WorkerSession>;
 
 #[cfg(test)]
 mod tests {

@@ -527,7 +527,7 @@ fn user_message_frame(message: &str) -> String {
 /// `\n`) inside a stdout line so a stray bare control byte in a string can't break
 /// `serde_json` parsing. Tabs/CR are escaped; already-escaped sequences are left
 /// alone since we only touch literal control bytes.
-fn reescape_control_chars(line: &str) -> String {
+pub(crate) fn reescape_control_chars(line: &str) -> String {
     if !line.bytes().any(|b| b < 0x20) {
         return line.to_string();
     }

@@ -5,7 +5,7 @@ fn stale_hash_error_has_structured_reread_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::write(dir.path().join("a.txt"), "current\n").expect("seed");
     let provider = provider_for(dir.path());
-    let patch = "*** Begin Patch\n[a.txt#0000]\nSWAP 1.=1:\n+x\n*** End Patch\n";
+    let patch = "*** Begin Patch\n[a.txt#0000000000000000]\nSWAP 1.=1:\n+x\n*** End Patch\n";
     let err = handle_tool_call(
         &provider,
         &json!({ "name": "edit", "arguments": { "mode": "hashline", "patch": patch } }),
@@ -14,7 +14,7 @@ fn stale_hash_error_has_structured_reread_fields() {
     let value = dispatch_error_value(&err);
     assert_eq!(value["error"]["kind"], json!("stale_hash"));
     assert_eq!(value["error"]["path"], json!("a.txt"));
-    assert_eq!(value["error"]["expected_hash"], json!("0000"));
+    assert_eq!(value["error"]["expected_hash"], json!("0000000000000000"));
     assert!(value["error"]["actual_hash"].is_string());
     assert!(
         value["error"]["reread_hint"]

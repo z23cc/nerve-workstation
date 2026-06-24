@@ -9,7 +9,8 @@
 //! This is intentionally narrow — two well-known shapes, not a per-model dialect
 //! framework. It runs only as a fallback (native calls always win), so a normal
 //! response that merely *mentions* JSON is never misread: recovery requires the
-//! exact wrapper shapes below and a parseable `name` + object `arguments`.
+//! exact wrapper shapes below and a parseable `name` plus an `arguments` value
+//! (passed through verbatim; a non-object value is rejected later by the tool).
 
 use serde_json::Value;
 
@@ -73,8 +74,11 @@ fn collect_fenced_json(content: &str, out: &mut Vec<ToolCall>) {
     }
 }
 
-/// Parse a JSON object describing a tool call: a string `name` plus an arguments
-/// object under `input`, `arguments`, or `parameters` (defaulting to `{}`).
+/// Parse a JSON object describing a tool call: a string `name` plus arguments
+/// under `input`, `arguments`, or `parameters`. A *missing* arguments value
+/// defaults to `{}`; a present-but-non-object value (string/array/number) is
+/// passed through verbatim so the toolbox's per-tool deserialization rejects it
+/// loudly rather than silently dispatching `{}` with the intent erased.
 /// Returns `None` unless the text parses to an object with a non-empty name.
 fn call_from_json_text(text: &str) -> Option<ToolCall> {
     let value: Value = serde_json::from_str(text.trim()).ok()?;
@@ -87,7 +91,6 @@ fn call_from_json_text(text: &str) -> Option<ToolCall> {
         .get("input")
         .or_else(|| obj.get("arguments"))
         .or_else(|| obj.get("parameters"))
-        .filter(|v| v.is_object())
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     Some(ToolCall {
@@ -188,5 +191,16 @@ mod tests {
     #[test]
     fn malformed_json_in_wrapper_is_ignored() {
         assert!(recover_tool_calls("<tool_use>{not json}</tool_use>").is_empty());
+    }
+
+    #[test]
+    fn string_valued_input_is_passed_through_not_dropped() {
+        // A present-but-non-object arguments value must survive verbatim so the
+        // tool's own deserialization can reject it loudly, rather than being
+        // silently collapsed to `{}` with the model's intent erased.
+        let calls =
+            recover_tool_calls("<tool_use>{\"name\":\"run\",\"input\":\"ls -la\"}</tool_use>");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, json!("ls -la"));
     }
 }

@@ -379,9 +379,10 @@ fn safe_status_text(text: &str) -> String {
 }
 
 fn format_auth_lease(result: &Value) -> String {
-    let provider = str_field(result, "provider", "unknown");
-    let status = str_field(result, "status", "unknown");
-    let account = str_field(result, "account_id", "unknown");
+    let provider = safe_status_text(&str_field(result, "provider", "unknown"));
+    let status = safe_status_text(&str_field(result, "status", "unknown"));
+    let account = safe_status_text(&str_field(result, "account_id", "unknown"));
+    let base_url = safe_status_text(&str_field(result, "base_url", "unknown"));
     let expires = result
         .get("expires_at_unix")
         .and_then(Value::as_u64)
@@ -405,8 +406,7 @@ fn format_auth_lease(result: &Value) -> String {
         "Refresh token: never returned to this client"
     };
     format!(
-        "Broker lease: {provider} · {status}\nBase URL: {}\nAccount: {account}\nExpires at Unix: {expires}\n{access_line}\n{refresh_line}",
-        str_field(result, "base_url", "unknown")
+        "Broker lease: {provider} · {status}\nBase URL: {base_url}\nAccount: {account}\nExpires at Unix: {expires}\n{access_line}\n{refresh_line}"
     )
 }
 
@@ -519,6 +519,26 @@ mod tests {
             "{\"",
         ] {
             assert!(!out.contains(forbidden), "leaked secret-shaped text: {out}");
+        }
+    }
+
+    #[test]
+    fn format_auth_lease_redacts_secret_shaped_metadata_fields() {
+        let out = format_auth_lease(&json!({
+            "provider": "openai",
+            "status": "leased",
+            "base_url": "https://api.example/?access_token=secret",
+            "account_id": "Bearer acct-secret",
+            "expires_at_unix": 12345,
+        }));
+        assert!(out.contains("Broker lease: openai"));
+        assert!(out.contains("Base URL: [redacted daemon text]"));
+        assert!(out.contains("Account: [redacted daemon text]"));
+        for forbidden in ["acct-secret", "access_token", "Bearer ", "secret"] {
+            assert!(
+                !out.contains(forbidden),
+                "leaked secret-shaped metadata: {out}"
+            );
         }
     }
 

@@ -49,10 +49,10 @@ impl RuntimeNerve {
         }
     }
 
-    fn relay(&self, chat_key: &str, direction: &str, text: &str) {
+    fn relay(&self, chat_key: &str, from_user_id: &str, direction: &str, text: &str) {
         (self.emit)(RuntimeEvent::wechat(WechatEventKind::Message {
             chat_key: chat_key.to_string(),
-            from_user_id: String::new(),
+            from_user_id: from_user_id.to_string(),
             direction: direction.to_string(),
             text: text.to_string(),
         }));
@@ -60,11 +60,17 @@ impl RuntimeNerve {
 }
 
 impl NerveControl for RuntimeNerve {
-    fn handle(&self, existing: Option<&str>, text: &str) -> Result<NerveReply, BridgeError> {
-        // For a one-shot turn the chat session id is opaque; reuse the prior key
-        // when present so a chat's relayed messages share a `chat_key`.
-        let chat_key = existing.unwrap_or("wechat").to_string();
-        self.relay(&chat_key, "in", text);
+    fn handle(
+        &self,
+        chat_key: &str,
+        from_user_id: &str,
+        _existing: Option<&str>,
+        text: &str,
+    ) -> Result<NerveReply, BridgeError> {
+        // Each turn is a fresh one-shot delegate, so the `existing` session id is
+        // unused here; relay the real per-chat key + sender the bridge passes in so
+        // the activity log carries true identity.
+        self.relay(chat_key, from_user_id, "in", text);
         let resolved = DelegateAgent::from_name(&self.agent)
             .map_err(|err| BridgeError::Nerve(err.to_string()))?;
         let outcome = run_delegate_oneshot(
@@ -84,9 +90,11 @@ impl NerveControl for RuntimeNerve {
         } else {
             outcome.result.clone()
         };
-        self.relay(&chat_key, "out", &reply);
+        self.relay(chat_key, from_user_id, "out", &reply);
+        // Echo the chat_key as the session id so the bridge's SessionMap keeps a
+        // stable, real per-chat key (the one-shot path has no live session to resume).
         Ok(NerveReply {
-            session_id: chat_key,
+            session_id: chat_key.to_string(),
             text: reply,
         })
     }

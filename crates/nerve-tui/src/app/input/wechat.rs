@@ -68,20 +68,7 @@ impl Shell {
     /// Note: empty owners means the daemon denies all WeChat senders; configure
     /// allowed owners daemon-side or pass them here as a comma-separated list.
     async fn cmd_wechat_start(&mut self, args: &str) {
-        let mut parts = args.split_whitespace();
-        let agent = parts.next().unwrap_or("claude").to_string();
-        let autonomy_str = parts.next().unwrap_or("read_only");
-        let owners_str = parts.next().unwrap_or("").to_string();
-
-        // Default to ReadOnly; if the token doesn't parse as autonomy, treat it
-        // as an owner list below.
-        let autonomy = parse_autonomy(autonomy_str).unwrap_or(DelegateAutonomy::ReadOnly);
-        // If autonomy parsing failed, treat the second token as owners instead.
-        let owners: Vec<String> = if parse_autonomy(autonomy_str).is_none() {
-            parse_owners(autonomy_str)
-        } else {
-            parse_owners(&owners_str)
-        };
+        let (agent, autonomy, owners) = split_start_args(args);
 
         let command = wechat_start_command(owners, agent, autonomy);
         self.state
@@ -149,6 +136,30 @@ pub fn wechat_status_command() -> RuntimeCommand {
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
+
+/// Parse `/wechat start [agent] [autonomy] [owners...]` in a single pass.
+///
+/// `agent` defaults to `claude`. The first remaining token is consumed as an
+/// autonomy spec only when it parses as one; otherwise autonomy defaults to
+/// `ReadOnly` and that token is kept as an owner. Every remaining token is folded
+/// into the owner list (so neither a space-separated owner list nor a trailing
+/// token is ever dropped); `parse_owners` then splits each on `,` and trims.
+#[must_use]
+fn split_start_args(args: &str) -> (String, DelegateAutonomy, Vec<String>) {
+    let mut parts = args.split_whitespace();
+    let agent = parts.next().unwrap_or("claude").to_string();
+    let rest: Vec<&str> = parts.collect();
+
+    let (autonomy, owner_tokens) = match rest.split_first() {
+        Some((first, tail)) => match parse_autonomy(first) {
+            Some(a) => (a, tail),
+            None => (DelegateAutonomy::ReadOnly, rest.as_slice()),
+        },
+        None => (DelegateAutonomy::ReadOnly, rest.as_slice()),
+    };
+    let owners = parse_owners(&owner_tokens.join(","));
+    (agent, autonomy, owners)
+}
 
 /// Parse `"read_only"`, `"edit"`, `"full"` (and dash variants) into
 /// [`DelegateAutonomy`]. Returns `None` for unrecognized strings so the caller
@@ -274,5 +285,46 @@ mod tests {
         let owners = parse_owners("alice,bob, carol");
         assert_eq!(owners, vec!["alice", "bob", "carol"]);
         assert!(parse_owners("").is_empty());
+    }
+
+    #[test]
+    fn split_start_args_documented_forms() {
+        // Bare: defaults to claude + read_only + no owners.
+        assert_eq!(
+            split_start_args(""),
+            ("claude".to_string(), DelegateAutonomy::ReadOnly, vec![])
+        );
+        // agent + explicit autonomy + comma owner list.
+        assert_eq!(
+            split_start_args("codex edit alice,bob"),
+            (
+                "codex".to_string(),
+                DelegateAutonomy::Edit,
+                vec!["alice".to_string(), "bob".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn split_start_args_ambiguous_three_token_form_drops_nothing() {
+        // No autonomy token: the second token is owners, and the trailing token is
+        // NOT dropped — every remaining token folds into the owner list.
+        assert_eq!(
+            split_start_args("claude alice,bob carol"),
+            (
+                "claude".to_string(),
+                DelegateAutonomy::ReadOnly,
+                vec!["alice".to_string(), "bob".to_string(), "carol".to_string()]
+            )
+        );
+        // With autonomy present, the trailing owner token is still kept.
+        assert_eq!(
+            split_start_args("claude edit alice,bob carol"),
+            (
+                "claude".to_string(),
+                DelegateAutonomy::Edit,
+                vec!["alice".to_string(), "bob".to_string(), "carol".to_string()]
+            )
+        );
     }
 }

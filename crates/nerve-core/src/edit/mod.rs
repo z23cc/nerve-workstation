@@ -30,7 +30,7 @@ impl FileReader for BTreeMap<String, String> {
     }
 }
 
-/// The 4-hex hashline snapshot tag for `content`. Surfaced by read views and the
+/// The 16-hex hashline snapshot tag for `content`. Surfaced by read views and the
 /// `edit` response so a model can author hashline patches and chain edits.
 pub fn snapshot_tag(content: &str) -> String {
     text::content_hash(&text::normalize(content))

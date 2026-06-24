@@ -44,7 +44,12 @@ fn command_basename(token: &str) -> Option<&str> {
 
 fn env_resolved_language<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<Language> {
     for token in tokens {
-        let command = command_basename(token)?;
+        // A degenerate quote-only token (e.g. `''`) yields no basename; skip it
+        // and keep scanning for the real interpreter rather than aborting the
+        // whole `#!/usr/bin/env ...` resolution, matching the `-`/`=` arms below.
+        let Some(command) = command_basename(token) else {
+            continue;
+        };
         if command.starts_with('-') || command.contains('=') {
             continue;
         }
@@ -314,5 +319,24 @@ impl Language {
                 &format!("{}\n{}", tree_sitter_php::TAGS_QUERY, PHP_EXTRA_TAGS)
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_shebang_skips_quote_only_token_and_resolves_real_interpreter() {
+        // A degenerate quote-only token (`''`) must be skipped, not abort the
+        // whole resolution, so the real `python3` interpreter is still found.
+        let language = Language::from_shebang("#!/usr/bin/env '' python3\ndef main():\n    pass\n");
+        assert_eq!(language.map(Language::name), Some("python"));
+    }
+
+    #[test]
+    fn env_shebang_resolution_unchanged_for_plain_interpreter() {
+        let language = Language::from_shebang("#!/usr/bin/env node\nfunction main() {}\n");
+        assert_eq!(language.map(Language::name), Some("javascript"));
     }
 }

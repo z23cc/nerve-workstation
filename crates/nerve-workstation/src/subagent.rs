@@ -516,7 +516,6 @@ fn task_label(args: &SpawnAgentArgs) -> String {
 /// the result type so both the sub-agent fan-out (`R = FanOutResult`) and the
 /// flow engine's parallel wave (`R = NodeResult`) share one threading/cap/order
 /// implementation — the determinism invariant (input order preserved) lives here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn bounded_fan_out<I, R, W, C, P>(
     inputs: Vec<I>,
     concurrency: usize,

@@ -213,6 +213,22 @@ impl LiveHandle {
                 self.request_close();
                 Err(LiveError::Interrupted)
             }
+            // A timed-out or process-exited turn is session-fatal: the child is
+            // either stalled (timeout) or already dead (exit), and its undrained
+            // result/deltas would bleed into the next steer. Reap + clear the slot
+            // and signal close so the parked start thread wakes and the start job
+            // goes terminal, then still surface the failure (not a cancellation).
+            Err(
+                err @ (crate::delegate_session::SessionError::TurnTimedOut
+                | crate::delegate_session::SessionError::ProcessExited),
+            ) => {
+                if let Some(mut driver) = guard.take() {
+                    driver.close();
+                }
+                drop(guard);
+                self.request_close();
+                Err(LiveError::Session(err.to_string()))
+            }
             Err(err) => Err(LiveError::Session(err.to_string())),
         }
     }
@@ -352,6 +368,70 @@ mod tests {
         // Keep `dir` alive for the child's lifetime by leaking it (test-scoped).
         std::mem::forget(dir);
         PersistentChild::spawn(&spec, &policy).expect("spawn sleeper")
+    }
+
+    /// Spawn a contained child whose stdout is already closed (`exec 1>&-`) but
+    /// which keeps reading stdin (`exec cat >/dev/null`). The reader thread sees
+    /// immediate EOF on stdout (so a turn's `recv` disconnects -> `ProcessExited`)
+    /// while the child stays alive holding the stdin pipe `PersistentChild` owns —
+    /// the exact precondition for a steer that fails with `ProcessExited`.
+    fn spawn_stdout_closed_child() -> PersistentChild {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = crate::delegate_runtime::delegate_policy(dir.path());
+        let spec = CommandSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "exec 1>&-; exec cat >/dev/null".to_string(),
+            ],
+        };
+        std::mem::forget(dir);
+        PersistentChild::spawn(&spec, &policy).expect("spawn stdout-closed child")
+    }
+
+    /// Finding 7: a steer whose turn fails with `ProcessExited` (stdout EOF) must
+    /// TEAR THE SESSION DOWN — clear the live slot and request close — not leave the
+    /// dead/desynced child registered. Before the fix the `ProcessExited` arm fell
+    /// through the catch-all and returned `LiveError::Session` without taking the
+    /// driver slot or calling `request_close()`, so the session stayed steerable and
+    /// the parked start thread never woke.
+    #[test]
+    fn steer_tears_down_session_when_turn_process_exits() {
+        let session = DelegateSession::from_child_for_test(spawn_stdout_closed_child());
+        let pgid = session.child_pid();
+        let handle = LiveHandle::new(LiveDriver::Claude(session));
+
+        let cancel = CancelToken::new();
+        let mut sink = |_: &str| {};
+        let err = handle
+            .steer("hello", &cancel, &mut sink)
+            .expect_err("a process-exited turn must surface an error");
+
+        // The failure surfaces as a plain session failure, NOT a cancellation, so the
+        // job maps it to job_failed rather than job_cancelled.
+        assert!(
+            matches!(err, LiveError::Session(_)),
+            "expected LiveError::Session, got {err:?}"
+        );
+        assert!(!err.is_cancellation());
+
+        // The session slot is cleared: a follow-up steer sees a closed session rather
+        // than reading the dead child's undrained lines.
+        assert!(
+            matches!(handle.agent(), Err(LiveError::Closed)),
+            "session slot should be torn down after ProcessExited"
+        );
+        // And close was requested, so a parked start thread would wake and terminate.
+        assert!(*crate::sync::lock_recover(&handle.close_requested));
+
+        // The torn-down driver reaped the child group.
+        for _ in 0..200 {
+            if !group_alive(pgid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("process group {pgid} leaked after ProcessExited teardown");
     }
 
     /// Finding B: the live driver's `close()` must reap the spawned child (close

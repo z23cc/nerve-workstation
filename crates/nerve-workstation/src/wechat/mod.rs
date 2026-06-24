@@ -40,11 +40,14 @@ const LOGIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Per-request timeout for the login bootstrap calls.
 const LOGIN_HTTP_TIMEOUT: Duration = Duration::from_secs(40);
 
-/// A running bridge: its cooperative stop flag, the thread handle, and the config
-/// it was started with (surfaced by `wechat.status`).
+/// A running bridge: its cooperative stop flag, the thread handle, the live
+/// account/user identity it was launched with, and the config it was started with
+/// (surfaced by `wechat.status`).
 struct RunningBridge {
     stop: Arc<AtomicBool>,
     handle: JoinHandle<()>,
+    account_id: String,
+    user_id: String,
     owners: Vec<String>,
     agent: String,
 }
@@ -189,9 +192,17 @@ impl WechatHost {
             .name("nerve-wechat-bridge".to_string())
             .spawn(move || run_bridge_thread(bridge, &stop_thread, &emit, acct, usr))
             .map_err(|err| RuntimeError::adapter(format!("spawn wechat bridge: {err}")))?;
+        // Any `Some` reaching here passed the `!is_finished()` early-return guard, so
+        // the prior thread is already finished — join it (returns immediately, cannot
+        // deadlock) instead of dropping its handle unreaped.
+        if let Some(old) = guard.take() {
+            let _ = old.handle.join();
+        }
         *guard = Some(RunningBridge {
             stop,
             handle,
+            account_id: account_id.clone(),
+            user_id: user_id.clone(),
             owners,
             agent,
         });
@@ -224,9 +235,18 @@ impl WechatHost {
         if guard.as_ref().is_some_and(|b| b.handle.is_finished()) {
             *guard = None; // reap a bridge whose thread already exited
         }
-        let (account_id, user_id) = session
+        // Prefer the *running* bridge's captured identity so a concurrent re-login
+        // caching a newer session can't make status() report an identity that
+        // doesn't match the bridge actually running; fall back to the cached
+        // session only when idle.
+        let (account_id, user_id) = guard
             .as_ref()
-            .map(|s| (s.account_id.clone(), s.user_id.clone()))
+            .map(|b| (b.account_id.clone(), b.user_id.clone()))
+            .or_else(|| {
+                session
+                    .as_ref()
+                    .map(|s| (s.account_id.clone(), s.user_id.clone()))
+            })
             .unwrap_or_default();
         json!({
             "logged_in": session.is_some(),

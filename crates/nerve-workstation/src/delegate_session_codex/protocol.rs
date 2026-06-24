@@ -104,6 +104,22 @@ impl TurnAccumulator {
                 LineOutcome::Continue
             }
             "turn/completed" => {
+                let completed_id = params
+                    .and_then(|p| p.get("turn"))
+                    .and_then(|t| t.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                // Permissive when our turn id isn't known yet (turn/start response not
+                // seen) or the notification omits an id, so the first turn's completion
+                // is never dropped; otherwise only OUR turn's completed ends the turn —
+                // a stray/late turn/completed from a prior (e.g. timed-out) turn whose
+                // lines were left undrained can't terminate this turn early.
+                if !self.turn_id.is_empty()
+                    && !completed_id.is_empty()
+                    && completed_id != self.turn_id
+                {
+                    return LineOutcome::Continue;
+                }
                 self.ok = params
                     .and_then(|p| p.get("turn"))
                     .and_then(|t| t.get("status"))
@@ -414,6 +430,52 @@ mod tests {
             })
         );
         assert_eq!(result.cost_usd, None);
+    }
+
+    #[test]
+    fn stray_completed_for_other_turn_does_not_end_this_turn() {
+        // We are running turn-2; a late turn/completed for turn-1 (e.g. left
+        // undrained by a prior timed-out turn) must NOT end this turn.
+        let mut acc = TurnAccumulator::default();
+        acc.capture_turn_id(&json!({ "id": 7, "result": { "turn": { "id": "turn-2" } } }));
+        assert_eq!(acc.turn_id, "turn-2");
+
+        let mut sink = |_: &str| {};
+        let stray = acc.ingest_notification(
+            "turn/completed",
+            &json!({ "params": { "turn": { "id": "turn-1", "status": "completed" } } }),
+            &mut sink,
+        );
+        assert!(
+            matches!(stray, LineOutcome::Continue),
+            "a turn/completed for a different turn id must be ignored"
+        );
+        // ok must not have been touched by the stray completion.
+        assert!(!acc.ok, "ok should not be flipped by a stray completion");
+
+        // OUR turn's completed ends the turn and sets ok.
+        let mine = acc.ingest_notification(
+            "turn/completed",
+            &json!({ "params": { "turn": { "id": "turn-2", "status": "completed" } } }),
+            &mut sink,
+        );
+        assert!(matches!(mine, LineOutcome::Done));
+        assert!(acc.finish().ok);
+    }
+
+    #[test]
+    fn completed_without_id_still_ends_turn_when_id_known() {
+        // Permissive on a missing notification id: a turn/completed that omits the
+        // turn id still ends the turn so a server that doesn't echo the id works.
+        let mut acc = TurnAccumulator::default();
+        acc.capture_turn_id(&json!({ "id": 1, "result": { "turn": { "id": "turn-9" } } }));
+        let mut sink = |_: &str| {};
+        let done = acc.ingest_notification(
+            "turn/completed",
+            &json!({ "params": { "turn": { "status": "completed" } } }),
+            &mut sink,
+        );
+        assert!(matches!(done, LineOutcome::Done));
     }
 
     #[test]

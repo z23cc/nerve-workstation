@@ -36,7 +36,18 @@ fn python_import_references(source: &str) -> Vec<CodeReference> {
     let mut out = Vec::new();
     let mut triple_quote: Option<&'static str> = None;
     for (line_index, raw_line) in source.lines().enumerate() {
-        let cleaned = strip_python_triple_quotes(raw_line, &mut triple_quote);
+        // When no triple-quoted string is open, a `#` outside a string starts a
+        // comment, so strip it before scanning for triple quotes — otherwise a
+        // `'''`/`"""` inside that comment would wrongly open a docstring and
+        // swallow the following `from ... import ...` lines. While a string IS
+        // active, feed the whole line so a real `#` inside the docstring is not
+        // mistaken for a comment.
+        let scan = if triple_quote.is_none() {
+            strip_line_comment(raw_line, "#")
+        } else {
+            raw_line
+        };
+        let cleaned = strip_python_triple_quotes(scan, &mut triple_quote);
         let line = strip_line_comment(&cleaned, "#").trim();
         let Some(rest) = line.strip_prefix("from ") else {
             continue;
@@ -103,9 +114,29 @@ fn javascript_import_references(source: &str) -> Vec<CodeReference> {
 }
 
 fn rust_use_body(line: &str) -> Option<&str> {
-    let line = line.trim();
-    let line = line.strip_prefix("pub ").unwrap_or(line);
+    let line = strip_visibility(line.trim());
     Some(line.strip_prefix("use ")?.trim_end_matches(';').trim())
+}
+
+/// Strip a leading `pub`, `pub(crate)`, `pub(super)`, `pub(in path)` visibility
+/// qualifier. Returns the line unchanged when there is no such qualifier (so a
+/// `published`-style identifier or a non-`use` line is left intact for the
+/// caller's `strip_prefix("use ")` to reject).
+fn strip_visibility(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix("pub") else {
+        return line;
+    };
+    let after = match rest.chars().next() {
+        Some('(') => {
+            let Some(close) = rest.find(')') else {
+                return line;
+            };
+            &rest[close + 1..]
+        }
+        Some(c) if c.is_whitespace() => rest,
+        _ => return line, // e.g. `published` — not a visibility token
+    };
+    after.trim_start()
 }
 
 fn split_braced_import(body: &str) -> Option<(&str, &str)> {
@@ -269,4 +300,75 @@ fn push_import_reference(
             .with_column(column)
             .with_import_path(import_path),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn import_named<'a>(refs: &'a [CodeReference], name: &str) -> Option<&'a CodeReference> {
+        refs.iter().find(|r| r.kind == "import" && r.name == name)
+    }
+
+    #[test]
+    fn visibility_qualified_use_reexports_are_captured() {
+        for line in [
+            "pub(crate) use foo::Bar;",
+            "pub(super) use foo::Bar;",
+            "pub(in crate::x) use foo::Bar;",
+            "pub use foo::Bar;",
+        ] {
+            let refs = rust_import_references(line);
+            let bar = import_named(&refs, "Bar")
+                .unwrap_or_else(|| panic!("expected an import reference for `{line}`"));
+            assert_eq!(
+                bar.import_path.as_deref(),
+                Some("foo::Bar"),
+                "import_path for `{line}`"
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_qualified_non_use_lines_yield_no_import() {
+        for line in [
+            "pub fn thing() {}",
+            "pub(crate) fn thing() {}",
+            "pub(in crate::x) struct Thing;",
+            "let published = 1;",
+        ] {
+            let refs = rust_import_references(line);
+            assert!(
+                refs.is_empty(),
+                "expected no import references for `{line}`, got {refs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn triple_quote_inside_comment_does_not_swallow_later_imports() {
+        // The `'''` lives inside a `#` comment, so it must NOT open a docstring;
+        // the following `from ... import ...` lines must still be captured.
+        let source = "x = 1  # opening ''' quote\nfrom os import path\nfrom typing import List\n";
+        let refs = python_import_references(source);
+        let path = import_named(&refs, "path").expect("`from os import path` should be captured");
+        assert_eq!(path.import_path.as_deref(), Some("os.path"));
+        let list =
+            import_named(&refs, "List").expect("`from typing import List` should be captured");
+        assert_eq!(list.import_path.as_deref(), Some("typing.List"));
+    }
+
+    #[test]
+    fn real_triple_quoted_docstring_still_suppresses_imports() {
+        // A genuine multi-line docstring must still hide an enclosed import line.
+        let source = "'''\nfrom os import path\n'''\nfrom typing import List\n";
+        let refs = python_import_references(source);
+        assert!(
+            import_named(&refs, "path").is_none(),
+            "import inside a real docstring must be suppressed: {refs:?}"
+        );
+        let list = import_named(&refs, "List")
+            .expect("`from typing import List` after the docstring should be captured");
+        assert_eq!(list.import_path.as_deref(), Some("typing.List"));
+    }
 }

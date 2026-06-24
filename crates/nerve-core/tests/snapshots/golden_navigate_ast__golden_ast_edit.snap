@@ -28,8 +28,8 @@ expression: "json!({ \"no_match\": no_match, \"pattern_edit\": edited, })"
           "action": "ast_edit",
           "diff": "--- a/sample.rs\n+++ b/sample.rs\n@@ -1,5 +1,5 @@\n fn main() {\n-foo(1);\n+baz(1);\n bar(2);\n }\n \n",
           "path": "sample.rs",
-          "tag": "B661",
-          "view": "[sample.rs#B661]\n1:fn main() {\n2:baz(1);\n3:bar(2);\n4:}\n5:\n6:fn foo(x: i32) {}\n7:fn bar(x: i32) {}\n"
+          "tag": "9D69EFAFF0C6CCC1",
+          "view": "[sample.rs#9D69EFAFF0C6CCC1]\n1:fn main() {\n2:baz(1);\n3:bar(2);\n4:}\n5:\n6:fn foo(x: i32) {}\n7:fn bar(x: i32) {}\n"
         }
       ]
     }

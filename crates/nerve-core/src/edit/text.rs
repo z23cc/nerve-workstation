@@ -32,16 +32,18 @@ pub(crate) fn restore_newline(text: &str, newline: Newline) -> String {
     }
 }
 
-/// 4-hex content tag (FNV-1a, low 16 bits) over LF-normalized text with trailing
+/// 16-hex content tag (64-bit FNV-1a) over LF-normalized text with trailing
 /// whitespace trimmed per line (so cosmetic trailing spaces never invalidate a
 /// tag — matching the upstream hashline format). The hashline mode binds each
 /// patch to this tag so a stale edit is rejected before it can corrupt a file.
-/// Not cryptographic — a collision-resistant guard.
+/// Not cryptographic: the guarantee is probabilistic — two distinct files
+/// collide on the same tag only by accident, with odds ~1/1.8e19 (full 64-bit
+/// FNV-1a width).
 pub(crate) fn content_hash(normalized: &str) -> String {
-    let mut hash: u32 = 0x811c_9dc5;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |byte: u8| {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(0x0100_0193);
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     };
     for line in normalized.split('\n') {
         for byte in line.trim_end_matches([' ', '\t']).bytes() {
@@ -49,7 +51,7 @@ pub(crate) fn content_hash(normalized: &str) -> String {
         }
         mix(b'\n');
     }
-    format!("{:04X}", hash & 0xFFFF)
+    format!("{hash:016X}")
 }
 
 /// A one-line, length-capped preview of a snippet for error messages.

@@ -237,7 +237,6 @@ pub(crate) struct DiscoveredWorker {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn worker_file(base: &Path, name: &str, json: &str) {
@@ -425,11 +424,5 @@ mod tests {
                 "expected `{bad}` rejected"
             );
         }
-    }
-
-    // Helper so the unused PathBuf import is exercised on all cfgs.
-    #[allow(dead_code)]
-    fn _path(p: &str) -> PathBuf {
-        PathBuf::from(p)
     }
 }

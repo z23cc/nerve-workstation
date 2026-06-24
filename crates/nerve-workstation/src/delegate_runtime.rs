@@ -461,6 +461,9 @@ impl DelegateParser {
                 if let Some(text) = value.get("result").and_then(Value::as_str) {
                     self.final_result = text.to_string();
                 }
+                // TODO(gemini-verified): once the live stream-json shape is confirmed,
+                // flip self.ok on its error marker here. Today gemini success is
+                // exit-code-driven only (self.ok stays true); see `gemini_outcome_*`.
                 None
             }
             _ => None,
@@ -898,6 +901,35 @@ mod tests {
         let outcome = parser.finish("claude", Some(1), false);
         assert!(!outcome.ok);
         assert_eq!(outcome.result, "boom");
+    }
+
+    #[test]
+    fn gemini_outcome_is_exit_code_driven_today() {
+        // Finding 8: the gemini stream parser never flips `ok` (no verified error
+        // marker yet), so its success is purely exit-code-driven. Pin that contract
+        // so a future verified-shape change is a deliberate, reviewed flip rather
+        // than a silent regression. Do NOT guess gemini's error field here.
+        let result_line = r#"{"type":"result","result":"all done"}"#;
+
+        // exit 0 -> ok, even though the stream carries no success marker.
+        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
+        assert!(parser.ingest(result_line).is_none());
+        let ok = parser.finish("gemini", Some(0), false);
+        assert!(ok.ok, "gemini is ok on a clean exit (exit-code-driven)");
+        assert_eq!(ok.result, "all done");
+
+        // non-zero exit -> not ok (the only failure signal gemini has today).
+        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
+        parser.ingest(result_line);
+        let failed = parser.finish("gemini", Some(1), false);
+        assert!(!failed.ok, "a non-zero exit is never ok");
+
+        // a timeout is likewise never ok.
+        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
+        parser.ingest(result_line);
+        let timed = parser.finish("gemini", None, true);
+        assert!(!timed.ok, "a timed-out run is never ok");
+        assert!(timed.timed_out);
     }
 
     #[test]
