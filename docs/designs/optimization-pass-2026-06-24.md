@@ -8,8 +8,10 @@ real code before acting — two audit findings turned out to be **misreads** and
 ## Landed on `main` (all green: clippy -D · fmt · file-size · `test --workspace` · drift)
 
 - **Dependencies → latest.** `cargo update` (semver refresh: rustls/time/quinn/syn/
-  log/bytes/getrandom/webpki-roots…) + **criterion 0.5 → 0.8** (latest major, dev/bench).
-  All other workspace pins are already at their latest major.
+  log/bytes/getrandom/webpki-roots…) + **criterion 0.5 → 0.8** + **schemars 0.8 → 1.2**
+  (schema moves to JSON Schema draft 2020-12 / `$defs`; verified **no in-repo TS
+  consumer** of `runtime-v3.schema.json`, so nothing breaks — the "codegen'd to TS"
+  pipeline is not yet implemented). All other workspace pins already at latest major.
 - **Security.** `cargo-audit` run: **0 vulnerabilities** (490 deps vs 1138 advisories).
   Two informational *unmaintained* warnings (`paste`, `proc-macro-error2` — transitive
   build-time proc-macro deps, non-vulnerable) kept visible (not suppressed).
@@ -42,7 +44,7 @@ real code before acting — two audit findings turned out to be **misreads** and
 
 | Item | Why deferred |
 |---|---|
-| **schemars 0.8 → 1.x** | Tractable (derive-only) BUT changes the emitted protocol schema draft-07 → 2020-12 — a *consumer-facing* artifact (codegen'd to TS, drift-checked). The drift test only checks self-consistency, not downstream TS-codegen acceptance. Needs a deliberate, reviewed PR. |
+| ~~schemars 0.8 → 1.x~~ | **DONE** (commit `c968ebc`) after verifying there is no in-repo TS consumer of the schema — see Landed. |
 | **build_context double-walk** | Verified real (repo-map's query-dependent `analyze_files` vs `shared_indexed_files`), but the expensive parse is already `(mtime,size)`-cached so the cost is byte re-reads; unifying risks repo-map ranking/golden regressions and was deliberately deferred by the designer. |
 | **Full `cargo doc` cleanup + gate** | nerve-agent/nerve-tui carry a long tail of public-mod-doc → private-submodule links (a deliberate internal-nav style). Mass backticking is opinionated churn; a surgical `broken_intra_doc_links`-only gate is the right deliberate follow-up. |
 | **wechat media (image/file)** | AES-128-ECB + CDN flow unverified against Tencent docs; needs a live account + `bot_type`. |
