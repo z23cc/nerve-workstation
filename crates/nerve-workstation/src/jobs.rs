@@ -476,11 +476,15 @@ impl JobManager {
                 message,
             } => self.run_delegate_steer(&session_id, &message, token),
             RuntimeCommand::DelegateClose { session_id } => self.run_delegate_close(&session_id),
-            RuntimeCommand::DelegateList => Ok(self.live_sessions.list()),
-            RuntimeCommand::DelegateGet { session_id } => self
-                .live_sessions
-                .get_snapshot(&session_id)
-                .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string())),
+            RuntimeCommand::DelegateList => Ok(crate::delegate_store::run_delegate_list(
+                &self.live_sessions,
+                self.delegate_store().as_ref(),
+            )),
+            RuntimeCommand::DelegateGet { session_id } => crate::delegate_store::run_delegate_get(
+                &session_id,
+                &self.live_sessions,
+                self.delegate_store().as_ref(),
+            ),
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected a delegate.* command",
             )),
@@ -734,6 +738,21 @@ impl JobManager {
         let mcp_disable_flags =
             crate::delegate_codex_mcp::delegate_disable_flags(resolved, mcp_enable);
         if matches!(resolved, DelegateAgent::Claude | DelegateAgent::Codex) {
+            // Persist a durable record (audit + resume seam, trust-substrate floor) so
+            // the live session survives a daemon restart. Best-effort: a write failure
+            // never blocks the start.
+            if let Ok(store) = crate::delegate_store::DelegateStore::for_scope(Some(&root)) {
+                let record = crate::delegate_store::DelegateSessionRecord::begin(
+                    job_id,
+                    resolved.catalog_name(),
+                    &root,
+                    &run_cwd,
+                    autonomy,
+                    role,
+                    model.clone(),
+                );
+                let _ = store.write_record(&record);
+            }
             return self.run_delegate_live(
                 job_id,
                 resolved,
@@ -824,6 +843,10 @@ impl JobManager {
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
         let session_id = driver.session_id().unwrap_or(job_id).to_string();
+        // Persist the agent's OWN captured session/thread id (the resume key) now that
+        // turn 1 has established it. Best-effort, keyed by the start-job id.
+        let captured = driver.session_id().map(str::to_string);
+        self.persist_delegate_update(job_id, |record| record.set_agent_session_id(captured));
         let result = turn.to_json(agent, &session_id);
         // Turn 1 finished; the live session is now idle (parked) and ready to
         // steer. Signal idle keyed by the JOB id (the client's delegate session
@@ -941,6 +964,10 @@ impl JobManager {
         // Steer turn finished; the session is idle again — signal it (keyed by the
         // session/job id) so a client can stop its turn spinner.
         (self.emit)(RuntimeEvent::session_idle(session_id.to_string()));
+        self.persist_delegate_update(
+            session_id,
+            crate::delegate_store::DelegateSessionRecord::touch,
+        );
         Ok(turn.to_json(agent, session_id))
     }
 
@@ -950,7 +977,36 @@ impl JobManager {
         self.live_sessions
             .close(session_id)
             .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
+        self.persist_delegate_update(
+            session_id,
+            crate::delegate_store::DelegateSessionRecord::mark_closed,
+        );
         Ok(json!({ "session_id": session_id, "closed": true }))
+    }
+
+    /// The durable delegate-session store for the served project root, if any
+    /// (`None` when no root is served). Resolved per call, matching the `FlowStore`
+    /// convention (no held field) — see `crate::delegate_store`.
+    fn delegate_store(&self) -> Option<crate::delegate_store::DelegateStore> {
+        crate::delegate_store::DelegateStore::for_scope(self.delegate_root().ok().as_deref()).ok()
+    }
+
+    /// Best-effort update of a persisted delegate record (load -> mutate -> write): a
+    /// no-op when no root is served or the record was never written, and it NEVER
+    /// fails the delegated turn (persistence is an audit/resume seam, not a gate).
+    fn persist_delegate_update(
+        &self,
+        session_id: &str,
+        update: impl FnOnce(&mut crate::delegate_store::DelegateSessionRecord),
+    ) {
+        let Some(store) = self.delegate_store() else {
+            return;
+        };
+        let Ok(mut record) = store.load_record(session_id) else {
+            return;
+        };
+        update(&mut record);
+        let _ = store.write_record(&record);
     }
 
     /// Build the proxied-mode approval bridge (DA-5b/5c) for a delegated `agent`

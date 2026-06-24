@@ -19,6 +19,7 @@ mod delegate_roles;
 mod delegate_runtime;
 mod delegate_session;
 mod delegate_session_codex;
+mod delegate_store;
 mod delegate_tool;
 mod discovery;
 mod exec_tool;
