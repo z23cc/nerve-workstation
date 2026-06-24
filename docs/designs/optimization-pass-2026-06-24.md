@@ -50,6 +50,31 @@ real code before acting — two audit findings turned out to be **misreads** and
 | **wechat media (image/file)** | AES-128-ECB + CDN flow unverified against Tencent docs; needs a live account + `bot_type`. |
 | **P7 multi-agent cockpit · P6 Tauri GUI** | Large product/UX features needing direction, not autonomous completion. |
 
+## Leptos GUI hardening (nerve-gui, same pass)
+
+Audited the ~8.8k-line Leptos CSR frontend (resilience / state / UX / build-test) and
+landed the high-value, verifiable fixes (host tests + wasm build + wasm clippy):
+
+- **Security:** markdown URL-scheme sanitization — pulldown_cmark passed
+  `javascript:`/`data:`/`vbscript:` link/image URLs straight to `inner_html` (raw
+  `<script>` was already escaped). Now neutralized at the event level (+4 tests).
+- **Correctness:** route `RuntimeEvent::Agent` (own-engine job-scoped path was
+  swallowed → no transcript); `close_chat` now picks `session.close`/`delegate.close`
+  by backend (was leaking session-backend sessions).
+- **Resilience:** SSE `onerror`/`onopen` → a "Reconnecting…" banner (was a silent
+  freeze on daemon outage); the discarded `open_events` error is now surfaced.
+- **Tests:** event-folding logic covered (nerve-gui 14 → 25 host tests).
+- **CI:** `cargo clippy -p nerve-gui --target wasm32-unknown-unknown` now gates the
+  frontend (wasm-only breakage was invisible).
+- **Build:** rebuilt the committed `dist/` so the fixes actually ship.
+
+Remaining GUI backlog (documented, not yet done): bounded chat/turn history vs
+localStorage quota (policy choice); SettingsModal missing `runtime_provider`/
+`runtime_model` props (session backend unconfigurable via UI); inspector load-error
+states (silent "—"); `start_job_await` per-fetch timeout + unmount cancellation;
+keyed `<For>` transcript to avoid O(n) re-render per delta; a `dist` drift gate (or
+build.rs rebuild) in CI; a `wasm-bindgen-test` harness for DOM/reactive paths.
+
 ## Recommended next steps (your call)
 
 1. Review `main` (green, releasable) — cut **v0.0.69** if you want the deps/CI/wechat
