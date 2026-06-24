@@ -98,6 +98,9 @@ pub(crate) struct JobManager {
     /// Live + recently-finished flows (C2), keyed by their `flow.start` job id (the
     /// `flow_id`). `flow.get` / `flow.list` / `flow.close` route through here.
     flows: LiveFlows,
+    /// Daemon-hosted WeChat bridge (`wechat.*` family): the logged-in iLink session
+    /// plus the long-poll bridge thread that drives delegated turns in-process.
+    wechat: Arc<crate::wechat::WechatHost>,
     jobs: Mutex<JobStore>,
     next_id: AtomicU64,
     emit: Arc<EventEmitter>,
@@ -218,6 +221,7 @@ impl JobManager {
             allow_delegate,
             live_sessions: LiveSessions::default(),
             flows: LiveFlows::default(),
+            wechat: Arc::new(crate::wechat::WechatHost::new(Arc::clone(&emit))),
             jobs: Mutex::new(JobStore::default()),
             next_id: AtomicU64::new(1),
             emit,
@@ -343,6 +347,7 @@ impl JobManager {
             Executor::Session => self.sessions.handle_command(command, &token),
             Executor::Auth => self.auth.handle_command(command, &token),
             Executor::Flow => self.run_flow_command(&job_id, command, &token),
+            Executor::Wechat => self.run_wechat_command(command, &token),
             Executor::CoreHub => self.runtime.handle_command_cancellable(command, &token),
         };
         let event = {
@@ -504,6 +509,49 @@ impl JobManager {
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected a host.* or workspace.* command",
             )),
+        }
+    }
+
+    /// Execute a `wechat.*` command, delegating to the daemon-hosted [`WechatHost`]
+    /// (`crate::wechat`). `wechat.login` runs the cancellable QR flow on this job
+    /// thread; `wechat.start` requires `--allow-delegate` + a served `--root` (it
+    /// drives delegated agents) and spawns the bridge on its own thread; `stop` /
+    /// `status` are immediate.
+    fn run_wechat_command(
+        &self,
+        command: RuntimeCommand,
+        token: &CancelToken,
+    ) -> Result<Value, nerve_runtime::RuntimeError> {
+        match command {
+            RuntimeCommand::WechatLogin { bot_type, base_url } => {
+                self.wechat.login(&bot_type, base_url.as_deref(), token)
+            }
+            RuntimeCommand::WechatStart {
+                owners,
+                agent,
+                autonomy,
+            } => {
+                if !self.allow_delegate {
+                    return Err(nerve_runtime::RuntimeError::adapter(
+                        "the WeChat bridge drives delegated agents — start the daemon with \
+                         --allow-delegate",
+                    ));
+                }
+                let root = self.delegate_root()?;
+                self.wechat.start(
+                    Arc::clone(&self.delegate_launcher),
+                    root,
+                    owners,
+                    agent,
+                    autonomy,
+                )
+            }
+            RuntimeCommand::WechatStop => self.wechat.stop(),
+            RuntimeCommand::WechatStatus => Ok(self.wechat.status()),
+            other => Err(nerve_runtime::RuntimeError::adapter(format!(
+                "expected a wechat.* command, got {}",
+                other.name()
+            ))),
         }
     }
 
@@ -1172,6 +1220,9 @@ enum Executor {
     /// The host flow engine (`flow.*` family, C2): runs the deterministic C1
     /// orchestration engine as a job + the live-flow registry + approval routing.
     Flow,
+    /// The daemon-hosted WeChat bridge (`wechat.*` family): QR login + the long-poll
+    /// bridge that drives delegated turns in-process.
+    Wechat,
     /// The core `Runtime` hub — nerve-core dispatch (`ping` / `tool.*`).
     CoreHub,
 }
@@ -1978,6 +2029,10 @@ fn executor_for(command: &RuntimeCommand) -> Executor {
         | RuntimeCommand::FlowList
         | RuntimeCommand::FlowClose { .. }
         | RuntimeCommand::FlowRespond { .. } => Executor::Flow,
+        RuntimeCommand::WechatLogin { .. }
+        | RuntimeCommand::WechatStart { .. }
+        | RuntimeCommand::WechatStop
+        | RuntimeCommand::WechatStatus => Executor::Wechat,
         RuntimeCommand::Ping | RuntimeCommand::ToolList | RuntimeCommand::ToolCall { .. } => {
             Executor::CoreHub
         }
@@ -2076,6 +2131,8 @@ mod command_executor_partition {
             "flow.replay" => json!({ "flow_id": "f" }),
             "flow.get" | "flow.close" => json!({ "flow_id": "f" }),
             "flow.respond" => json!({ "flow_id": "f", "request_id": "r", "decision": "allow" }),
+            "wechat.login" => json!({ "bot_type": "bt" }),
+            "wechat.start" | "wechat.stop" | "wechat.status" => json!({}),
             other => panic!(
                 "RUNTIME_COMMAND_NAMES gained `{other}` with no representative here; add one and \
                  wire the variant to exactly one executor in `run_job`"
@@ -2122,6 +2179,7 @@ mod command_executor_partition {
             Executor::Session,
             Executor::Auth,
             Executor::Flow,
+            Executor::Wechat,
             Executor::CoreHub,
         ] {
             assert!(

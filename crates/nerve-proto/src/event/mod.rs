@@ -188,6 +188,52 @@ pub enum RuntimeEvent {
         node_id: String,
         kind: FlowDecisionKind,
     },
+    /// A personal-WeChat (个人微信) bridge lifecycle update: a login QR/status
+    /// transition, the bridge's running state, or a relayed message. **Global /
+    /// unscoped** (like [`Self::Auth`]): [`Self::session_id`] returns `None`, so the
+    /// per-id fan-out delivers it to *every* connected client — any GUI/TUI surface
+    /// can render WeChat login + bridge status live without owning a session. The
+    /// daemon's WeChat host emits these; the payload is the typed
+    /// [`WechatEventKind`].
+    Wechat {
+        kind: WechatEventKind,
+    },
+}
+
+/// The typed payload of a [`RuntimeEvent::Wechat`] — one WeChat-bridge lifecycle
+/// step. A closed, additive-versioned enum (mirroring [`AuthEventKind`]) so a
+/// client renders login progress, the running state, and the message log from one
+/// event family. Defined as transport-neutral data; the host maps its gateway
+/// states onto these.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WechatEventKind {
+    /// A QR is ready to scan: `image_url` is a remote HTTPS image URL (safe to put
+    /// in an `<img src>`), `qrcode` is its opaque id.
+    LoginQr { qrcode: String, image_url: String },
+    /// A login status transition before confirmation — the gateway's `status`
+    /// string (e.g. `scaned`, `expired`, `need_verifycode`).
+    LoginStatus { status: String },
+    /// Login succeeded; the bridge can now be started for this account.
+    LoggedIn { account_id: String, user_id: String },
+    /// Login failed, timed out, or the QR expired.
+    LoginFailed { error: String },
+    /// The bridge's running state changed (started / stopped) for an account.
+    BridgeStatus {
+        running: bool,
+        account_id: String,
+        user_id: String,
+    },
+    /// A message relayed across the bridge — `direction` is `"in"` (owner → agent)
+    /// or `"out"` (agent → owner) — for a live activity log. `chat_key` namespaces
+    /// the conversation; `from_user_id` is the WeChat sender.
+    Message {
+        chat_key: String,
+        from_user_id: String,
+        direction: String,
+        text: String,
+    },
 }
 
 /// The typed kinds a [`RuntimeEvent::FlowDecision`] can record (design §6/§8).
@@ -555,6 +601,39 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<RuntimeEvent>(value).expect("round-trip"),
             round
+        );
+    }
+
+    #[test]
+    fn wechat_event_round_trips_and_is_global_unscoped() {
+        // A login-QR event: tag "wechat", nested kind "login_qr".
+        let qr = RuntimeEvent::wechat(WechatEventKind::LoginQr {
+            qrcode: "qr-123".into(),
+            image_url: "https://ilinkai.weixin.qq.com/qr.png".into(),
+        });
+        let value = serde_json::to_value(&qr).expect("wechat json");
+        assert_eq!(value["type"], "wechat");
+        assert_eq!(value["kind"]["kind"], "login_qr");
+        assert_eq!(value["kind"]["qrcode"], "qr-123");
+        // Global/unscoped: routed to every client (no session_id).
+        assert_eq!(qr.session_id(), None);
+        let back: RuntimeEvent = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, qr);
+
+        // A relayed message carries direction + chat key.
+        let msg = RuntimeEvent::wechat(WechatEventKind::Message {
+            chat_key: "acct:d:u_alice".into(),
+            from_user_id: "u_alice".into(),
+            direction: "in".into(),
+            text: "fix the build".into(),
+        });
+        let value = serde_json::to_value(&msg).expect("wechat msg json");
+        assert_eq!(value["kind"]["kind"], "message");
+        assert_eq!(value["kind"]["direction"], "in");
+        assert_eq!(msg.session_id(), None);
+        assert_eq!(
+            serde_json::from_value::<RuntimeEvent>(value).expect("round-trip"),
+            msg
         );
     }
 }

@@ -21,6 +21,7 @@
 mod auth;
 mod delegate;
 mod flow;
+mod wechat;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nerve_runtime::{ApprovalMode, RuntimeCommand, SessionApprovalDecision};
@@ -266,6 +267,7 @@ impl Shell {
             "ask" => self.set_mode(ApprovalMode::AlwaysAsk).await,
             "delegate" => self.cmd_delegate(&rest).await,
             "flow" => self.cmd_flow(&rest).await,
+            "wechat" => self.cmd_wechat(&rest).await,
             "done" | "close" => self.cmd_done().await,
             "new" | "reset" => self.new_session().await,
             "login" => self.cmd_login(&rest),

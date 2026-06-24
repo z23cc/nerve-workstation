@@ -1632,6 +1632,87 @@
             "kind"
           ],
           "type": "object"
+        },
+        {
+          "description": "Begin a personal-WeChat (个人微信) QR login through the iLink Bot gateway as\na long-lived **job**: the host fetches a QR, streams `wechat` login events\n([`crate::WechatEventKind::LoginQr`] → `LoginStatus` → `LoggedIn`), and on\nsuccess caches the session so [`Self::WechatStart`] can run the bridge. Pure\nprotocol vocabulary; the daemon's WeChat host executes it (it is network +\nwall-clock, never `nerve-core`). The job is cancellable (cancel aborts the\nQR poll). `bot_type` is your iLink bot registration's type — not a published\nconstant, so the caller supplies it.",
+          "properties": {
+            "base_url": {
+              "description": "Login bootstrap host; defaults to the iLink default when omitted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bot_type": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "wechat.login",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "bot_type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Start the WeChat→nerve bridge against the logged-in session: each allowed\nowner's inbound message drives one `delegate.*` turn (read-only by default)\nand the reply is sent back to the chat. Requires a prior successful\n[`Self::WechatLogin`] and a daemon started with `--allow-delegate`. Account\nsafety is fail-closed: an empty `owners` list denies everyone. Progress and\nrelayed messages stream back as [`crate::RuntimeEvent::Wechat`] events.",
+          "properties": {
+            "agent": {
+              "default": "claude",
+              "description": "Delegate agent catalog name (`claude` / `codex` / `gemini`).",
+              "type": "string"
+            },
+            "autonomy": {
+              "$ref": "#/$defs/DelegateAutonomy",
+              "default": "read_only",
+              "description": "Autonomy granted to each delegated turn (defaults to read-only)."
+            },
+            "kind": {
+              "const": "wechat.start",
+              "type": "string"
+            },
+            "owners": {
+              "default": [],
+              "description": "WeChat user ids permitted to drive the agent (empty = deny all).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Stop the running WeChat bridge (idempotent: a no-op when none is running).\nThe logged-in session is retained so a later [`Self::WechatStart`] needs no\nre-scan.",
+          "properties": {
+            "kind": {
+              "const": "wechat.stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Report WeChat login + bridge status (logged-in account/user, whether the\nbridge is running, the configured owners). Returns immediately.",
+          "properties": {
+            "kind": {
+              "const": "wechat.status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -2247,6 +2328,23 @@
             "type",
             "flow_id",
             "node_id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A personal-WeChat (个人微信) bridge lifecycle update: a login QR/status\ntransition, the bridge's running state, or a relayed message. **Global /\nunscoped** (like [`Self::Auth`]): [`Self::session_id`] returns `None`, so the\nper-id fan-out delivers it to *every* connected client — any GUI/TUI surface\ncan render WeChat login + bridge status live without owning a session. The\ndaemon's WeChat host emits these; the payload is the typed\n[`WechatEventKind`].",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WechatEventKind"
+            },
+            "type": {
+              "const": "wechat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
             "kind"
           ],
           "type": "object"
@@ -2879,6 +2977,23 @@
             "kind"
           ],
           "type": "object"
+        },
+        {
+          "description": "A personal-WeChat (个人微信) bridge lifecycle update: a login QR/status\ntransition, the bridge's running state, or a relayed message. **Global /\nunscoped** (like [`Self::Auth`]): [`Self::session_id`] returns `None`, so the\nper-id fan-out delivers it to *every* connected client — any GUI/TUI surface\ncan render WeChat login + bridge status live without owning a session. The\ndaemon's WeChat host emits these; the payload is the typed\n[`WechatEventKind`].",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WechatEventKind"
+            },
+            "type": {
+              "const": "wechat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "kind"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -3447,6 +3562,141 @@
         }
       ],
       "description": "A minimal task template (design §3, open question 3): a plain prompt plus\noptional `{{name}}` placeholders substituted from named ledger outputs. **No\nexpression language** — named-output substitution only, deliberately."
+    },
+    "WechatEventKind": {
+      "description": "The typed payload of a [`RuntimeEvent::Wechat`] — one WeChat-bridge lifecycle\nstep. A closed, additive-versioned enum (mirroring [`AuthEventKind`]) so a\nclient renders login progress, the running state, and the message log from one\nevent family. Defined as transport-neutral data; the host maps its gateway\nstates onto these.",
+      "oneOf": [
+        {
+          "description": "A QR is ready to scan: `image_url` is a remote HTTPS image URL (safe to put\nin an `<img src>`), `qrcode` is its opaque id.",
+          "properties": {
+            "image_url": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "login_qr",
+              "type": "string"
+            },
+            "qrcode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "qrcode",
+            "image_url"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A login status transition before confirmation — the gateway's `status`\nstring (e.g. `scaned`, `expired`, `need_verifycode`).",
+          "properties": {
+            "kind": {
+              "const": "login_status",
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Login succeeded; the bridge can now be started for this account.",
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "logged_in",
+              "type": "string"
+            },
+            "user_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "account_id",
+            "user_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Login failed, timed out, or the QR expired.",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "login_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The bridge's running state changed (started / stopped) for an account.",
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "bridge_status",
+              "type": "string"
+            },
+            "running": {
+              "type": "boolean"
+            },
+            "user_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "running",
+            "account_id",
+            "user_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A message relayed across the bridge — `direction` is `\"in\"` (owner → agent)\nor `\"out\"` (agent → owner) — for a live activity log. `chat_key` namespaces\nthe conversation; `from_user_id` is the WeChat sender.",
+          "properties": {
+            "chat_key": {
+              "type": "string"
+            },
+            "direction": {
+              "type": "string"
+            },
+            "from_user_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "message",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "chat_key",
+            "from_user_id",
+            "direction",
+            "text"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "WorkerRef": {
       "description": "Which worker runs a [`Step`]. The only place the CLI-vs-provider distinction\nis encoded in the data (design §7); the engine resolves it through the\n`WorkerFactory` to a kind-agnostic `AgentWorker`.",

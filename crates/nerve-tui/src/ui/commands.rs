@@ -207,6 +207,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         hint: "end the active delegate session",
     },
     CommandSpec {
+        name: "wechat",
+        hint: "WeChat bridge: login|start|stop|status",
+    },
+    CommandSpec {
         name: "flow",
         hint: "run a fleet: parallel|vote|pipeline|--file",
     },
@@ -270,6 +274,10 @@ pub const HELP_TEXT: &str = "commands:\n  \
 /new                       start a fresh session (clears history)\n  \
 /login [provider] [--device]  how to authenticate; --device is reserved/fail-closed for now\n  \
 /lease [provider] [--refresh]  show broker OAuth lease metadata; --refresh forces broker refresh; token redacted\n  \
+/wechat login <bot_type> [base_url]  start WeChat QR login; scan the URL shown\n  \
+/wechat start [agent] [autonomy] [owner1,owner2,...]  start bridge (default: claude, read_only, empty owners)\n  \
+/wechat stop               stop the WeChat bridge\n  \
+/wechat status             query bridge status\n  \
 /theme                     cycle the accent color\n  \
 /help                      show this help\n  \
 /quit                      close the session and exit";
@@ -435,6 +443,16 @@ mod tests {
         assert!(COMMANDS.iter().any(|c| c.name == "lease"));
         assert!(match_commands("/lea").iter().any(|c| c.name == "lease"));
         assert!(HELP_TEXT.contains("/lease [provider]"));
+    }
+
+    #[test]
+    fn wechat_is_in_palette_and_help() {
+        assert!(COMMANDS.iter().any(|c| c.name == "wechat"));
+        assert!(match_commands("/wec").iter().any(|c| c.name == "wechat"));
+        assert!(HELP_TEXT.contains("/wechat login"));
+        assert!(HELP_TEXT.contains("/wechat start"));
+        assert!(HELP_TEXT.contains("/wechat stop"));
+        assert!(HELP_TEXT.contains("/wechat status"));
     }
 
     #[test]

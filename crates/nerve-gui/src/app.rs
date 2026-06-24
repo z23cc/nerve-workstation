@@ -36,6 +36,7 @@ use crate::settings::SettingsModal;
 use crate::sidebar::Sidebar;
 use crate::topbar::Topbar;
 use crate::transcript::Transcript;
+use crate::wechat_panel::{WeChatPanel, WeChatSignals};
 use leptos::prelude::*;
 use serde_json::json;
 
@@ -75,6 +76,7 @@ pub fn App() -> impl IntoView {
     let sidebar_vibrancy = RwSignal::new(saved.sidebar_vibrancy);
     let search = RwSignal::new(String::new());
     let settings_open = RwSignal::new(false);
+    let wechat = WeChatSignals::new();
     let palette_open = RwSignal::new(false);
     let inspector_open = RwSignal::new(false);
     // Top-level surface: chat, or the Context builder.
@@ -113,7 +115,7 @@ pub fn App() -> impl IntoView {
         };
         if let Err(e) = open_events(
             &tok,
-            move |event| route_event(event, chats, approval),
+            move |event| route_event(event, chats, approval, wechat),
             move |ok| online.set(ok),
         ) {
             error.set(Some(e));
@@ -438,23 +440,16 @@ pub fn App() -> impl IntoView {
     view! {
         <div id="nerve-shell" aria-keyshortcuts="F6 Shift+F6" class:with-inspector=move || inspector_open.get()>
             <Sidebar chats active input error token search workspace workspaces settings_open mode inspector_open inspector_tab open_inspector_tab
-                chat_backend=chat_backend
+                chat_backend=chat_backend wechat_open=wechat.open
                 native_file_dialogs=native_file_dialogs
                 branch=branch
                 branch_loading=branch_loading
                 reveal_workspace=reveal_workspace
                 busy=Signal::derive(active_busy) />
             <main class="main chat">
-                <Topbar
-                    agent=agent
-                    model=model
-                    mode=mode
-                    workspace=workspace
-                    branch=branch
-                    inspector_open=inspector_open
-                    open_command_palette=Callback::new(move |_| palette_open.set(true))
-                    toggle_inspector=toggle_inspector
-                />
+                <Topbar agent=agent model=model mode=mode workspace=workspace branch=branch
+                    inspector_open=inspector_open toggle_inspector=toggle_inspector
+                    open_command_palette=Callback::new(move |_| palette_open.set(true)) />
                 {move || error.get().map(|e| view! { <div class="shell-error" role="alert">{e}</div> })}
                 {move || (!online.get()).then(|| view! {
                     <div class="shell-error" role="status">"Reconnecting to the daemon…"</div>
@@ -504,7 +499,8 @@ pub fn App() -> impl IntoView {
                 />
             })}
                 <SettingsModal open=settings_open token=token theme=theme accent=theme_accent bg=theme_bg fg=theme_fg font_ui=theme_font_ui font_code=theme_font_code sidebar_vibrancy=sidebar_vibrancy agent=agent autonomy=autonomy model=model mode=mode />
-            <CommandPalette open=palette_open mode=mode input=input token=token workspace=workspace chats=chats active_thread=active new_thread=palette_new_thread clear_thread=palette_clear_thread toggle_inspector=toggle_inspector open_inspector_tab=open_inspector_tab settings_open=settings_open native_file_dialogs=native_file_dialogs />
+                <WeChatPanel token=token wechat=wechat />
+            <CommandPalette open=palette_open mode=mode input=input token=token workspace=workspace chats=chats active_thread=active new_thread=palette_new_thread clear_thread=palette_clear_thread toggle_inspector=toggle_inspector open_inspector_tab=open_inspector_tab settings_open=settings_open wechat_open=wechat.open native_file_dialogs=native_file_dialogs />
             {move || approval.get().map(|req| view! {
                 <ApprovalModal req=req token=token approval=approval />
             })}

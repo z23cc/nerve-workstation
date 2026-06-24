@@ -152,6 +152,18 @@ pub fn render_block(block: &Block, cols: usize, opts: RenderOptions) -> Vec<Line
         } => super::flow_render::render_flow_node(node_id, worker, text, done.as_ref(), cols),
         Block::FlowAudit { tone, text } => super::flow_render::render_flow_audit(*tone, text, cols),
         Block::Notice { tone, text } => render_notice(*tone, text, cols),
+        Block::WechatBridge {
+            status,
+            qr_id,
+            qr_url,
+            messages,
+        } => super::wechat_render::render_wechat_bridge(
+            status,
+            qr_id.as_deref(),
+            qr_url.as_deref(),
+            messages,
+            cols,
+        ),
     }
 }
 

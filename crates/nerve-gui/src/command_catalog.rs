@@ -58,6 +58,14 @@ pub(crate) const COMMANDS: &[Command] = &[
         tone: CommandTone::Default,
     },
     Command {
+        id: "26",
+        title: "Open WeChat bridge",
+        desc: "Log in by QR, then bridge WeChat messages to an agent",
+        tags: "wechat weixin bridge qr login bot delegate owners",
+        key: "wechat",
+        tone: CommandTone::Default,
+    },
+    Command {
         id: "05",
         title: "Draft review prompt",
         desc: "Seed the composer with a diff review request",
@@ -273,10 +281,21 @@ mod tests {
             .map(|command| command.id)
             .collect();
         assert!(ids.contains(&"25"));
-        // The runtime-session commands (26-31) were removed in the cockpit pivot.
-        for id in ["26", "27", "28", "29", "30", "31"] {
+        // The runtime-session commands (27-31) were removed in the cockpit pivot;
+        // 26 was reclaimed for the WeChat bridge panel.
+        for id in ["27", "28", "29", "30", "31"] {
             assert!(!COMMANDS.iter().any(|command| command.id == id), "{id}");
         }
+    }
+
+    #[test]
+    fn wechat_command_is_registered_and_searchable() {
+        assert!(COMMANDS.iter().any(|command| command.id == "26"));
+        let ids: Vec<_> = visible_commands("wechat", true)
+            .into_iter()
+            .map(|command| command.id)
+            .collect();
+        assert!(ids.contains(&"26"));
     }
 
     #[test]

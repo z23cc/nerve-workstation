@@ -54,6 +54,10 @@ impl RuntimeCommand {
             Self::HostFileSaveText { .. } => "host.file.save_text",
             Self::HostUrlOpen { .. } => "host.url.open",
             Self::WorkspaceReveal { .. } => "workspace.reveal",
+            Self::WechatLogin { .. } => "wechat.login",
+            Self::WechatStart { .. } => "wechat.start",
+            Self::WechatStop => "wechat.stop",
+            Self::WechatStatus => "wechat.status",
         }
     }
 
@@ -94,7 +98,11 @@ impl RuntimeCommand {
             | Self::HostFolderPick { .. }
             | Self::HostFileSaveText { .. }
             | Self::HostUrlOpen { .. }
-            | Self::WorkspaceReveal { .. } => None,
+            | Self::WorkspaceReveal { .. }
+            | Self::WechatLogin { .. }
+            | Self::WechatStart { .. }
+            | Self::WechatStop
+            | Self::WechatStatus => None,
         }
     }
 }

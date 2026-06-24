@@ -196,14 +196,25 @@ impl<G: WeixinGateway, N: NerveControl> Bridge<G, N> {
         Ok(handled)
     }
 
-    /// Run the long-poll loop. Transient transport errors (network blips) are
-    /// retried with backoff up to `MAX_CONSECUTIVE_ERRORS` in a row; a fatal error
-    /// (gateway/session/parse/daemon) returns so the supervisor can restart (the
-    /// persisted session makes a restart cheap). The gateway long-poll blocks, so a
-    /// healthy loop is not busy.
+    /// Run the long-poll loop forever (until a fatal error). See [`Self::run_until`]
+    /// for the stop-aware variant a host uses to manage the bridge thread.
     pub fn run(&mut self) -> Result<(), BridgeError> {
+        self.run_until(&|| false)
+    }
+
+    /// Run the long-poll loop until `should_stop` returns true (checked before each
+    /// poll), returning `Ok(())` for a clean stop. Transient transport errors
+    /// (network blips) are retried with backoff up to `MAX_CONSECUTIVE_ERRORS` in a
+    /// row; a fatal error (gateway/session/parse/daemon) returns so the host can
+    /// restart (the persisted session makes a restart cheap). The gateway long-poll
+    /// blocks up to its hold time, so an in-flight poll may delay a stop by that
+    /// much; a healthy loop is not busy.
+    pub fn run_until(
+        &mut self,
+        should_stop: &(dyn Fn() -> bool + Sync),
+    ) -> Result<(), BridgeError> {
         let mut consecutive = 0u32;
-        loop {
+        while !should_stop() {
             match self.poll_once() {
                 Ok(_) => consecutive = 0,
                 Err(err) if is_retryable(&err) && consecutive < MAX_CONSECUTIVE_ERRORS => {
@@ -216,6 +227,7 @@ impl<G: WeixinGateway, N: NerveControl> Bridge<G, N> {
                 Err(err) => return Err(err),
             }
         }
+        Ok(())
     }
 }
 
@@ -443,5 +455,23 @@ mod tests {
         assert_eq!(b.cursor, "c1");
         b.poll_once().expect("poll2 (timeout)");
         assert_eq!(b.cursor, "c1", "empty buf is a timeout — keep the cursor");
+    }
+
+    #[test]
+    fn run_until_processes_then_stops_cleanly_on_signal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut b = bridge(
+            &["u_owner"],
+            vec![updates("c1", vec![msg("m1", "u_owner", "hi")])],
+        );
+        // Stop once two polls have been driven: poll 1 handles the queued message,
+        // poll 2 drains the (empty) inbox, then the signal ends the loop with Ok.
+        let polls = AtomicUsize::new(0);
+        let stop = || polls.fetch_add(1, Ordering::Relaxed) >= 2;
+        b.run_until(&stop).expect("clean stop");
+        assert!(polls.load(Ordering::Relaxed) >= 2);
+        // The owner's message drove the agent and got a reply before the stop.
+        assert_eq!(b.nerve.calls.borrow().len(), 1);
+        assert_eq!(b.gateway.sent.borrow().len(), 1);
     }
 }

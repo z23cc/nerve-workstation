@@ -1,0 +1,11 @@
+---
+source: crates/nerve-tui/tests/render_snapshots.rs
+expression: "styled(&block, 60)"
+---
+«cyan+bold»📱 wechat bridge«dim» · «dim»logged in acc-42 (user u-7)
+«yellow»scan QR: https://wechat.example.com/qr/abc123.png (id 
+«yellow»qr-abc123)
+«dim»── messages ──────────────────────────────────────────────
+«dim»┊ «dim»in: hello, can you help me?
+«dim»┊ «cyan»out: of course! what do you need?
+«dim»┊ «dim»in: please read the README

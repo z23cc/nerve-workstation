@@ -32,7 +32,7 @@ pub use command::{
 };
 pub use event::{
     AgentEventKind, AuthEventKind, FlowDecisionKind, FlowNodeUsage, FlowRunOutcome, FlowWorkerKind,
-    RuntimeEvent,
+    RuntimeEvent, WechatEventKind,
 };
 pub use flow::{
     BudgetSpec, ContextSplit, FailPolicy, Join, Step, Strategy, TaskTemplate, WorkerRef,

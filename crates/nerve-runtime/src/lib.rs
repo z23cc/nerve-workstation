@@ -31,7 +31,8 @@ pub use nerve_proto::{
     RUNTIME_COMMAND_NAMES, RiskTier, RuntimeCommand, RuntimeEvent, RuntimeJobCancelRequest,
     RuntimeJobError, RuntimeJobGetRequest, RuntimeJobListRequest, RuntimeJobSnapshot,
     RuntimeJobStartRequest, RuntimeJobStatus, RuntimeToolSpec, SessionApprovalDecision, Step,
-    Strategy, TaskTemplate, ToolCapability, WorkerRef, WorkerSelector, WorkflowDef,
+    Strategy, TaskTemplate, ToolCapability, WechatEventKind, WorkerRef, WorkerSelector,
+    WorkflowDef,
 };
 pub use runtime::Runtime;
 

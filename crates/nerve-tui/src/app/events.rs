@@ -6,6 +6,7 @@
 
 use nerve_runtime::{
     AgentEventKind, FlowDecisionKind, FlowNodeUsage, FlowRunOutcome, RuntimeEvent, Strategy,
+    WechatEventKind,
 };
 
 use super::state::{ApprovalState, Mode, State, Tone};
@@ -17,6 +18,10 @@ pub fn apply_event(state: &mut State, event: &RuntimeEvent) -> bool {
     // The flow-event family is handled in its own reducer to keep this switch
     // under the line cap; `Some` means it was a flow event (additive-safe).
     if let Some(redraw) = apply_flow_event(state, event) {
+        return redraw;
+    }
+    // The WeChat-event family is handled in its own reducer for the same reason.
+    if let Some(redraw) = apply_wechat_event(state, event) {
         return redraw;
     }
     match event {
@@ -336,6 +341,53 @@ fn clear_delegate_on_terminal(state: &mut State, job_id: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Reduce a `RuntimeEvent::Wechat` event into WeChat bridge state. Returns
+/// `Some(redraw)` when `event` is a Wechat variant, `None` otherwise. Split
+/// out of [`apply_event`] for the line cap (mirrors `apply_flow_event`).
+/// All six [`WechatEventKind`] cases update the `WechatBridge` panel.
+fn apply_wechat_event(state: &mut State, event: &RuntimeEvent) -> Option<bool> {
+    let RuntimeEvent::Wechat { kind } = event else {
+        return None;
+    };
+    match kind {
+        WechatEventKind::LoginQr { qrcode, image_url } => {
+            state.wechat_set_qr(qrcode, image_url);
+            state.note(format!("scan this QR: {image_url} (id {qrcode})"));
+        }
+        WechatEventKind::LoginStatus { status } => {
+            state.wechat_set_status(format!("login status: {status}"));
+        }
+        WechatEventKind::LoggedIn {
+            account_id,
+            user_id,
+        } => {
+            state.wechat_set_status(format!("logged in {account_id} (user {user_id})"));
+        }
+        WechatEventKind::LoginFailed { error } => {
+            state.wechat_set_status(format!("login failed: {error}"));
+            state.push_notice(Tone::Error, format!("wechat login failed: {error}"));
+        }
+        WechatEventKind::BridgeStatus {
+            running,
+            account_id,
+            ..
+        } => {
+            let status = if *running {
+                format!("bridge running · {account_id}")
+            } else {
+                format!("bridge stopped · {account_id}")
+            };
+            state.wechat_set_status(status);
+        }
+        WechatEventKind::Message {
+            direction, text, ..
+        } => {
+            state.wechat_push_message(direction, text);
+        }
+    }
+    Some(true)
 }
 
 fn apply_agent_event(state: &mut State, event: &AgentEventKind) -> bool {
@@ -819,6 +871,128 @@ mod tests {
             b,
             B::FlowAudit { tone: Tone::Error, text }
                 if text.contains("flow failed") && text.contains("[node-1]") && text.contains("worker died")
+        )));
+    }
+
+    // ------------------------------------------------------------------
+    // WeChat event tests
+    // ------------------------------------------------------------------
+
+    fn wechat_event(kind: WechatEventKind) -> RuntimeEvent {
+        RuntimeEvent::Wechat { kind }
+    }
+
+    #[test]
+    fn wechat_login_qr_creates_panel_and_pushes_notice() {
+        let mut state = State::new("p", "m");
+        let redraw = apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::LoginQr {
+                qrcode: "qr-id-1".into(),
+                image_url: "https://example.com/qr.png".into(),
+            }),
+        );
+        assert!(redraw);
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { qr_id, qr_url, .. }
+            if qr_id.as_deref() == Some("qr-id-1")
+            && qr_url.as_deref() == Some("https://example.com/qr.png")
+        )));
+        // A notice also surfaces the URL for terminals without a separate panel.
+        assert!(state.blocks.iter().any(|b| matches!(
+            b,
+            B::Notice { text, .. } if text.contains("qr.png")
+        )));
+    }
+
+    #[test]
+    fn wechat_login_status_updates_panel() {
+        let mut state = State::new("p", "m");
+        apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::LoginStatus {
+                status: "scanned".into(),
+            }),
+        );
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { status, .. } if status.contains("scanned")
+        )));
+    }
+
+    #[test]
+    fn wechat_logged_in_sets_account_status() {
+        let mut state = State::new("p", "m");
+        apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::LoggedIn {
+                account_id: "acc-7".into(),
+                user_id: "u-42".into(),
+            }),
+        );
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { status, .. } if status.contains("acc-7")
+        )));
+    }
+
+    #[test]
+    fn wechat_login_failed_pushes_error_notice() {
+        let mut state = State::new("p", "m");
+        apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::LoginFailed {
+                error: "qr expired".into(),
+            }),
+        );
+        assert!(state.blocks.iter().any(|b| matches!(
+            b,
+            B::Notice { tone: Tone::Error, text } if text.contains("qr expired")
+        )));
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { status, .. } if status.contains("failed")
+        )));
+    }
+
+    #[test]
+    fn wechat_bridge_status_running_and_stopped() {
+        let mut state = State::new("p", "m");
+        apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::BridgeStatus {
+                running: true,
+                account_id: "acc-1".into(),
+                user_id: "u-1".into(),
+            }),
+        );
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { status, .. } if status.contains("running")
+        )));
+        apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::BridgeStatus {
+                running: false,
+                account_id: "acc-1".into(),
+                user_id: "u-1".into(),
+            }),
+        );
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { status, .. } if status.contains("stopped")
+        )));
+    }
+
+    #[test]
+    fn wechat_message_appends_to_log() {
+        let mut state = State::new("p", "m");
+        apply_event(
+            &mut state,
+            &wechat_event(WechatEventKind::Message {
+                chat_key: "chat-1".into(),
+                from_user_id: "alice".into(),
+                direction: "in".into(),
+                text: "hello agent".into(),
+            }),
+        );
+        assert!(state.blocks.iter().any(|b| matches!(b,
+            B::WechatBridge { messages, .. } if messages.iter().any(|m| m.contains("hello agent"))
         )));
     }
 

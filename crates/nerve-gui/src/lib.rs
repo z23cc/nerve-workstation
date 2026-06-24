@@ -45,3 +45,4 @@ pub(crate) mod sidebar;
 pub(crate) mod topbar;
 pub(crate) mod trace_format;
 pub(crate) mod transcript;
+pub(crate) mod wechat_panel;

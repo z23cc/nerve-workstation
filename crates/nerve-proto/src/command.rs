@@ -44,6 +44,10 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "host.file.save_text",
     "host.url.open",
     "workspace.reveal",
+    "wechat.login",
+    "wechat.start",
+    "wechat.stop",
+    "wechat.status",
 ];
 
 /// Login flow requested by `auth.start`.
@@ -346,6 +350,48 @@ pub enum RuntimeCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
     },
+    /// Begin a personal-WeChat (个人微信) QR login through the iLink Bot gateway as
+    /// a long-lived **job**: the host fetches a QR, streams `wechat` login events
+    /// ([`crate::WechatEventKind::LoginQr`] → `LoginStatus` → `LoggedIn`), and on
+    /// success caches the session so [`Self::WechatStart`] can run the bridge. Pure
+    /// protocol vocabulary; the daemon's WeChat host executes it (it is network +
+    /// wall-clock, never `nerve-core`). The job is cancellable (cancel aborts the
+    /// QR poll). `bot_type` is your iLink bot registration's type — not a published
+    /// constant, so the caller supplies it.
+    #[serde(rename = "wechat.login")]
+    WechatLogin {
+        bot_type: String,
+        /// Login bootstrap host; defaults to the iLink default when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    /// Start the WeChat→nerve bridge against the logged-in session: each allowed
+    /// owner's inbound message drives one `delegate.*` turn (read-only by default)
+    /// and the reply is sent back to the chat. Requires a prior successful
+    /// [`Self::WechatLogin`] and a daemon started with `--allow-delegate`. Account
+    /// safety is fail-closed: an empty `owners` list denies everyone. Progress and
+    /// relayed messages stream back as [`crate::RuntimeEvent::Wechat`] events.
+    #[serde(rename = "wechat.start")]
+    WechatStart {
+        /// WeChat user ids permitted to drive the agent (empty = deny all).
+        #[serde(default)]
+        owners: Vec<String>,
+        /// Delegate agent catalog name (`claude` / `codex` / `gemini`).
+        #[serde(default = "default_wechat_agent")]
+        agent: String,
+        /// Autonomy granted to each delegated turn (defaults to read-only).
+        #[serde(default)]
+        autonomy: DelegateAutonomy,
+    },
+    /// Stop the running WeChat bridge (idempotent: a no-op when none is running).
+    /// The logged-in session is retained so a later [`Self::WechatStart`] needs no
+    /// re-scan.
+    #[serde(rename = "wechat.stop")]
+    WechatStop,
+    /// Report WeChat login + bridge status (logged-in account/user, whether the
+    /// bridge is running, the configured owners). Returns immediately.
+    #[serde(rename = "wechat.status")]
+    WechatStatus,
 }
 
 /// The workflow a [`RuntimeCommand::FlowStart`] runs: either an **inline**
@@ -524,6 +570,12 @@ impl ApprovalMode {
             Self::Yolo => RiskTier::Exec,
         }
     }
+}
+
+/// Default delegate agent for [`RuntimeCommand::WechatStart`] when the caller
+/// omits it: the most broadly-installed CLI.
+fn default_wechat_agent() -> String {
+    "claude".to_string()
 }
 
 fn default_arguments() -> BTreeMap<String, Value> {
@@ -798,6 +850,70 @@ mod tests {
 
         assert!(RUNTIME_COMMAND_NAMES.contains(&"delegate.steer"));
         assert!(RUNTIME_COMMAND_NAMES.contains(&"delegate.close"));
+    }
+
+    #[test]
+    fn wechat_commands_round_trip_and_are_named() {
+        // login: bot_type required, base_url optional (omitted by default).
+        let login: RuntimeCommand = serde_json::from_value(serde_json::json!({
+            "kind": "wechat.login",
+            "bot_type": "my-bot-type",
+        }))
+        .expect("parse wechat.login");
+        assert_eq!(login.name(), "wechat.login");
+        assert_eq!(login.tool_name(), None);
+        match &login {
+            RuntimeCommand::WechatLogin { bot_type, base_url } => {
+                assert_eq!(bot_type, "my-bot-type");
+                assert_eq!(base_url, &None);
+            }
+            other => panic!("unexpected variant: {}", other.name()),
+        }
+        // base_url omitted when None (skip_serializing_if).
+        let value = serde_json::to_value(&login).expect("serialize wechat.login");
+        assert!(value.get("base_url").is_none());
+
+        // start: owners + agent default + autonomy default.
+        let start: RuntimeCommand = serde_json::from_value(serde_json::json!({
+            "kind": "wechat.start",
+            "owners": ["u_alice"],
+        }))
+        .expect("parse wechat.start");
+        match &start {
+            RuntimeCommand::WechatStart {
+                owners,
+                agent,
+                autonomy,
+            } => {
+                assert_eq!(owners, &vec!["u_alice".to_string()]);
+                assert_eq!(agent, "claude", "agent defaults to claude");
+                assert_eq!(
+                    *autonomy,
+                    DelegateAutonomy::ReadOnly,
+                    "defaults to read-only"
+                );
+            }
+            other => panic!("unexpected variant: {}", other.name()),
+        }
+
+        // stop / status are unit variants.
+        let stop: RuntimeCommand =
+            serde_json::from_value(serde_json::json!({ "kind": "wechat.stop" }))
+                .expect("parse wechat.stop");
+        assert_eq!(stop.name(), "wechat.stop");
+        let status: RuntimeCommand =
+            serde_json::from_value(serde_json::json!({ "kind": "wechat.status" }))
+                .expect("parse wechat.status");
+        assert_eq!(status.name(), "wechat.status");
+
+        for name in [
+            "wechat.login",
+            "wechat.start",
+            "wechat.stop",
+            "wechat.status",
+        ] {
+            assert!(RUNTIME_COMMAND_NAMES.contains(&name), "{name} missing");
+        }
     }
 
     #[test]

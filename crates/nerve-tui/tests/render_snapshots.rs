@@ -116,6 +116,22 @@ fn snapshot_delegate_block() {
 }
 
 #[test]
+fn snapshot_wechat_bridge_block() {
+    use nerve_tui::app::state::Block;
+    let block = Block::WechatBridge {
+        status: "logged in acc-42 (user u-7)".into(),
+        qr_id: Some("qr-abc123".into()),
+        qr_url: Some("https://wechat.example.com/qr/abc123.png".into()),
+        messages: vec![
+            "in: hello, can you help me?".into(),
+            "out: of course! what do you need?".into(),
+            "in: please read the README".into(),
+        ],
+    };
+    insta::assert_snapshot!(styled(&block, 60));
+}
+
+#[test]
 fn snapshot_reasoning_and_notice() {
     let reasoning = styled(&Block::Reasoning("considering the options".into()), 40);
     let warn = styled(

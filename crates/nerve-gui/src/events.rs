@@ -3,6 +3,7 @@
 //! gate; the chat state types live in [`crate::app`].
 
 use crate::app::{ApprovalReq, Chat, Role, ToolCard, Turn, TurnHandle};
+use crate::wechat_panel::{WeChatSignals, fold_wechat_event};
 use leptos::prelude::*;
 use nerve_proto::{AgentEventKind, RuntimeEvent};
 
@@ -11,6 +12,7 @@ pub(crate) fn route_event(
     event: RuntimeEvent,
     chats: RwSignal<Vec<Chat>>,
     approval: RwSignal<Option<ApprovalReq>>,
+    wechat: WeChatSignals,
 ) {
     match event {
         RuntimeEvent::SessionIdle { session_id } => with_session(chats, &session_id, end_turn),
@@ -64,6 +66,10 @@ pub(crate) fn route_event(
                     tier: format!("{tier:?}"),
                 }));
             }
+        // WeChat-bridge lifecycle is global/unscoped (session_id() is None): every
+        // connected client folds it into its own panel signals — never gated on a
+        // session id.
+        RuntimeEvent::Wechat { kind } => fold_wechat_event(kind, wechat),
         _ => {}
     }
 }

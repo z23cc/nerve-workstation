@@ -24,6 +24,7 @@ pub(crate) fn CommandPalette(
     toggle_inspector: Callback<()>,
     open_inspector_tab: Callback<&'static str>,
     settings_open: RwSignal<bool>,
+    wechat_open: RwSignal<bool>,
     native_file_dialogs: Signal<bool>,
 ) -> impl IntoView {
     let query = RwSignal::new(String::new());
@@ -78,6 +79,10 @@ pub(crate) fn CommandPalette(
     });
     let run_sessions = Callback::new(move |_| {
         open_inspector_tab.run("sessions");
+        open.set(false);
+    });
+    let run_wechat = Callback::new(move |_| {
+        wechat_open.set(true);
         open.set(false);
     });
     let run_review = Callback::new(move |_| {
@@ -188,6 +193,7 @@ pub(crate) fn CommandPalette(
         "03" => run_review_packet.run(()),
         "04" => run_tool_activity.run(()),
         "25" => run_sessions.run(()),
+        "26" => run_wechat.run(()),
         "05" => run_review.run(()),
         "06" => run_inspector.run(()),
         "07" => run_new_thread.run(()),

@@ -30,6 +30,7 @@ pub mod markdown;
 pub mod models;
 pub mod render;
 pub mod theme;
+pub mod wechat_render;
 pub mod width;
 
 use ratatui::style::{Color, Modifier, Style};

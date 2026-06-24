@@ -124,7 +124,22 @@ pub enum Block {
     FlowAudit { tone: Tone, text: String },
     /// A client-side notice (connection status, errors, hints).
     Notice { tone: Tone, text: String },
+    /// WeChat bridge panel: status, QR (text URL + id), rolling message log.
+    /// At most one panel exists; it is updated in place by the wechat helpers.
+    WechatBridge {
+        /// Human-readable status (e.g. "awaiting QR", "logged in <id>").
+        status: String,
+        /// QR id from `LoginQr` (ratatui cannot render inline images).
+        qr_id: Option<String>,
+        /// HTTPS image URL from `LoginQr`.
+        qr_url: Option<String>,
+        /// Rolling log capped at [`WECHAT_MESSAGE_LOG_CAP`]; `"<dir>: <text>"`.
+        messages: Vec<String>,
+    },
 }
+
+/// Maximum number of messages retained in the [`Block::WechatBridge`] log.
+pub const WECHAT_MESSAGE_LOG_CAP: usize = 50;
 
 /// The whole shell state. Mutated by the event loop + key handlers; rendered
 /// purely by [`crate::app::render`].
@@ -188,6 +203,9 @@ pub struct State {
     /// Block index of each live flow node pane, keyed by `node_id`, so node
     /// streams coalesce into their own pane regardless of interleaving (C-TUI §2).
     flow_nodes: std::collections::HashMap<String, usize>,
+    /// Block index of the WeChat bridge panel, once any `Wechat` event has
+    /// been received. There is at most one panel; it is updated in place.
+    wechat_bridge: Option<usize>,
 }
 
 impl State {
@@ -224,6 +242,7 @@ impl State {
             delegate: None,
             flow_header: None,
             flow_nodes: std::collections::HashMap::new(),
+            wechat_bridge: None,
         }
     }
 
@@ -523,6 +542,59 @@ impl State {
     pub fn tick_spinner(&mut self) {
         self.spinner = self.spinner.wrapping_add(1) % SPINNER.len();
     }
+
+    // WeChat helpers — panel is created on first event, updated in place.
+
+    /// Ensure the `WechatBridge` panel exists; push a fresh one if not.
+    fn wechat_panel_mut(&mut self) -> &mut Block {
+        if let Some(idx) = self.wechat_bridge {
+            return &mut self.blocks[idx];
+        }
+        self.blocks.push(Block::WechatBridge {
+            status: "initializing…".to_string(),
+            qr_id: None,
+            qr_url: None,
+            messages: Vec::new(),
+        });
+        let idx = self.blocks.len() - 1;
+        self.wechat_bridge = Some(idx);
+        &mut self.blocks[idx]
+    }
+
+    /// Update the bridge status label (creates the panel on first call).
+    pub fn wechat_set_status(&mut self, status: impl Into<String>) {
+        let panel = self.wechat_panel_mut();
+        if let Block::WechatBridge { status: s, .. } = panel {
+            *s = status.into();
+        }
+    }
+
+    /// Store a QR code (id + image URL) in the panel; prompts user to scan.
+    pub fn wechat_set_qr(&mut self, qr_id: impl Into<String>, qr_url: impl Into<String>) {
+        let panel = self.wechat_panel_mut();
+        if let Block::WechatBridge {
+            status,
+            qr_id: id,
+            qr_url: url,
+            ..
+        } = panel
+        {
+            *status = "scan this QR to log in".to_string();
+            *id = Some(qr_id.into());
+            *url = Some(qr_url.into());
+        }
+    }
+
+    /// Append `"<dir>: <text>"` to the log, capped at [`WECHAT_MESSAGE_LOG_CAP`].
+    pub fn wechat_push_message(&mut self, direction: &str, text: &str) {
+        let panel = self.wechat_panel_mut();
+        if let Block::WechatBridge { messages, .. } = panel {
+            messages.push(format!("{direction}: {text}"));
+            while messages.len() > WECHAT_MESSAGE_LOG_CAP {
+                messages.remove(0);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +730,60 @@ mod tests {
         state.record_usage(500, 200);
         assert_eq!(state.tokens_in, 500);
         assert_eq!(state.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn wechat_set_status_creates_panel_and_updates_status() {
+        let mut state = State::new("p", "m");
+        state.wechat_set_status("awaiting QR scan");
+        assert!(matches!(
+            state.blocks.last(),
+            Some(Block::WechatBridge { status, .. }) if status == "awaiting QR scan"
+        ));
+        // A second call updates in place (no new block).
+        let before = state.blocks.len();
+        state.wechat_set_status("logged in acc-1");
+        assert_eq!(state.blocks.len(), before);
+        assert!(matches!(
+            state.blocks.last(),
+            Some(Block::WechatBridge { status, .. }) if status == "logged in acc-1"
+        ));
+    }
+
+    #[test]
+    fn wechat_set_qr_stores_id_and_url() {
+        let mut state = State::new("p", "m");
+        state.wechat_set_qr("qr-abc", "https://example.com/qr.png");
+        match state.blocks.last() {
+            Some(Block::WechatBridge {
+                qr_id,
+                qr_url,
+                status,
+                ..
+            }) => {
+                assert_eq!(qr_id.as_deref(), Some("qr-abc"));
+                assert_eq!(qr_url.as_deref(), Some("https://example.com/qr.png"));
+                assert!(status.contains("scan"));
+            }
+            other => panic!("expected WechatBridge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wechat_push_message_appends_direction_and_caps_at_50() {
+        let mut state = State::new("p", "m");
+        for i in 0..60u32 {
+            state.wechat_push_message("in", &format!("msg {i}"));
+        }
+        match state.blocks.last() {
+            Some(Block::WechatBridge { messages, .. }) => {
+                assert_eq!(messages.len(), super::WECHAT_MESSAGE_LOG_CAP);
+                // Oldest 10 were evicted; remaining start at msg 10.
+                assert!(messages[0].starts_with("in:"), "{}", messages[0]);
+                assert!(messages[0].contains("10"), "{}", messages[0]);
+            }
+            other => panic!("expected WechatBridge, got {other:?}"),
+        }
     }
 
     #[test]

@@ -142,6 +142,12 @@ where
             | RuntimeCommand::WorkspaceReveal { .. } => Err(RuntimeError::adapter(
                 "host commands are executed by the host daemon, not the core runtime",
             )),
+            RuntimeCommand::WechatLogin { .. }
+            | RuntimeCommand::WechatStart { .. }
+            | RuntimeCommand::WechatStop
+            | RuntimeCommand::WechatStatus => Err(RuntimeError::adapter(
+                "wechat commands are executed by the host WeChat manager, not the core runtime",
+            )),
         }
     }
 }

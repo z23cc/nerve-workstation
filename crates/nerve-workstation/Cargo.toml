@@ -23,6 +23,7 @@ directories = { workspace = true }
 nerve-agent = { path = "../nerve-agent" }
 nerve-core = { path = "../nerve-core" }
 nerve-runtime = { path = "../nerve-runtime" }
+nerve-wechat = { path = "../nerve-wechat" }
 serde.workspace = true
 schemars.workspace = true
 serde_json.workspace = true

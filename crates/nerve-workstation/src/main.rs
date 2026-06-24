@@ -42,6 +42,7 @@ mod session_manager;
 mod subagent;
 mod sync;
 mod tools;
+mod wechat;
 mod worker;
 mod workspace;
 mod xai;

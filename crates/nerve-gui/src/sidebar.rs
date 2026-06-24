@@ -52,6 +52,15 @@ fn skill_icon() -> impl IntoView {
     }
 }
 
+fn wechat_icon() -> impl IntoView {
+    view! {
+        <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M9 4a6 6 0 0 0-6 6c0 2 1 3.7 2.7 4.8L5 18l3-1.4A8 8 0 0 0 9 16" />
+            <path d="M14 8a6 6 0 0 1 6 6c0 1.7-.8 3.3-2.2 4.4L19 21l-2.6-1.2A7 7 0 0 1 14 20a6 6 0 0 1 0-12z" />
+        </svg>
+    }
+}
+
 fn settings_icon() -> impl IntoView {
     view! {
         <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -239,6 +248,7 @@ pub(crate) fn Sidebar(
     inspector_tab: RwSignal<&'static str>,
     open_inspector_tab: Callback<&'static str>,
     chat_backend: RwSignal<String>,
+    wechat_open: RwSignal<bool>,
     native_file_dialogs: Signal<bool>,
     branch: RwSignal<String>,
     branch_loading: RwSignal<bool>,
@@ -425,6 +435,16 @@ pub(crate) fn Sidebar(
                     on:click=move |_| open_inspector_tab.run("plan")
                 >
                     <span class="nav-icon">{skill_icon()}</span><span>"Tools"</span>
+                </button>
+                <button type="button"
+                    class="nav-row"
+                    class:on=move || wechat_open.get()
+                    title="WeChat bridge"
+                    aria-controls="wechat-dialog"
+                    aria-expanded=move || wechat_open.get().to_string()
+                    on:click=move |_| wechat_open.set(true)
+                >
+                    <span class="nav-icon">{wechat_icon()}</span><span>"WeChat"</span>
                 </button>
             </nav>
             <ProjectRail token=token workspace=workspace workspaces=workspaces native_file_dialogs=native_file_dialogs

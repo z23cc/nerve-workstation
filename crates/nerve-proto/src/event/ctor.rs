@@ -5,6 +5,7 @@
 
 use super::{
     AgentEventKind, AuthEventKind, FlowDecisionKind, FlowNodeUsage, FlowRunOutcome, FlowWorkerKind,
+    WechatEventKind,
 };
 use crate::{RiskTier, RuntimeCommand, RuntimeEvent, RuntimeJobError, Strategy};
 use serde_json::Value;
@@ -16,6 +17,12 @@ impl RuntimeEvent {
             provider: provider.into(),
             kind,
         }
+    }
+
+    /// Construct a global/unscoped WeChat-bridge event from its typed kind.
+    #[must_use]
+    pub fn wechat(kind: WechatEventKind) -> Self {
+        Self::Wechat { kind }
     }
 
     #[must_use]
@@ -314,7 +321,11 @@ impl RuntimeEvent {
             | Self::Agent { .. }
             | Self::ToolCallDelta { .. }
             | Self::DelegateProgress { .. }
-            | Self::Auth { .. } => None,
+            | Self::Auth { .. }
+            // WeChat events are global/unscoped, like `Auth`: returning `None`
+            // routes them to every connected client (login + bridge status visible
+            // on any surface, not tied to a session the client happens to watch).
+            | Self::Wechat { .. } => None,
         }
     }
 }
