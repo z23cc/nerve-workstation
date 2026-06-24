@@ -29,6 +29,12 @@ pub(crate) fn route_event(
         RuntimeEvent::SessionAgent { session_id, event } => {
             with_session(chats, &session_id, |c| apply_agent_event(event, c));
         }
+        // Job-scoped agent steps (the own-engine `session.*`/`agent.run` path emits
+        // `Agent` keyed by job id rather than `SessionAgent` by session id). Without
+        // this arm an own-engine turn streams nothing into the transcript.
+        RuntimeEvent::Agent { job_id, event } => {
+            with_turn_job(chats, &job_id, |c| apply_agent_event(event, c));
+        }
         // The delegate path (local CLIs) streams raw assistant text chunks keyed by
         // the delegate session/job id — coalesce them into the streaming turn.
         RuntimeEvent::DelegateProgress { job_id, text, .. } => {

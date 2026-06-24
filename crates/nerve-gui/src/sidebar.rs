@@ -64,6 +64,18 @@ fn settings_icon() -> impl IntoView {
     }
 }
 
+/// The runtime command that tears down a chat's live backend session: an
+/// own-engine `session` thread uses `session.close`; an external CLI (delegate)
+/// thread uses `delegate.close`. Using the wrong one leaves the session running
+/// on the daemon.
+pub(crate) fn close_command_kind(backend: &str) -> &'static str {
+    if backend == "session" {
+        "session.close"
+    } else {
+        "delegate.close"
+    }
+}
+
 /// Compact relative time from an epoch-ms timestamp: now / 3m / 2h / 4d / 1w.
 pub(crate) fn rel_time(ms: f64) -> String {
     let secs = ((js_sys::Date::now() - ms).max(0.0)) / 1000.0;
@@ -295,9 +307,14 @@ pub(crate) fn Sidebar(
     // Close a chat: end its live backend session (best effort), remove it, fix
     // `active`. Keeps at least one.
     let close_chat = move |idx: usize, session: Option<String>| {
+        let kind = close_command_kind(
+            &chats
+                .with_untracked(|cs| cs.get(idx).map(|c| c.backend.clone()))
+                .unwrap_or_default(),
+        );
         if let (Some(tok), Some(sid)) = (token.get_value(), session) {
             leptos::task::spawn_local(async move {
-                let _ = start_job(&tok, json!({"kind": "delegate.close", "session_id": sid})).await;
+                let _ = start_job(&tok, json!({ "kind": kind, "session_id": sid })).await;
             });
         }
         let new_backend = chat_backend.get_untracked();
@@ -505,7 +522,15 @@ pub(crate) fn Sidebar(
 
 #[cfg(test)]
 mod tests {
-    use super::{thread_agent_badge, thread_agent_class};
+    use super::{close_command_kind, thread_agent_badge, thread_agent_class};
+
+    #[test]
+    fn close_command_matches_the_backend() {
+        assert_eq!(close_command_kind("session"), "session.close");
+        assert_eq!(close_command_kind("delegate"), "delegate.close");
+        assert_eq!(close_command_kind("claude"), "delegate.close");
+        assert_eq!(close_command_kind(""), "delegate.close");
+    }
 
     #[test]
     fn thread_agent_badge_marks_live_state() {
