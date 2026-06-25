@@ -363,7 +363,7 @@ pub fn App() -> impl IntoView {
         let Some(tok) = token.get_value() else { return };
         let ws = workspace.get_untracked();
         leptos::task::spawn_local(async move {
-            let _ = start_job(&tok, json!({ "kind": "workspace.reveal", "workspace": ws })).await;
+            let _ = start_job(&tok, crate::command::workspace_reveal(&ws)).await;
         });
     });
 

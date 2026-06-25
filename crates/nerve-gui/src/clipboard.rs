@@ -8,7 +8,6 @@ use std::cell::RefCell;
 
 use crate::rpc::start_job_await;
 use leptos::prelude::*;
-use serde_json::json;
 use wasm_bindgen_futures::JsFuture;
 
 thread_local! {
@@ -38,7 +37,7 @@ pub(crate) fn copy_text_with_note(
 
 async fn host_or_browser_write_message(token: &str, text: String, success: String) -> String {
     let fallback_text = text.clone();
-    let command = json!({ "kind": "host.clipboard.write_text", "text": text });
+    let command = crate::command::host_clipboard_write_text(text);
     match start_job_await(token, command).await {
         Ok(_) => success,
         Err(_) => {

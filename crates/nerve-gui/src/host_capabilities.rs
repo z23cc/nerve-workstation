@@ -7,7 +7,6 @@
 use crate::rpc::start_job_await;
 use leptos::prelude::*;
 use nerve_proto::HostCapabilities;
-use serde_json::json;
 
 const NO_TOKEN: &str = "No daemon token — open the daemon URL or append #token=…";
 
@@ -150,11 +149,8 @@ fn request_test_notification(
     busy.set(true);
     status.set("Sending OS notification…".into());
     leptos::task::spawn_local(async move {
-        let command = json!({
-            "kind": "host.notification.show",
-            "title": "Nerve",
-            "body": "Host OS notifications are available.",
-        });
+        let command =
+            crate::command::host_notification_show("Nerve", "Host OS notifications are available.");
         status.set(match start_job_await(&tok, command).await {
             Ok(_) => "Sent test notification.".into(),
             Err(err) => format!("Notification failed: {err}"),

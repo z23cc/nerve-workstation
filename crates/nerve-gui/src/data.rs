@@ -89,7 +89,7 @@ pub(crate) fn truncate_title(text: &str) -> String {
 }
 
 pub async fn fetch_host_capabilities(token: &str) -> Result<HostCapabilities, String> {
-    let result = start_job_await(token, json!({ "kind": "host.capabilities" })).await?;
+    let result = start_job_await(token, crate::command::host_capabilities()).await?;
     serde_json::from_value::<HostCapabilities>(result)
         .map_err(|err| format!("Invalid capability response: {err}"))
 }
@@ -105,8 +105,7 @@ pub async fn fetch_protocol_version(token: &str) -> Option<String> {
 }
 
 pub async fn pick_host_folder(token: &str, title: &str) -> Result<String, String> {
-    let result =
-        start_job_await(token, json!({ "kind": "host.folder.pick", "title": title })).await?;
+    let result = start_job_await(token, crate::command::host_folder_pick(title)).await?;
     result
         .get("path")
         .and_then(Value::as_str)
@@ -123,12 +122,7 @@ pub async fn save_host_text_file(
 ) -> Result<String, String> {
     let result = start_job_await(
         token,
-        json!({
-            "kind": "host.file.save_text",
-            "title": title,
-            "default_name": default_name,
-            "text": text,
-        }),
+        crate::command::host_file_save_text(title, default_name, text),
     )
     .await?;
     result
@@ -140,7 +134,7 @@ pub async fn save_host_text_file(
 }
 
 pub async fn open_host_url(token: &str, url: &str) -> Result<(), String> {
-    let result = start_job_await(token, json!({ "kind": "host.url.open", "url": url })).await?;
+    let result = start_job_await(token, crate::command::host_url_open(url)).await?;
     if result
         .get("opened")
         .and_then(Value::as_bool)
@@ -154,11 +148,7 @@ pub async fn open_host_url(token: &str, url: &str) -> Result<(), String> {
 
 /// Run one `tool.call` job to completion; return its `structuredContent` object.
 pub async fn tool_job(token: &str, name: &str, arguments: Value) -> Result<Value, String> {
-    let result = start_job_await(
-        token,
-        json!({ "kind": "tool.call", "name": name, "arguments": arguments }),
-    )
-    .await?;
+    let result = start_job_await(token, crate::command::tool_call(name, arguments)).await?;
     result
         .get("structuredContent")
         .cloned()
@@ -173,11 +163,7 @@ pub async fn tool_job_full(
     name: &str,
     arguments: Value,
 ) -> Result<(String, Value), String> {
-    let result = start_job_await(
-        token,
-        json!({ "kind": "tool.call", "name": name, "arguments": arguments }),
-    )
-    .await?;
+    let result = start_job_await(token, crate::command::tool_call(name, arguments)).await?;
     let text = result
         .get("content")
         .and_then(|c| c.as_array())
