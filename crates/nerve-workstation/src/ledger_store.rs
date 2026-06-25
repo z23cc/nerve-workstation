@@ -221,6 +221,7 @@ pub(crate) fn ledger_kind_tag(kind: &LedgerKind) -> &'static str {
         LedgerKind::PolicyDecision { .. } => "policy_decision",
         LedgerKind::Verdict { .. } => "verdict",
         LedgerKind::ReceiptIssued { .. } => "receipt_issued",
+        LedgerKind::OutcomeRecorded { .. } => "outcome_recorded",
     }
 }
 
@@ -231,7 +232,8 @@ fn kind_run_id(kind: &LedgerKind) -> Option<&str> {
         | LedgerKind::DiffRecorded { run_id, .. }
         | LedgerKind::PolicyDecision { run_id, .. }
         | LedgerKind::Verdict { run_id, .. }
-        | LedgerKind::ReceiptIssued { run_id, .. } => Some(run_id.as_str()),
+        | LedgerKind::ReceiptIssued { run_id, .. }
+        | LedgerKind::OutcomeRecorded { run_id, .. } => Some(run_id.as_str()),
     }
 }
 
@@ -486,6 +488,49 @@ mod tests {
         let limited_recs = limited["records"].as_array().unwrap();
         assert_eq!(limited_recs.len(), 1);
         assert_eq!(limited_recs[0]["kind"]["kind"], json!("verdict"));
+    }
+
+    #[test]
+    fn outcome_recorded_appends_filters_by_kind_and_chain_stays_intact() {
+        use nerve_core::outcome::{LabelSource, Outcome};
+
+        let dir = tempdir().unwrap();
+        let store = LedgerStore::new(dir.path().join("ledger"));
+        // A pre-existing record, then the L6→L1 OutcomeRecorded append.
+        store.append(run_recorded(0)).unwrap();
+        let appended = store
+            .append(LedgerKind::OutcomeRecorded {
+                run_id: "run-0".into(),
+                outcome: Outcome::Merged,
+                source: LabelSource::Human,
+                label_hash: "lh-abc".into(),
+            })
+            .unwrap();
+        assert_eq!(appended.seq, 1);
+        assert_eq!(ledger_kind_tag(&appended.kind), "outcome_recorded");
+
+        // ledger.query record_kind=outcome_recorded returns it (and filters by run_id).
+        let by_kind = run_ledger_query(
+            Some(&store),
+            None,
+            None,
+            None,
+            None,
+            Some("outcome_recorded"),
+            200,
+        );
+        let recs = by_kind["records"].as_array().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0]["kind"]["kind"], json!("outcome_recorded"));
+        assert_eq!(recs[0]["kind"]["label_hash"], json!("lh-abc"));
+        let by_run = run_ledger_query(Some(&store), Some("run-0"), None, None, None, None, 200);
+        assert_eq!(by_run["records"].as_array().unwrap().len(), 2);
+
+        // ledger.verify still reports the chain intact after the additive append.
+        let verified = run_ledger_verify(Some(&store));
+        assert_eq!(verified["ok"], json!(true));
+        assert_eq!(verified["count"], json!(2));
+        assert_eq!(verified["head_hash"], json!(appended.record_hash));
     }
 
     #[test]

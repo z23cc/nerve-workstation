@@ -146,6 +146,21 @@ impl OutcomeStore {
 /// `observed_at_ms` is host wall-clock (supplied here, never hashed). A persistence
 /// failure surfaces as an adapter error so the caller can decide; an unknown
 /// `run_id` is fine — the corpus is created on first label.
+///
+/// Returns the announce payload, the `run_id`, the refreshed `labels_root`, the label
+/// count, and the just-appended label's content `label_hash` — the last so the caller
+/// can best-effort mirror this observation onto the L1 evidence ledger as a
+/// [`LedgerKind::OutcomeRecorded`](nerve_core::ledger::LedgerKind) (an observation,
+/// never a verdict input — INV-R1/R3/R4).
+#[derive(Debug)]
+pub(crate) struct LabeledOutcome {
+    pub(crate) payload: Value,
+    pub(crate) run_id: String,
+    pub(crate) labels_root: String,
+    pub(crate) label_count: u64,
+    pub(crate) label_hash: String,
+}
+
 pub(crate) fn handle_outcome_label(
     run_id: &str,
     outcome: Outcome,
@@ -154,7 +169,7 @@ pub(crate) fn handle_outcome_label(
     note: Option<String>,
     verdict_ref: Option<String>,
     store: Option<&OutcomeStore>,
-) -> Result<(Value, String, String, u64), RuntimeError> {
+) -> Result<LabeledOutcome, RuntimeError> {
     let store = store
         .ok_or_else(|| RuntimeError::adapter(format!("no served root for outcome `{run_id}`")))?;
     // Load the existing corpus (preserving its denormalized identity), or start a
@@ -180,12 +195,24 @@ pub(crate) fn handle_outcome_label(
     })?;
     let labels_root = record.labels_root.clone();
     let label_count = record.labels.len() as u64;
+    // The just-appended label is the chain tail; its content hash is the L1 anchor.
+    let label_hash = record
+        .labels
+        .last()
+        .map(|label| label.label_hash.clone())
+        .unwrap_or_default();
     let payload = serde_json::to_value(&record)
         .map(|record| json!({ "record": record }))
         .map_err(|err| {
             RuntimeError::adapter(format!("failed to render outcome `{run_id}`: {err}"))
         })?;
-    Ok((payload, run_id.to_string(), labels_root, label_count))
+    Ok(LabeledOutcome {
+        payload,
+        run_id: run_id.to_string(),
+        labels_root,
+        label_count,
+        label_hash,
+    })
 }
 
 /// Resolve an `outcome.get`: the full [`OutcomeRecord`] by run id. An unknown id (or
@@ -207,17 +234,21 @@ pub(crate) fn handle_outcome_get(
 
 /// Resolve an `outcome.query`: the matching records (filtered by `agent` and/or by
 /// the presence of an `outcome` disposition, capped at `limit`) plus a rolled-up
-/// [`OutcomeSummary`](nerve_core::outcome::OutcomeSummary) and the advisory
-/// `calibration` (the [`CorpusCalibrator`] over the *matched* set — `null` when no run
-/// is labeled). `None` store (no served root) yields an empty result. Both rollups are
-/// pure folds ([`summarize`](nerve_core::outcome::summarize) /
-/// [`calibrate`](nerve_core::outcome::calibrate)); the calibration is **observational
-/// only** (INV-R1/R3), never a gate.
+/// [`OutcomeSummary`](nerve_core::outcome::OutcomeSummary), the advisory `calibration`
+/// (the [`CorpusCalibrator`] over the *matched* set — `null` when no run is labeled),
+/// and the advisory `flaky_rates` (the deterministic per-check flaky-rate fold over the
+/// served verdict corpus). `None` store (no served root) yields an empty result. Every
+/// rollup is a pure fold ([`summarize`](nerve_core::outcome::summarize) /
+/// [`calibrate`](nerve_core::outcome::calibrate) /
+/// [`flaky_rates`](nerve_core::outcome::flaky_rates)); they are **observational only**
+/// (INV-R1/R3), never a gate. The verdict corpus is read best-effort — a
+/// [`VerifyStore`] read failure degrades `flaky_rates` to an empty list, never an error.
 pub(crate) fn handle_outcome_query(
     agent: Option<&str>,
     outcome: Option<Outcome>,
     limit: u64,
     store: Option<&OutcomeStore>,
+    verify_store: Option<&crate::verify_store::VerifyStore>,
 ) -> Value {
     let all = store.and_then(|s| s.list().ok()).unwrap_or_default();
     let matched: Vec<OutcomeRecord> = all
@@ -236,7 +267,16 @@ pub(crate) fn handle_outcome_query(
     let summary = serde_json::to_value(&summary).unwrap_or(Value::Null);
     // Advisory only (INV-R1/R3): surfaced for a human to read, never fed to a verdict.
     let calibration = CorpusCalibrator.calibrate(&matched);
-    json!({ "records": records, "summary": summary, "calibration": calibration })
+    // Best-effort: a verdict-corpus read failure degrades to an empty flaky-rate vec.
+    let verdicts = verify_store.and_then(|s| s.list().ok()).unwrap_or_default();
+    let flaky_rates = serde_json::to_value(nerve_core::outcome::flaky_rates(&verdicts))
+        .unwrap_or_else(|_| Value::Array(Vec::new()));
+    json!({
+        "records": records,
+        "summary": summary,
+        "calibration": calibration,
+        "flaky_rates": flaky_rates,
+    })
 }
 
 /// Atomic file write: temp file + rename, so a reader never observes a half-written
@@ -348,7 +388,7 @@ mod tests {
         label("run-regress", Outcome::Reverted, LabelSource::Ci);
 
         // The query surfaces the advisory calibration alongside the summary.
-        let value = handle_outcome_query(None, None, 100, Some(&store));
+        let value = handle_outcome_query(None, None, 100, Some(&store), None);
         let cal = &value["calibration"];
         assert_eq!(cal["labeled_runs"], json!(2));
         assert_eq!(cal["shipped"], json!(1)); // run-ship
@@ -363,8 +403,84 @@ mod tests {
         assert!(CorpusCalibrator.calibrate(&[unlabeled]).is_none());
         let empty_dir = tempdir().unwrap();
         let empty_store = OutcomeStore::new(empty_dir.path().join("outcomes"));
-        let empty_value = handle_outcome_query(None, None, 100, Some(&empty_store));
+        let empty_value = handle_outcome_query(None, None, 100, Some(&empty_store), None);
         assert!(empty_value["calibration"].is_null());
+    }
+
+    #[test]
+    fn outcome_query_attaches_flaky_rates_from_the_verdict_corpus() {
+        use nerve_core::verdict::{CheckKind, CheckResult, CheckStatus, Verdict, VerdictStatus};
+
+        let dir = tempdir().unwrap();
+        let store = OutcomeStore::new(dir.path().join("outcomes"));
+        let verify_dir = tempdir().unwrap();
+        let verify_store =
+            crate::verify_store::VerifyStore::new(verify_dir.path().join("verdicts"));
+
+        // Seed a verdict corpus: a "flaky-check" that is Flaky in both verdicts and a
+        // "stable" check that always passes. verdict_id must be unique per file.
+        let check = |name: &str, status: CheckStatus| CheckResult {
+            name: name.into(),
+            kind: CheckKind::Test,
+            status,
+            reproducible: false,
+            exit_code: None,
+            timed_out: false,
+            duration_ms: 0,
+            output_hash: String::new(),
+            runs: 0,
+            passed: 0,
+        };
+        for (i, flaky) in [CheckStatus::Flaky, CheckStatus::Flaky]
+            .into_iter()
+            .enumerate()
+        {
+            let verdict = Verdict {
+                schema_version: 1,
+                verdict_id: format!("v-{i}"),
+                run_id: "r".into(),
+                diff_hash: None,
+                status: VerdictStatus::Inconclusive,
+                checkspec_hash: String::new(),
+                closure_digest: String::new(),
+                checks: vec![
+                    check("flaky-check", flaky),
+                    check("stable", CheckStatus::Pass),
+                ],
+                verified_at_ms: i as u64,
+                verdict_hash: format!("h-{i}"),
+            };
+            verify_store.write_record(&verdict).unwrap();
+        }
+
+        // One label so the query returns; flaky_rates is computed independently from
+        // the verdict corpus (advisory, INV-R1/R3 — never feeds the label/verdict).
+        handle_outcome_label(
+            "r",
+            Outcome::Merged,
+            LabelSource::Human,
+            None,
+            None,
+            None,
+            Some(&store),
+        )
+        .unwrap();
+
+        let value = handle_outcome_query(None, None, 100, Some(&store), Some(&verify_store));
+        let rates = value["flaky_rates"].as_array().expect("flaky_rates array");
+        // Deterministically ordered by (check_name, kind): flaky-check, then stable.
+        assert_eq!(rates.len(), 2);
+        assert_eq!(rates[0]["check_name"], json!("flaky-check"));
+        assert_eq!(rates[0]["runs"], json!(2));
+        assert_eq!(rates[0]["flaky_runs"], json!(2));
+        assert_eq!(rates[0]["flaky_permille"], json!(1000));
+        assert_eq!(rates[1]["check_name"], json!("stable"));
+        assert_eq!(rates[1]["flaky_runs"], json!(0));
+        assert_eq!(rates[1]["flaky_permille"], json!(0));
+
+        // No verify store (or an empty corpus) -> an empty (best-effort) flaky_rates.
+        let none_vs = handle_outcome_query(None, None, 100, Some(&store), None);
+        assert_eq!(none_vs["flaky_rates"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -373,7 +489,7 @@ mod tests {
         let store = OutcomeStore::new(dir.path().join("outcomes"));
 
         // First label creates the corpus.
-        let (payload, run_id, root1, count1) = handle_outcome_label(
+        let first = handle_outcome_label(
             "run-1",
             Outcome::Merged,
             LabelSource::Human,
@@ -383,16 +499,29 @@ mod tests {
             Some(&store),
         )
         .unwrap();
-        assert_eq!(run_id, "run-1");
-        assert_eq!(count1, 1);
+        let root1 = first.labels_root.clone();
+        assert_eq!(first.run_id, "run-1");
+        assert_eq!(first.label_count, 1);
         assert!(!root1.is_empty());
-        assert_eq!(payload["record"]["run_id"], json!("run-1"));
-        assert_eq!(payload["record"]["labels"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["record"]["labels"][0]["actor"], json!("alice"));
-        assert_eq!(payload["record"]["labels_root"], json!(root1));
+        // The returned label_hash is the just-appended label's content digest.
+        assert_eq!(
+            first.payload["record"]["labels"][0]["label_hash"],
+            json!(first.label_hash)
+        );
+        assert!(!first.label_hash.is_empty());
+        assert_eq!(first.payload["record"]["run_id"], json!("run-1"));
+        assert_eq!(
+            first.payload["record"]["labels"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            first.payload["record"]["labels"][0]["actor"],
+            json!("alice")
+        );
+        assert_eq!(first.payload["record"]["labels_root"], json!(root1));
 
         // Second label appends, advancing the chain head and seq.
-        let (payload2, _, root2, count2) = handle_outcome_label(
+        let second = handle_outcome_label(
             "run-1",
             Outcome::Reverted,
             LabelSource::Ci,
@@ -402,10 +531,13 @@ mod tests {
             Some(&store),
         )
         .unwrap();
-        assert_eq!(count2, 2);
-        assert_ne!(root2, root1);
-        assert_eq!(payload2["record"]["labels"][1]["seq"], json!(1));
-        assert_eq!(payload2["record"]["labels"][1]["verdict_ref"], json!("v-7"));
+        assert_eq!(second.label_count, 2);
+        assert_ne!(second.labels_root, root1);
+        assert_eq!(second.payload["record"]["labels"][1]["seq"], json!(1));
+        assert_eq!(
+            second.payload["record"]["labels"][1]["verdict_ref"],
+            json!("v-7")
+        );
 
         // The persisted record matches a pure rebuild over the same labels (the
         // store does not perturb the chain) — no hardcoded hex.
@@ -494,28 +626,29 @@ mod tests {
         store.write_record(&gemini).unwrap();
 
         // Unfiltered: both, summary tallies both dispositions.
-        let all = handle_outcome_query(None, None, 100, Some(&store));
+        let all = handle_outcome_query(None, None, 100, Some(&store), None);
         assert_eq!(all["records"].as_array().unwrap().len(), 2);
         assert_eq!(all["summary"]["total_runs"], json!(2));
         assert_eq!(all["summary"]["merged"], json!(1));
         assert_eq!(all["summary"]["reverted"], json!(1));
 
         // Filter by agent.
-        let only_codex = handle_outcome_query(Some("codex"), None, 100, Some(&store));
+        let only_codex = handle_outcome_query(Some("codex"), None, 100, Some(&store), None);
         assert_eq!(only_codex["records"].as_array().unwrap().len(), 1);
         assert_eq!(only_codex["records"][0]["run_id"], json!("run-a"));
 
         // Filter by outcome disposition.
-        let only_reverted = handle_outcome_query(None, Some(Outcome::Reverted), 100, Some(&store));
+        let only_reverted =
+            handle_outcome_query(None, Some(Outcome::Reverted), 100, Some(&store), None);
         assert_eq!(only_reverted["records"].as_array().unwrap().len(), 1);
         assert_eq!(only_reverted["records"][0]["run_id"], json!("run-b"));
 
         // Limit caps the result set.
-        let capped = handle_outcome_query(None, None, 1, Some(&store));
+        let capped = handle_outcome_query(None, None, 1, Some(&store), None);
         assert_eq!(capped["records"].as_array().unwrap().len(), 1);
 
         // None store -> empty.
-        let empty = handle_outcome_query(None, None, 100, None);
+        let empty = handle_outcome_query(None, None, 100, None, None);
         assert_eq!(empty["records"].as_array().unwrap().len(), 0);
         assert_eq!(empty["summary"]["total_runs"], json!(0));
     }

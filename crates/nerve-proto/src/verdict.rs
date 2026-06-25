@@ -167,6 +167,31 @@ pub struct Verdict {
     pub verdict_hash: String,
 }
 
+/// The deterministic per-check **flaky-rate** signal (L6 calibration; advisory,
+/// observational). Folded across a corpus of [`Verdict`]s, it answers the design's
+/// headline "agent wrong vs. test flaky?" question for a `(check_name, kind)` pair:
+/// of the verdicts that exercised it, how many classed it [`CheckStatus::Flaky`] or
+/// [`CheckStatus::Fail`]. INV-R1/R3: this is an **observation a human reads, never an
+/// input to a verdict or a gate** — a flaky-rate is *derived from* verdicts, it never
+/// alters one. `flaky_permille` is integer parts-per-thousand (`permille(flaky_runs,
+/// runs)`) — **no floats** — so the shape is byte-stable and derives `Eq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct CheckFlakyRate {
+    /// The human-facing check label (e.g. `"cargo test"`).
+    pub check_name: String,
+    /// Which org-bar dimension this check exercises.
+    pub kind: CheckKind,
+    /// How many verdicts in the corpus exercised this `(check_name, kind)` pair.
+    pub runs: u64,
+    /// Of those, how many classed the check [`CheckStatus::Flaky`].
+    pub flaky_runs: u64,
+    /// Of those, how many classed the check [`CheckStatus::Fail`].
+    pub fail_runs: u64,
+    /// Integer parts-per-thousand of [`Self::flaky_runs`] out of [`Self::runs`].
+    pub flaky_permille: u64,
+}
+
 /// `skip_serializing_if` predicate for `u64` count/duration fields: omit when zero
 /// so a default record round-trips byte-identically.
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde requires a `&T` predicate.

@@ -69,5 +69,6 @@ pub use receipt::{
 pub use risk::{RiskTier, ToolCapability};
 pub use tool_spec::RuntimeToolSpec;
 pub use verdict::{
-    CheckKind, CheckResult, CheckStatus, VERDICT_SCHEMA_VERSION, Verdict, VerdictStatus,
+    CheckFlakyRate, CheckKind, CheckResult, CheckStatus, VERDICT_SCHEMA_VERSION, Verdict,
+    VerdictStatus,
 };
