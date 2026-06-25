@@ -3035,7 +3035,7 @@
           "type": "object"
         },
         {
-          "description": "L1 — query the append-only cross-run evidence ledger (read-only). Optional\nfilters narrow by run / agent / diff / verdict outcome / record kind.",
+          "description": "L1 — query the append-only cross-run evidence ledger (read-only). Optional\nfilters narrow by run / agent / diff / run-root-hash lineage / verdict outcome /\nrecord kind.",
           "properties": {
             "agent": {
               "type": [
@@ -3078,6 +3078,13 @@
               ]
             },
             "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_root_hash": {
+              "description": "Filter to the lineage of one run by its content address (`run_root_hash`):\nmatches the `RunRecorded` whose hash this is, plus the post-wave-3\n`Verdict`/`ReceiptIssued` records that pin back to it (v13).",
               "type": [
                 "string",
                 "null"

@@ -1,9 +1,15 @@
 //! L5 MCP face of the trust substrate (`docs/designs/trust-substrate.md` §8 L5) — the
-//! four read-mostly `nerve_*` tools an *external* coding agent (Claude Code, Codex,
-//! Gemini CLI) calls over MCP to inspect its own provenance: enumerate captured runs
+//! six read-only `nerve_*` tools an *external* coding agent (Claude Code, Codex,
+//! Gemini CLI) or CI calls over MCP to inspect its own provenance: enumerate captured runs
 //! (`nerve_runs`), read a captured run's tape for replay (`nerve_replay`), fetch a
-//! signed Receipt (`nerve_receipt`), and ask for a verification verdict
-//! (`nerve_verify`).
+//! signed Receipt (`nerve_receipt`), ask for a verification verdict (`nerve_verify`),
+//! audit the append-only L1 evidence ledger + its chain integrity (`nerve_ledger`), and
+//! read the L6 outcome corpus + its deterministic calibration (`nerve_outcomes`).
+//!
+//! `nerve_ledger` and `nerve_outcomes` are pure READ surfaces (§6 generator-neutral
+//! call-in): they report borrowed verdicts / observed labels and a re-derived chain
+//! verdict, never fabricating one (INV-R1). The outcome WRITE path (`outcome.label`)
+//! stays human/CI-gated over the daemon protocol and is deliberately NOT exposed here.
 //!
 //! **Court reporter, not judge (INV-R1).** `nerve_verify` NEVER fabricates a verdict:
 //! it re-verifies an already-sealed Receipt offline (the statement re-hashes to the
@@ -27,12 +33,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-/// The four MCP tools this adapter owns. Stable names an external agent binds to.
-const TOOL_NAMES: [&str; 4] = [
+/// The six MCP tools this adapter owns. Stable names an external agent binds to.
+const TOOL_NAMES: [&str; 6] = [
     "nerve_runs",
     "nerve_replay",
     "nerve_receipt",
     "nerve_verify",
+    "nerve_ledger",
+    "nerve_outcomes",
 ];
 
 /// Read-only MCP adapter exposing the trust-substrate's `nerve_*` tools to delegated
@@ -67,6 +75,21 @@ impl SubstrateToolAdapter {
                  own verdict. Returns {\"status\":\"verify_not_available\"} when no receipt \
                  exists — it never fabricates a verdict (court reporter, not judge).",
             ),
+            tool_spec::<LedgerArgs>(
+                "nerve_ledger",
+                "Audit the append-only L1 evidence ledger (read-only). Returns the matching \
+                 records (filter by run_id / run_root_hash lineage / record_kind / agent / \
+                 outcome / limit) AND the re-derived chain integrity \
+                 {ok, count, head_hash} | {ok:false, error, seq} — proving the transparency \
+                 log is untampered. It reports borrowed verdicts; it never fabricates one.",
+            ),
+            tool_spec::<OutcomesArgs>(
+                "nerve_outcomes",
+                "Read the L6 outcome corpus (read-only): the recorded outcome OBSERVATIONS \
+                 (merged/reverted/…) with a deterministic summary, calibration, and per-check \
+                 flaky_rates. Filter by agent / outcome / limit. These are observations, never \
+                 a verdict input; labeling an outcome stays human/CI-gated over the daemon.",
+            ),
         ]
     }
 
@@ -89,6 +112,8 @@ impl SubstrateToolAdapter {
             "nerve_replay" => handle_replay(parse::<ReplayArgs>(params)?.run_id, root),
             "nerve_receipt" => handle_receipt(parse::<ReceiptArgs>(params)?, root),
             "nerve_verify" => handle_verify(parse::<VerifyArgs>(params)?.run_id, root),
+            "nerve_ledger" => Ok(handle_ledger(parse::<LedgerArgs>(params)?, root)),
+            "nerve_outcomes" => handle_outcomes(parse::<OutcomesArgs>(params)?, root),
             other => Err(RuntimeError::adapter(format!(
                 "unknown substrate tool `{other}`"
             ))),
@@ -188,6 +213,79 @@ fn handle_verify(run_id: String, root: Option<&Path>) -> Result<Value, RuntimeEr
             defend against a forged receipt.",
         "receipt": receipt_value,
     }))
+}
+
+/// `nerve_ledger`: audit the append-only L1 evidence ledger (read-only). Returns BOTH the
+/// filtered records (same facets as the `ledger.query` protocol command, incl. the v13
+/// `run_root_hash` lineage facet) AND the re-derived chain integrity. No served root =>
+/// honest empty (`records: []`, an intact empty chain). INV-R1: the records carry borrowed
+/// verdicts; nothing here fabricates one.
+fn handle_ledger(args: LedgerArgs, root: Option<&Path>) -> Value {
+    // Reuse the daemon's own ledger store + pure query/verify folds (INV-R2: hashing stays
+    // in `nerve-core`). FAIL-CLOSED: with no served root the store is None (honest empty),
+    // never the global ledger — this MCP face only reads the served workspace.
+    let store = root.and_then(|root| crate::ledger_store::LedgerStore::for_scope(Some(root)).ok());
+    let outcome = args.outcome.as_deref().and_then(parse_verdict_status);
+    let query = crate::ledger_store::run_ledger_query(
+        store.as_ref(),
+        args.run_id.as_deref(),
+        args.agent.as_deref(),
+        args.diff_hash.as_deref(),
+        args.run_root_hash.as_deref(),
+        outcome,
+        args.record_kind.as_deref(),
+        args.limit.unwrap_or(200),
+    );
+    let chain = crate::ledger_store::run_ledger_verify(store.as_ref());
+    json!({
+        "records": query.get("records").cloned().unwrap_or(json!([])),
+        "chain": chain,
+    })
+}
+
+/// `nerve_outcomes`: read the L6 outcome corpus + its deterministic rollups (read-only).
+/// Dispatches the same [`handle_outcome_query`](crate::outcome_store::handle_outcome_query)
+/// the daemon uses, so the response carries `records` + `summary` + `calibration` +
+/// `flaky_rates`. READ-ONLY: the `outcome.label` write path is deliberately NOT exposed —
+/// labeling stays human/CI-gated over the daemon protocol. No served root => honest empty.
+fn handle_outcomes(args: OutcomesArgs, root: Option<&Path>) -> Result<Value, RuntimeError> {
+    let outcome = match args.outcome.as_deref() {
+        Some(raw) => Some(parse_outcome(raw)?),
+        None => None,
+    };
+    // FAIL-CLOSED: with no served root both stores are None (honest empty rollup), never
+    // the global corpus — this MCP face only reads the served workspace.
+    let store =
+        root.and_then(|root| crate::outcome_store::OutcomeStore::for_scope(Some(root)).ok());
+    let verify_store =
+        root.and_then(|root| crate::verify_store::VerifyStore::for_scope(Some(root)).ok());
+    Ok(crate::outcome_store::handle_outcome_query(
+        args.agent.as_deref(),
+        outcome,
+        args.limit.unwrap_or(200),
+        store.as_ref(),
+        verify_store.as_ref(),
+    ))
+}
+
+/// Map a wire `outcome` string to the internally-tagged [`Outcome`] enum (a plain string
+/// can't deserialize the `{"outcome": "..."}` tagged shape directly). Unknown => error.
+fn parse_outcome(raw: &str) -> Result<nerve_core::outcome::Outcome, RuntimeError> {
+    use nerve_core::outcome::Outcome;
+    match raw {
+        "merged" => Ok(Outcome::Merged),
+        "reverted" => Ok(Outcome::Reverted),
+        "incident" => Ok(Outcome::Incident),
+        "shipped_no_regress" => Ok(Outcome::ShippedNoRegress),
+        other => Err(RuntimeError::adapter(format!("unknown outcome `{other}`"))),
+    }
+}
+
+/// Map a wire `outcome` (verdict) string to a [`VerdictStatus`] for the ledger filter; an
+/// unrecognized value is silently dropped (the facet just doesn't narrow), keeping the
+/// read tolerant.
+fn parse_verdict_status(raw: &str) -> Option<nerve_core::verdict::VerdictStatus> {
+    serde_json::from_value(Value::String(raw.to_string())).ok()
 }
 
 /// Project a full captured-run value into the `nerve_runs` summary shape.
@@ -336,6 +434,47 @@ struct VerifyArgs {
     run_id: String,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LedgerArgs {
+    /// Filter to records about this run id.
+    #[serde(default)]
+    run_id: Option<String>,
+    /// Filter to a run's whole lineage by its content address (v13).
+    #[serde(default)]
+    run_root_hash: Option<String>,
+    /// Filter by the diff hash a record names.
+    #[serde(default)]
+    diff_hash: Option<String>,
+    /// Filter by the verdict outcome a record carries (`passed`/`failed`/…).
+    #[serde(default)]
+    outcome: Option<String>,
+    /// Filter by ledger record kind (`run_recorded`/`verdict`/`receipt_issued`/…).
+    #[serde(default)]
+    record_kind: Option<String>,
+    /// Filter by the agent named on a `RunRecorded` record.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Cap the number of (newest-first) records returned.
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OutcomesArgs {
+    /// Filter to outcomes recorded for this agent.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Filter to records carrying this outcome (`merged`/`reverted`/`incident`/
+    /// `shipped_no_regress`).
+    #[serde(default)]
+    outcome: Option<String>,
+    /// Cap the number of records folded into the rollups.
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,8 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn owns_only_the_four_nerve_tools() {
+    fn owns_only_the_six_nerve_tools() {
         let a = SubstrateToolAdapter;
+        assert_eq!(TOOL_NAMES.len(), 6);
         for name in TOOL_NAMES {
             assert!(a.owns(name), "{name}");
         }
@@ -388,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_specs_expose_the_four_named_tools_with_schemas() {
+    fn tool_specs_expose_the_six_named_tools_with_schemas() {
         let specs = SubstrateToolAdapter.tool_specs();
         let names: Vec<&str> = specs.iter().filter_map(|s| s["name"].as_str()).collect();
         assert_eq!(
@@ -397,7 +537,9 @@ mod tests {
                 "nerve_runs",
                 "nerve_replay",
                 "nerve_receipt",
-                "nerve_verify"
+                "nerve_verify",
+                "nerve_ledger",
+                "nerve_outcomes",
             ]
         );
         for spec in &specs {
@@ -512,5 +654,147 @@ mod tests {
             a.handle_tool_call("nerve_unknown", &json!({}), None)
                 .is_err()
         );
+    }
+
+    /// Seed a small L1 ledger under `<root>/.nerve/ledger`: a RunRecorded + a Verdict
+    /// pinned to its content address. Returns the run's `run_root_hash`.
+    fn seed_ledger(root: &Path) -> String {
+        use nerve_core::ledger::LedgerKind;
+        use nerve_core::verdict::VerdictStatus;
+        let store = crate::ledger_store::LedgerStore::for_scope(Some(root)).unwrap();
+        store
+            .append(LedgerKind::RunRecorded {
+                run_id: "run-0".into(),
+                run_root_hash: "root-0".into(),
+                agent: "claude".into(),
+                task_hash: "task-0".into(),
+                event_count: 2,
+            })
+            .unwrap();
+        store
+            .append(LedgerKind::Verdict {
+                run_id: "run-0".into(),
+                diff_hash: Some("da".into()),
+                verdict: VerdictStatus::Passed,
+                checks: vec![],
+                advisory_llm_judge: None,
+                run_root_hash: Some("root-0".into()),
+            })
+            .unwrap();
+        "root-0".into()
+    }
+
+    #[test]
+    fn ledger_returns_records_and_an_intact_chain() {
+        let dir = tempdir().unwrap();
+        let root_hash = seed_ledger(dir.path());
+        let a = SubstrateToolAdapter;
+
+        // Whole ledger: both records + an intact chain head.
+        let all = a
+            .handle_tool_call("nerve_ledger", &json!({}), Some(dir.path()))
+            .unwrap();
+        assert_eq!(all["records"].as_array().unwrap().len(), 2);
+        assert_eq!(all["chain"]["ok"], json!(true));
+        assert_eq!(all["chain"]["count"], json!(2));
+        assert!(all["chain"]["head_hash"].as_str().is_some());
+
+        // run_root_hash lineage facet selects exactly the run's two records.
+        let lineage = a
+            .handle_tool_call(
+                "nerve_ledger",
+                &json!({ "run_root_hash": root_hash }),
+                Some(dir.path()),
+            )
+            .unwrap();
+        assert_eq!(lineage["records"].as_array().unwrap().len(), 2);
+
+        // No served root => honest empty + an intact empty chain, never an error.
+        let none = a
+            .handle_tool_call("nerve_ledger", &json!({}), None)
+            .unwrap();
+        assert_eq!(none["records"].as_array().unwrap().len(), 0);
+        assert_eq!(none["chain"]["ok"], json!(true));
+        assert_eq!(none["chain"]["count"], json!(0));
+    }
+
+    #[test]
+    fn ledger_reports_the_tamper_class_on_a_corrupted_log() {
+        let dir = tempdir().unwrap();
+        seed_ledger(dir.path());
+        // Flip a byte in the first record's payload without rehashing => HashMismatch@0.
+        let log = dir.path().join(".nerve").join("ledger").join("log.ndjson");
+        let raw = fs::read_to_string(&log).unwrap();
+        fs::write(&log, raw.replacen("run-0", "run-X", 1)).unwrap();
+
+        let result = SubstrateToolAdapter
+            .handle_tool_call("nerve_ledger", &json!({}), Some(dir.path()))
+            .unwrap();
+        assert_eq!(result["chain"]["ok"], json!(false));
+        assert_eq!(result["chain"]["error"], json!("HashMismatch"));
+        assert_eq!(result["chain"]["seq"], json!(0));
+    }
+
+    /// Seed a small L6 outcome corpus under `<root>/.nerve/outcomes`.
+    fn seed_outcomes(root: &Path) {
+        use nerve_core::outcome::{LabelSource, Outcome};
+        let store = crate::outcome_store::OutcomeStore::for_scope(Some(root)).unwrap();
+        crate::outcome_store::handle_outcome_label(
+            "run-0",
+            Outcome::Merged,
+            LabelSource::Human,
+            None,
+            None,
+            None,
+            Some(&store),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn outcomes_returns_summary_and_flaky_rates_and_never_errors_when_empty() {
+        let dir = tempdir().unwrap();
+        seed_outcomes(dir.path());
+        let a = SubstrateToolAdapter;
+
+        let got = a
+            .handle_tool_call("nerve_outcomes", &json!({}), Some(dir.path()))
+            .unwrap();
+        assert_eq!(got["records"].as_array().unwrap().len(), 1);
+        assert!(got["summary"].is_object(), "summary attached");
+        assert!(got["flaky_rates"].is_array(), "flaky_rates attached");
+        // READ-ONLY: the response is a corpus read, never a label write surface.
+        assert!(got.get("labeled").is_none());
+
+        // Filter by outcome string maps to the tagged enum.
+        let merged = a
+            .handle_tool_call(
+                "nerve_outcomes",
+                &json!({ "outcome": "merged" }),
+                Some(dir.path()),
+            )
+            .unwrap();
+        assert_eq!(merged["records"].as_array().unwrap().len(), 1);
+
+        // An unknown outcome string is a clean error, not a panic.
+        assert!(
+            a.handle_tool_call(
+                "nerve_outcomes",
+                &json!({ "outcome": "not-a-thing" }),
+                Some(dir.path())
+            )
+            .is_err()
+        );
+
+        // Empty / no served root: still a well-formed empty rollup, never an error.
+        let empty = tempdir().unwrap();
+        let on_empty = a
+            .handle_tool_call("nerve_outcomes", &json!({}), Some(empty.path()))
+            .unwrap();
+        assert_eq!(on_empty["records"].as_array().unwrap().len(), 0);
+        let no_root = a
+            .handle_tool_call("nerve_outcomes", &json!({}), None)
+            .unwrap();
+        assert_eq!(no_root["records"].as_array().unwrap().len(), 0);
     }
 }

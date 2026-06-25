@@ -8,6 +8,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
+// v13 (trust-substrate L1 lineage-by-content-address read facet): one additive optional
+// filter field — `LedgerQuery.run_root_hash` — that makes wave-3's content-addressed
+// lineage DAG traversable over the protocol/CLI/MCP: select every ledger record about one
+// run by the run's content address (the `RunRecorded` whose `run_root_hash` this is, plus
+// the `Verdict`/`ReceiptIssued` records that pin back to it via their `run_root_hash`),
+// rather than by the mutable `run_id` string. `#[serde(default, skip_serializing_if =
+// "Option::is_none")]`, so an existing `ledger.query` without it deserializes to None and
+// re-serializes byte-identically — every other command/event and every prior ledger record
+// are UNPERTURBED, and a v12 client keeps working byte-for-byte.
 // v12 (trust-substrate L1 content-addressed lineage DAG): additive `Option` lineage
 // edge fields on two existing `LedgerKind` arms — `Verdict.run_root_hash` (verdict→run)
 // and `ReceiptIssued.{run_root_hash, verdict_id}` (receipt→run, receipt→verdict). Bound
@@ -68,7 +77,7 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
 // policy / receipt / outcome schema roots. Additive serde-tagged variants and new
 // schema-roots only — a v6 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "12";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "13";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";
