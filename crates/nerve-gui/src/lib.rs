@@ -1,7 +1,7 @@
 //! Nerve Leptos CSR frontend (G1b spike) — library modules.
 //!
 //! A client-side-rendered (NOT SSR) single-page app: the `nerve daemon` is the
-//! backend, reached **only** over HTTP `/rpc` (JSON-RPC Protocol v4) and
+//! backend, reached **only** over HTTP `/rpc` (JSON-RPC Protocol v7) and
 //! `/events` (SSE) — never Tauri IPC. It shares the engine's exact protocol
 //! types via [`nerve_proto`] so there is no hand-duplicated vocabulary and no
 //! TS/codegen drift.

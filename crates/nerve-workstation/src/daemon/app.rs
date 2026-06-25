@@ -1,7 +1,7 @@
 //! Serving for the Leptos WASM frontend (G1b) at `/app`.
 //!
 //! This is a *new transport surface for the existing protocol*, never a new
-//! protocol: the served bundle is a client of Protocol v4 that talks only to
+//! protocol: the served bundle is a client of Protocol v7 that talks only to
 //! `POST /rpc` + `GET /events`, exactly like the legacy `gui.html` at `/`. The
 //! legacy GUI stays at `/` unchanged; this module adds the `/app` family.
 //!
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn embedded_bundle_is_present_and_is_a_protocol_client() {
         // The committed dist must actually be embedded (non-empty) and the app
-        // must be a Protocol-v4 client: it loads the WASM glue and reads the
+        // must be a Protocol-v7 client: it loads the WASM glue and reads the
         // injected token global. (The /rpc call paths live in the .wasm.)
         assert!(APP_INDEX_HTML.contains("<!doctype html") || APP_INDEX_HTML.contains("<!DOCTYPE"));
         assert!(APP_INDEX_HTML.contains("nerve-gui.js"));
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn embedded_bundle_exposes_sticky_approval_decisions() {
         // The committed dist must stay in sync with the source approval modal:
-        // sticky allow/deny decisions are a Protocol-v4 UX feature, not TUI-only.
+        // sticky allow/deny decisions are a Protocol-v7 UX feature, not TUI-only.
         assert!(bytes_contain(APP_WASM, "Allow for session"));
         assert!(bytes_contain(APP_WASM, "Always deny"));
         assert!(bytes_contain(APP_WASM, "allow_always"));

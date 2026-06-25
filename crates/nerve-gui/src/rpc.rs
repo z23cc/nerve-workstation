@@ -1,4 +1,4 @@
-//! Protocol-v4 client plumbing for the WASM frontend: read the daemon bearer
+//! Protocol-v7 client plumbing for the WASM frontend: read the daemon bearer
 //! token the served page injected, and POST JSON-RPC requests to `/rpc`.
 //!
 //! The token is injected by the daemon the same way the legacy `gui.html` is

@@ -1,5 +1,5 @@
 //! Transport-neutral runtime-protocol vocabulary — the shared, wasm-safe data
-//! types that define the Nerve runtime protocol (Protocol v4).
+//! types that define the Nerve runtime protocol (Protocol v7).
 //!
 //! This crate is the **single protocol authority**: the `RuntimeCommand` /
 //! `RuntimeEvent` families, the declarative `flow.*` workflow types, the advisory
