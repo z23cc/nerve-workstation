@@ -220,6 +220,88 @@ fn permille(num: u64, den: u64) -> u64 {
     num.saturating_mul(1000).checked_div(den).unwrap_or(0)
 }
 
+/// Deterministic per-check **flaky-rate** calibration (L6; INV-R1/R3) — the design's
+/// headline "agent wrong vs. test flaky?" signal. A pure fold over a corpus of
+/// [`Verdict`](nerve_proto::Verdict)s: for every `(check_name, kind)` pair, it counts
+/// how many verdicts exercised it (`runs`), how many classed it
+/// [`CheckStatus::Flaky`](nerve_proto::CheckStatus) (`flaky_runs`) or
+/// [`CheckStatus::Fail`](nerve_proto::CheckStatus) (`fail_runs`), and the integer
+/// `flaky_permille`. The output is **deterministically ordered** by `(check_name,
+/// kind)` (no `HashMap` order leaks). No floats, no clock, no rng (INV-R2).
+///
+/// **Observational only — the result MUST NOT feed back into any verdict or gate**
+/// (INV-R1/R3): a flaky-rate is *derived from* verdicts, it never alters one. It is a
+/// signal a human reads to triage a noisy check.
+#[must_use]
+pub fn flaky_rates(verdicts: &[nerve_proto::Verdict]) -> Vec<nerve_proto::CheckFlakyRate> {
+    use nerve_proto::{CheckFlakyRate, CheckKind, CheckStatus};
+    // Tally by (name, kind); BTreeMap keeps the eventual Vec deterministically ordered.
+    let mut tallies: BTreeMap<(String, CheckKindKey), (u64, u64, u64)> = BTreeMap::new();
+    for verdict in verdicts {
+        for check in &verdict.checks {
+            let entry = tallies
+                .entry((check.name.clone(), CheckKindKey::from(check.kind)))
+                .or_insert((0, 0, 0));
+            entry.0 += 1; // runs
+            match check.status {
+                CheckStatus::Flaky => entry.1 += 1,
+                CheckStatus::Fail => entry.2 += 1,
+                CheckStatus::Pass | CheckStatus::Error => {}
+            }
+        }
+    }
+    tallies
+        .into_iter()
+        .map(|((check_name, kind), (runs, flaky_runs, fail_runs))| {
+            let kind: CheckKind = kind.into();
+            CheckFlakyRate {
+                check_name,
+                kind,
+                runs,
+                flaky_runs,
+                fail_runs,
+                flaky_permille: permille(flaky_runs, runs),
+            }
+        })
+        .collect()
+}
+
+/// An `Ord` proxy for [`CheckKind`](nerve_proto::CheckKind) (which is not `Ord`), so a
+/// `(check_name, kind)` group key sorts deterministically. The numeric rank mirrors the
+/// enum's declaration order and is internal-only (never serialized).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CheckKindKey(u8);
+
+impl From<nerve_proto::CheckKind> for CheckKindKey {
+    fn from(kind: nerve_proto::CheckKind) -> Self {
+        use nerve_proto::CheckKind as K;
+        Self(match kind {
+            K::Test => 0,
+            K::Typecheck => 1,
+            K::Build => 2,
+            K::Lint => 3,
+            K::Property => 4,
+            K::Mutation => 5,
+            K::Contamination => 6,
+        })
+    }
+}
+
+impl From<CheckKindKey> for nerve_proto::CheckKind {
+    fn from(key: CheckKindKey) -> Self {
+        use nerve_proto::CheckKind as K;
+        match key.0 {
+            0 => K::Test,
+            1 => K::Typecheck,
+            2 => K::Build,
+            3 => K::Lint,
+            4 => K::Property,
+            5 => K::Mutation,
+            _ => K::Contamination,
+        }
+    }
+}
+
 /// Calibrate an outcome corpus into advisory [`OutcomeCalibration`] statistics — a pure,
 /// deterministic fold (no IO, no wall-clock, no ML inference, no randomness; INV-R2).
 /// Unlabeled records are skipped (no signal). Per-agent slices are emitted in sorted
@@ -444,5 +526,81 @@ mod tests {
         assert_eq!(empty.labeled_runs, 0);
         assert_eq!(empty.ship_permille, 0);
         assert!(empty.by_agent.is_empty());
+    }
+
+    #[test]
+    fn flaky_rates_is_a_deterministic_advisory_fold() {
+        use nerve_proto::{CheckKind, CheckResult, CheckStatus, Verdict, VerdictStatus};
+
+        let check = |name: &str, status: CheckStatus| CheckResult {
+            name: name.into(),
+            kind: CheckKind::Test,
+            status,
+            reproducible: false,
+            exit_code: None,
+            timed_out: false,
+            duration_ms: 0,
+            output_hash: String::new(),
+            runs: 0,
+            passed: 0,
+        };
+        let verdict = |checks: Vec<CheckResult>| Verdict {
+            schema_version: 1,
+            verdict_id: String::new(),
+            run_id: "r".into(),
+            diff_hash: None,
+            status: VerdictStatus::Inconclusive,
+            checkspec_hash: String::new(),
+            closure_digest: String::new(),
+            checks,
+            verified_at_ms: 0,
+            verdict_hash: String::new(),
+        };
+
+        // "always-flaky" is Flaky in all three verdicts; "stable" is always Pass.
+        let corpus = vec![
+            verdict(vec![
+                check("always-flaky", CheckStatus::Flaky),
+                check("stable", CheckStatus::Pass),
+            ]),
+            verdict(vec![
+                check("always-flaky", CheckStatus::Flaky),
+                check("stable", CheckStatus::Pass),
+            ]),
+            verdict(vec![
+                check("always-flaky", CheckStatus::Flaky),
+                check("stable", CheckStatus::Pass),
+            ]),
+        ];
+        let rates = flaky_rates(&corpus);
+        // Deterministically ordered by (check_name, kind).
+        assert_eq!(rates.len(), 2);
+        assert_eq!(rates[0].check_name, "always-flaky");
+        assert_eq!(rates[0].runs, 3);
+        assert_eq!(rates[0].flaky_runs, 3);
+        assert_eq!(rates[0].fail_runs, 0);
+        assert_eq!(rates[0].flaky_permille, 1000); // 3/3
+        assert_eq!(rates[1].check_name, "stable");
+        assert_eq!(rates[1].runs, 3);
+        assert_eq!(rates[1].flaky_runs, 0);
+        assert_eq!(rates[1].flaky_permille, 0);
+
+        // A Fail is tallied into fail_runs, not flaky_runs.
+        let mixed = vec![
+            verdict(vec![check("x", CheckStatus::Flaky)]),
+            verdict(vec![check("x", CheckStatus::Fail)]),
+            verdict(vec![check("x", CheckStatus::Pass)]),
+            verdict(vec![check("x", CheckStatus::Error)]),
+        ];
+        let mixed_rates = flaky_rates(&mixed);
+        assert_eq!(mixed_rates.len(), 1);
+        assert_eq!(mixed_rates[0].runs, 4);
+        assert_eq!(mixed_rates[0].flaky_runs, 1);
+        assert_eq!(mixed_rates[0].fail_runs, 1);
+        assert_eq!(mixed_rates[0].flaky_permille, 250); // 1/4
+
+        // Pure + deterministic: same corpus -> identical result; empty -> empty.
+        assert_eq!(flaky_rates(&corpus), flaky_rates(&corpus));
+        assert!(flaky_rates(&[]).is_empty());
     }
 }

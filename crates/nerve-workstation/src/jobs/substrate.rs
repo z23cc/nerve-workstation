@@ -207,24 +207,32 @@ impl JobManager {
                 note,
                 verdict_ref,
             } => {
-                let (payload, run_id, labels_root, label_count) =
-                    crate::outcome_store::handle_outcome_label(
-                        &run_id,
-                        outcome,
-                        source,
-                        actor,
-                        note,
-                        verdict_ref,
-                        self.outcome_store().as_ref(),
-                    )?;
+                let labeled = crate::outcome_store::handle_outcome_label(
+                    &run_id,
+                    outcome,
+                    source,
+                    actor,
+                    note,
+                    verdict_ref,
+                    self.outcome_store().as_ref(),
+                )?;
+                // L6→L1: best-effort mirror this observation onto the evidence ledger
+                // (an observation, never a verdict input — INV-R1/R3/R4). A ledger
+                // failure must NOT fail the label turn.
+                self.record_outcome_on_ledger(
+                    &labeled.run_id,
+                    outcome,
+                    source,
+                    &labeled.label_hash,
+                );
                 self.emit(RuntimeEvent::OutcomeLabeled {
-                    run_id,
+                    run_id: labeled.run_id,
                     session_id: None,
                     outcome,
-                    labels_root,
-                    label_count,
+                    labels_root: labeled.labels_root,
+                    label_count: labeled.label_count,
                 });
-                Ok(payload)
+                Ok(labeled.payload)
             }
             RuntimeCommand::OutcomeGet { run_id } => {
                 crate::outcome_store::handle_outcome_get(&run_id, self.outcome_store().as_ref())
@@ -238,10 +246,36 @@ impl JobManager {
                 outcome,
                 limit.unwrap_or(200),
                 self.outcome_store().as_ref(),
+                self.verify_store().as_ref(),
             )),
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected outcome.* command",
             )),
+        }
+    }
+
+    /// L6→L1 — mirror a recorded outcome label onto the append-only evidence ledger as a
+    /// [`LedgerKind::OutcomeRecorded`](nerve_core::ledger::LedgerKind), then announce the
+    /// append. This is the "outcome label attaches to an L1 entry" linkage
+    /// (`trust-substrate.md` §8) — an OBSERVATION, never a verdict input (INV-R1/R3/R4).
+    /// Best-effort: a `None` store or any persistence failure is a silent no-op, so a
+    /// ledger problem never fails the `outcome.label` turn.
+    fn record_outcome_on_ledger(
+        &self,
+        run_id: &str,
+        outcome: nerve_core::outcome::Outcome,
+        source: nerve_core::outcome::LabelSource,
+        label_hash: &str,
+    ) {
+        let store = self.ledger_store();
+        let kind = nerve_core::ledger::LedgerKind::OutcomeRecorded {
+            run_id: run_id.to_string(),
+            outcome,
+            source,
+            label_hash: label_hash.to_string(),
+        };
+        if let Some(record) = crate::ledger_store::append_evidence(store.as_ref(), kind) {
+            self.emit_ledger_appended(&record);
         }
     }
 

@@ -315,6 +315,52 @@
       ],
       "type": "object"
     },
+    "CheckFlakyRate": {
+      "description": "The deterministic per-check **flaky-rate** signal (L6 calibration; advisory,\nobservational). Folded across a corpus of [`Verdict`]s, it answers the design's\nheadline \"agent wrong vs. test flaky?\" question for a `(check_name, kind)` pair:\nof the verdicts that exercised it, how many classed it [`CheckStatus::Flaky`] or\n[`CheckStatus::Fail`]. INV-R1/R3: this is an **observation a human reads, never an\ninput to a verdict or a gate** — a flaky-rate is *derived from* verdicts, it never\nalters one. `flaky_permille` is integer parts-per-thousand (`permille(flaky_runs,\nruns)`) — **no floats** — so the shape is byte-stable and derives `Eq`.",
+      "properties": {
+        "check_name": {
+          "description": "The human-facing check label (e.g. `\"cargo test\"`).",
+          "type": "string"
+        },
+        "fail_runs": {
+          "description": "Of those, how many classed the check [`CheckStatus::Fail`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "flaky_permille": {
+          "description": "Integer parts-per-thousand of [`Self::flaky_runs`] out of [`Self::runs`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "flaky_runs": {
+          "description": "Of those, how many classed the check [`CheckStatus::Flaky`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/CheckKind",
+          "description": "Which org-bar dimension this check exercises."
+        },
+        "runs": {
+          "description": "How many verdicts in the corpus exercised this `(check_name, kind)` pair.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "check_name",
+        "kind",
+        "runs",
+        "flaky_runs",
+        "fail_runs",
+        "flaky_permille"
+      ],
+      "type": "object"
+    },
     "CheckKind": {
       "description": "What kind of check a [`CheckResult`] reports — the org-bar dimension being\nre-verified. Serialized `snake_case` (`{\"kind\":\"test\"}`). `Copy` because it is a\nfieldless tag. The set is execution-grounded — only check classes the runner can\nactually drive today. Additive: new kinds may be appended.",
       "oneOf": [
@@ -1489,6 +1535,35 @@
             "inputs_hash",
             "policy_version",
             "verdict"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A human/CI/observation outcome label for a run was recorded (L6). Binds the\nrun, the observed outcome + its source, and the content hash of the label.\nINV-R1/R3/R4: an OBSERVATION, never a verdict input.",
+          "properties": {
+            "kind": {
+              "const": "outcome_recorded",
+              "type": "string"
+            },
+            "label_hash": {
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/Outcome"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/LabelSource"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "outcome",
+            "source",
+            "label_hash"
           ],
           "type": "object"
         }
@@ -6491,6 +6566,10 @@
     "approvalMode": {
       "$ref": "#/$defs/ApprovalMode"
     },
+    "checkFlakyRate": {
+      "$ref": "#/$defs/CheckFlakyRate",
+      "description": "L6 advisory per-check flaky-rate shape — surfaced on the `outcome.query`\nresponse as `flaky_rates` (a JSON field, not a typed wire param), so it is not\notherwise reachable from a command/event field. Observational only (INV-R1/R3)."
+    },
     "hostCapabilities": {
       "$ref": "#/$defs/HostCapabilities"
     },
@@ -6580,6 +6659,7 @@
     "runtimeEvent",
     "run",
     "verdict",
+    "checkFlakyRate",
     "ledgerRecord",
     "ledgerHead",
     "policyDoc",

@@ -8,6 +8,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
+// v11 (trust-substrate L6 calibration + L6→L1 linkage): two additive shapes. (1) The
+// `CheckFlakyRate` schema root — the deterministic per-check flaky-rate signal
+// (`permille(flaky_runs, runs)`, integer, no ML) — surfaced advisory on the
+// `outcome.query` response as `flaky_rates`. (2) An `OutcomeRecorded` `LedgerKind` arm
+// appended AFTER `ReceiptIssued` (byte-additive — existing variants unchanged), so a
+// recorded outcome label mirrors onto the L1 evidence ledger as an OBSERVATION (INV-R1/
+// R3/R4: never a verdict input). New schema-root + serde-tagged variant only; every
+// existing command/event and every prior ledger record serialize byte-for-byte as
+// before, so a v10 client keeps working.
 // v10 (trust-substrate L1 closure): additive read-only `ledger.verify` command —
 // re-derive the append-only evidence ledger via `nerve_core::ledger::verify_chain`
 // and report `{ ok, count, head_hash }` (intact) or `{ ok:false, error, seq }`
@@ -49,7 +58,7 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
 // policy / receipt / outcome schema roots. Additive serde-tagged variants and new
 // schema-roots only — a v6 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "10";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "11";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";
@@ -303,6 +312,10 @@ pub struct RuntimeProtocolSchema {
     /// wire command/event field, surfaced so the exported schema documents them for
     /// third-party (offline) re-verification of receipts/ledger/verdicts.
     pub verdict: crate::verdict::Verdict,
+    /// L6 advisory per-check flaky-rate shape — surfaced on the `outcome.query`
+    /// response as `flaky_rates` (a JSON field, not a typed wire param), so it is not
+    /// otherwise reachable from a command/event field. Observational only (INV-R1/R3).
+    pub check_flaky_rate: crate::verdict::CheckFlakyRate,
     pub ledger_record: crate::ledger::LedgerRecord,
     pub ledger_head: crate::ledger::LedgerHead,
     pub policy_doc: crate::policy::PolicyDoc,

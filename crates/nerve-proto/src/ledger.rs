@@ -29,6 +29,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::outcome::{LabelSource, Outcome};
 use crate::verdict::{CheckResult, VerdictStatus};
 
 /// On-disk + on-wire ledger schema version. Bumped only for additive,
@@ -125,6 +126,15 @@ pub enum LedgerKind {
         policy_version: String,
         verdict: VerdictStatus,
     },
+    /// A human/CI/observation outcome label for a run was recorded (L6). Binds the
+    /// run, the observed outcome + its source, and the content hash of the label.
+    /// INV-R1/R3/R4: an OBSERVATION, never a verdict input.
+    OutcomeRecorded {
+        run_id: String,
+        outcome: Outcome,
+        source: LabelSource,
+        label_hash: String,
+    },
 }
 
 /// One node on the append-only cross-run ledger: a monotonic logical sequence
@@ -163,6 +173,7 @@ pub struct LedgerHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outcome::{LabelSource, Outcome};
     use crate::verdict::{CheckKind, CheckResult, CheckStatus, VerdictStatus};
 
     fn sample_check() -> CheckResult {
@@ -245,11 +256,38 @@ mod tests {
                 },
                 "receipt_issued",
             ),
+            (
+                LedgerKind::OutcomeRecorded {
+                    run_id: "r".into(),
+                    outcome: Outcome::Merged,
+                    source: LabelSource::Human,
+                    label_hash: "lh".into(),
+                },
+                "outcome_recorded",
+            ),
         ];
         for (kind, tag) in cases {
             let value = serde_json::to_value(&kind).expect("kind json");
             assert_eq!(value["kind"], tag);
         }
+    }
+
+    #[test]
+    fn outcome_recorded_round_trips_and_reuses_outcome_types() {
+        let kind = LedgerKind::OutcomeRecorded {
+            run_id: "run-9".into(),
+            outcome: Outcome::Reverted,
+            source: LabelSource::Ci,
+            label_hash: "abc123".into(),
+        };
+        let value = serde_json::to_value(&kind).expect("outcome_recorded json");
+        assert_eq!(value["kind"], "outcome_recorded");
+        // The reused outcome/source enums keep their internally-tagged shape.
+        assert_eq!(value["outcome"]["outcome"], "reverted");
+        assert_eq!(value["source"]["source"], "ci");
+        assert_eq!(value["label_hash"], "abc123");
+        let back: LedgerKind = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, kind);
     }
 
     #[test]
