@@ -49,6 +49,13 @@ pub(crate) fn route_event(
         RuntimeEvent::DelegateProgress { job_id, text, .. } => {
             with_session(chats, &job_id, |c| append_assistant_text(c, &text));
         }
+        // The structured live delegate step (Wave 3) supplements that text tail with a
+        // per-tool row: reuse the same `apply_agent_event` fold (ToolStarted -> a tool
+        // card, ToolFinished -> its update) keyed by the delegate session/job id, just
+        // like `DelegateProgress` resolves its chat.
+        RuntimeEvent::DelegateAgent { job_id, event } => {
+            with_session(chats, &job_id, |c| apply_agent_event(event, c));
+        }
         RuntimeEvent::ApprovalRequested {
             session_id,
             request_id,

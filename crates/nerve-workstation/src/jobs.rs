@@ -1186,6 +1186,11 @@ impl JobManager {
             driver.close();
             return Err(nerve_runtime::RuntimeError::cancelled());
         }
+        // Wave 3: lift turn 1's structured tool calls into LIVE per-tool `DelegateAgent`
+        // rows so a client renders them alongside the (retained) `DelegateProgress`
+        // text tail — claude/codex on the live path index at seal, this surfaces the
+        // same lift on the wire as the turn finishes.
+        self.emit_delegate_tool_rows(job_id, resolved, &turn.raw_lines, 0);
         let session_id = driver.session_id().unwrap_or(job_id).to_string();
         // Persist the agent's OWN captured session/thread id (the resume key) now that
         // turn 1 has established it. Best-effort, keyed by the start-job id.
@@ -1317,6 +1322,12 @@ impl JobManager {
             })?;
         if token.is_cancelled() {
             return Err(nerve_runtime::RuntimeError::cancelled());
+        }
+        // Wave 3: lift this steer turn's structured tool calls into LIVE per-tool
+        // `DelegateAgent` rows (keyed by the session/job id), alongside the retained
+        // `DelegateProgress` text tail — symmetric with the start turn.
+        if let Ok(resolved) = DelegateAgent::from_name(agent) {
+            self.emit_delegate_tool_rows(session_id, resolved, &turn.raw_lines, 0);
         }
         // Steer turn finished; the session is idle again — signal it (keyed by the
         // session/job id) so a client can stop its turn spinner.
@@ -1507,11 +1518,12 @@ impl JobManager {
                     text: line.to_string(),
                 });
                 // L0 granularity: index the tools/commands/edits this line carries,
-                // in tape order right after its raw Output (gemini -> empty).
+                // in tape order right after its raw Output (gemini -> empty). Each
+                // lifted kind is ALSO emitted live as a structured `DelegateAgent`
+                // per-tool row (Wave 3) so a client renders it in real time, in
+                // order, alongside the retained `DelegateProgress` text tail.
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                    for kind in delegate_runtime::parse_tool_events(resolved, &value, 0) {
-                        writer.push(kind);
-                    }
+                    lift_tool_events_into_tape(resolved, &value, 0, &emit, &job, &mut writer);
                 }
                 if let Some(text) = parser.ingest(line) {
                     emit(RuntimeEvent::delegate_progress(
@@ -1654,8 +1666,66 @@ impl JobManager {
         }
     }
 
+    /// Wave 3: lift a turn's verbatim raw stream lines into LIVE structured
+    /// [`DelegateAgent`](RuntimeEvent::DelegateAgent) per-tool rows and emit them
+    /// keyed by `job_id` — the wire analogue of the persisted L0 tool index, so a
+    /// GUI/TUI renders per-tool rows instead of only the opaque `DelegateProgress`
+    /// text tail. Reuses the pure `tool_events.rs` lift (gemini / unknown agent →
+    /// no rows); `DelegateProgress` is unaffected (additive).
+    fn emit_delegate_tool_rows(
+        &self,
+        job_id: &str,
+        resolved: DelegateAgent,
+        raw_lines: &[String],
+        turn: u64,
+    ) {
+        for line in raw_lines {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                emit_tool_event_rows(resolved, &value, turn, &self.emit, job_id);
+            }
+        }
+    }
+
     fn emit(&self, event: RuntimeEvent) {
         (self.emit)(event);
+    }
+}
+
+/// Emit the LIVE structured `DelegateAgent` per-tool rows (Wave 3) for one parsed
+/// stream line: lift its tool calls (gemini / unknown agent → none) and emit each as
+/// a `delegate_agent` event keyed by `job_id`, alongside the retained
+/// `DelegateProgress` text tail. Flat (free function) so the streaming closures stay
+/// within the nesting budget.
+fn emit_tool_event_rows(
+    resolved: DelegateAgent,
+    value: &Value,
+    turn: u64,
+    emit: &Arc<EventEmitter>,
+    job_id: &str,
+) {
+    for kind in delegate_runtime::parse_tool_events(resolved, value, turn) {
+        if let Some(ae) = delegate_runtime::tool_event_to_agent_event(&kind) {
+            emit(RuntimeEvent::delegate_agent(job_id.to_string(), ae));
+        }
+    }
+}
+
+/// One-shot capture variant of [`emit_tool_event_rows`]: emit the LIVE rows AND push
+/// the lifted L0 [`EventKind`](nerve_core::provenance::EventKind)s into the run tape in
+/// tape order (right after their raw `Output`). Shares the lift with the live path.
+fn lift_tool_events_into_tape(
+    resolved: DelegateAgent,
+    value: &Value,
+    turn: u64,
+    emit: &Arc<EventEmitter>,
+    job_id: &str,
+    writer: &mut crate::run_store::RunWriter,
+) {
+    for kind in delegate_runtime::parse_tool_events(resolved, value, turn) {
+        if let Some(ae) = delegate_runtime::tool_event_to_agent_event(&kind) {
+            emit(RuntimeEvent::delegate_agent(job_id.to_string(), ae));
+        }
+        writer.push(kind);
     }
 }
 

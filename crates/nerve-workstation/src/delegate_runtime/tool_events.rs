@@ -21,6 +21,37 @@ use serde_json::Value;
 /// the raw `Output` lines.
 const MAX_TOOL_TITLE: usize = 200;
 
+/// Map a persisted L0 tool-lifecycle [`EventKind`] into the LIVE structured-delegate
+/// [`AgentEventKind`] (Wave 3): `ToolStarted` / `ToolFinished` carry over (so a GUI/TUI
+/// renders a per-tool row in real time), everything else returns `None` (the live
+/// stream supplements, never replaces, the `DelegateProgress` text tail). Pure (a
+/// function of the kind alone) and above the determinism boundary (INV-R2).
+pub(crate) fn tool_event_to_agent_event(kind: &EventKind) -> Option<nerve_runtime::AgentEventKind> {
+    match kind {
+        EventKind::ToolStarted {
+            tool,
+            title,
+            args_hash,
+            ..
+        } => Some(nerve_runtime::AgentEventKind::ToolStarted {
+            tool: tool.clone(),
+            arguments: Value::String(title.clone().unwrap_or_else(|| args_hash.clone())),
+        }),
+        EventKind::ToolFinished {
+            tool,
+            ok,
+            title,
+            output_hash,
+            ..
+        } => Some(nerve_runtime::AgentEventKind::ToolFinished {
+            tool: tool.clone(),
+            ok: *ok,
+            output: title.clone().unwrap_or_else(|| output_hash.clone()),
+        }),
+        _ => None,
+    }
+}
+
 /// Lift the structured tool calls an agent's stream line carries into L0
 /// tool-lifecycle [`EventKind`]s (`tool_started` / `tool_finished`), so a recorded
 /// Run indexes *which* tools ran / files were edited / commands executed — not just
@@ -277,6 +308,62 @@ mod tests {
                 ] if tool == "file_change" && p == "src/main.rs"
             ),
             "{events:?}"
+        );
+    }
+
+    #[test]
+    fn tool_event_maps_to_live_agent_event_and_others_drop() {
+        // ToolStarted -> AgentEventKind::ToolStarted, arguments = the title.
+        let started = EventKind::ToolStarted {
+            turn: 0,
+            tool: "Edit".into(),
+            title: Some("src/lib.rs".into()),
+            args_hash: "abc".into(),
+        };
+        assert_eq!(
+            tool_event_to_agent_event(&started),
+            Some(nerve_runtime::AgentEventKind::ToolStarted {
+                tool: "Edit".into(),
+                arguments: Value::String("src/lib.rs".into()),
+            })
+        );
+        // No title -> the args_hash stands in (so the row is never blank).
+        let no_title = EventKind::ToolStarted {
+            turn: 0,
+            tool: "Bash".into(),
+            title: None,
+            args_hash: "deadbeef".into(),
+        };
+        assert_eq!(
+            tool_event_to_agent_event(&no_title),
+            Some(nerve_runtime::AgentEventKind::ToolStarted {
+                tool: "Bash".into(),
+                arguments: Value::String("deadbeef".into()),
+            })
+        );
+        // ToolFinished carries ok + output (title, else output_hash).
+        let finished = EventKind::ToolFinished {
+            turn: 0,
+            tool: "Edit".into(),
+            ok: false,
+            title: None,
+            output_hash: "cafef00d".into(),
+        };
+        assert_eq!(
+            tool_event_to_agent_event(&finished),
+            Some(nerve_runtime::AgentEventKind::ToolFinished {
+                tool: "Edit".into(),
+                ok: false,
+                output: "cafef00d".into(),
+            })
+        );
+        // Non-tool kinds never lift to a live row.
+        assert_eq!(
+            tool_event_to_agent_event(&EventKind::Output {
+                turn: 0,
+                text: "x".into(),
+            }),
+            None
         );
     }
 

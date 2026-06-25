@@ -4032,6 +4032,27 @@
           "type": "object"
         },
         {
+          "description": "A structured, content-addressed step of a *delegated* (external-CLI) agent run —\nthe per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text\ntail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`\njob/node scoping); `event` reuses the in-process `AgentEventKind` shape\n(TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client\nrendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing\nit would be a breaking bump; agents whose tool structure we don't lift, e.g.\ngemini, keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/AgentEventKind"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "delegate_agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "job_id",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
           "description": "A delegated run's tape has been sealed and persisted to the `RunStore` —\nthe L0 flight-recorder \"run recorded\" announcement (`trust-substrate.md`\n§6). `root_hash` is the content address committing to the whole ordered\ntape (`\"\"` if empty); a client fetches the full [`crate::provenance::Run`]\nvia `run.get`. **Global/unscoped** ([`Self::session_id`] returns `None`, like\n[`Self::Auth`] / [`Self::Wechat`]): a sealed run is a fleet-wide ledger event,\nso it is broadcast to every connected client and a fleet flight-recorder\ndashboard catches EVERY recorded run — not only the session it watches. The\n`session_id` field still names the originating `delegate.start` session for\nattribution. Additive; the payload is intentionally tiny (ids + root hash +\ncount), never the whole tape.",
           "properties": {
             "event_count": {
@@ -4963,6 +4984,27 @@
             "job_id",
             "agent",
             "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A structured, content-addressed step of a *delegated* (external-CLI) agent run —\nthe per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text\ntail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`\njob/node scoping); `event` reuses the in-process `AgentEventKind` shape\n(TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client\nrendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing\nit would be a breaking bump; agents whose tool structure we don't lift, e.g.\ngemini, keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/AgentEventKind"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "delegate_agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "job_id",
+            "event"
           ],
           "type": "object"
         },

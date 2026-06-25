@@ -72,6 +72,11 @@ pub fn apply_event(state: &mut State, event: &RuntimeEvent) -> bool {
             true
         }
         RuntimeEvent::SessionAgent { event, .. } => apply_agent_event(state, event),
+        // The structured live delegate step (Wave 3) supplements the `DelegateProgress`
+        // text tail with a per-tool row: feed it through the same `apply_agent_event`
+        // path as `SessionAgent`/`FlowNodeAgent` so ToolStarted/ToolFinished render as
+        // tool rows, not an opaque text blob.
+        RuntimeEvent::DelegateAgent { event, .. } => apply_agent_event(state, event),
         RuntimeEvent::JobFailed { .. }
         | RuntimeEvent::JobCompleted { .. }
         | RuntimeEvent::JobCancelled { .. } => apply_terminal_job(state, event),

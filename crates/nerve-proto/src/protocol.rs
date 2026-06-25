@@ -8,6 +8,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
+// v9 (trust-substrate live delegate granularity): additive `delegate_agent` event —
+// the per-tool LIVE structured step of a delegated (external-CLI) run, reusing the
+// existing `AgentEventKind` payload so GUI/TUI render per-tool rows instead of only the
+// opaque `delegate_progress` text tail. A single appended serde-tagged event variant;
+// `delegate_progress` is RETAINED, so a v8 client (and every existing run_id) keeps
+// working byte-for-byte.
 // v8 (trust-substrate L0 granularity): additive `tool_started` / `tool_finished`
 // `EventKind`s on the run-capture tape — they index *which* tools an agent ran,
 // files it edited, and commands it executed (lifted from claude `tool_use` /
@@ -36,7 +42,7 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
 // policy / receipt / outcome schema roots. Additive serde-tagged variants and new
 // schema-roots only — a v6 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "8";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "9";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";

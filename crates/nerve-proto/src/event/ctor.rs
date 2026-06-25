@@ -67,6 +67,17 @@ impl RuntimeEvent {
         }
     }
 
+    /// Construct a structured live delegate step from its job id + reused
+    /// [`AgentEventKind`] payload. Job-scoped + broadcast, exactly like
+    /// [`Self::delegate_progress`] (see `session_id()`).
+    #[must_use]
+    pub fn delegate_agent(job_id: impl Into<String>, event: AgentEventKind) -> Self {
+        Self::DelegateAgent {
+            job_id: job_id.into(),
+            event,
+        }
+    }
+
     #[must_use]
     pub fn run_recorded(
         session_id: impl Into<String>,
@@ -336,6 +347,10 @@ impl RuntimeEvent {
             | Self::Agent { .. }
             | Self::ToolCallDelta { .. }
             | Self::DelegateProgress { .. }
+            // The structured live delegate step routes identically to its
+            // `DelegateProgress` text tail (job-carrying, broadcast) so live
+            // ordering/replay treat the per-tool row exactly like the text line.
+            | Self::DelegateAgent { .. }
             | Self::Auth { .. }
             // A sealed-run announcement is a fleet-wide ledger event, like `Auth` /
             // `Wechat`: returning `None` broadcasts it to every connected client so a
