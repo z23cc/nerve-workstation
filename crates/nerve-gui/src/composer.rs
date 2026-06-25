@@ -20,7 +20,7 @@ pub(crate) fn Composer(
     busy: Signal<bool>,
     send: Callback<()>,
     stop: Callback<()>,
-    reveal: Callback<()>,
+    pick: Callback<()>,
 ) -> impl IntoView {
     view! {
         <div class="composer-stack">
@@ -122,9 +122,9 @@ pub(crate) fn Composer(
                 </div>
             </div>
             <div class="context-pills">
-                <button type="button" class="ctx-pill ctx-pill-act" title="Reveal in Finder"
-                    aria-label=move || format!("Reveal workspace {} in Finder", workspace.get())
-                    on:click=move |_| reveal.run(())>"📁 "{move || workspace.get()}</button>
+                <button type="button" class="ctx-pill ctx-pill-act" title="Choose working directory"
+                    aria-label=move || format!("Choose working directory (current: {})", workspace.get())
+                    on:click=move |_| pick.run(())>"📁 "{move || workspace.get()}</button>
                 <span class="ctx-pill" aria-label=move || format!("Agent: {}", crate::data::agent_label(&agent.get()))>{move || format!("Agent: {}", crate::data::agent_label(&agent.get()))}</span>
                 <span class="ctx-pill" aria-label=move || format!("Git branch: {}", branch.get())>"⎇ "{move || branch.get()}</span>
             </div>

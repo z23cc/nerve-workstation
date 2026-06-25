@@ -346,6 +346,29 @@ pub fn App() -> impl IntoView {
         });
     });
 
+    // Choose a working directory from the composer's folder chip: open the native
+    // folder picker, register the chosen folder as a workspace, and switch to it so
+    // it becomes the active root (tool calls, delegate cwd, branch). Cancelling — or
+    // a host with no native dialogs — is a graceful no-op; the project rail's
+    // absolute-path input remains the manual fallback.
+    let pick_workspace = Callback::new(move |_| {
+        let Some(tok) = token.get_value() else { return };
+        leptos::task::spawn_local(async move {
+            let Ok(path) = crate::data::pick_host_folder(&tok, "Choose working directory").await
+            else {
+                return;
+            };
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                return;
+            }
+            let name = crate::project_rail::project_name_from_path(&path);
+            let list = crate::data::add_workspace(&tok, &name, &path).await;
+            workspaces.set(list);
+            workspace.set(name);
+        });
+    });
+
     let draft_review = Callback::new(move |prompt: String| {
         mode.set("chat");
         input.set(prompt);
@@ -408,7 +431,7 @@ pub fn App() -> impl IntoView {
                 busy=Signal::derive(active_busy)
                 send=send_message
                 stop=stop_turn
-                reveal=reveal_workspace
+                pick=pick_workspace
             />
         }
     };

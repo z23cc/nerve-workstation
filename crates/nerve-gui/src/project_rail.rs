@@ -219,7 +219,7 @@ fn add_project(
     });
 }
 
-fn project_name_from_path(path: &str) -> String {
+pub(crate) fn project_name_from_path(path: &str) -> String {
     let trimmed = path.trim_end_matches(['/', '\\']);
     let source = if trimmed.is_empty() { path } else { trimmed };
     source
