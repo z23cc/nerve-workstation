@@ -769,7 +769,16 @@ mod tests {
         let receipt = outcome.receipt.expect("a receipt was issued + reloaded");
 
         // ledger.query for this run returns both, newest-first (ReceiptIssued, Verdict).
-        let result = run_ledger_query(Some(&ledger), Some(&run_id), None, None, None, None, 200);
+        let result = run_ledger_query(
+            Some(&ledger),
+            Some(&run_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            200,
+        );
         let records = result["records"].as_array().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(

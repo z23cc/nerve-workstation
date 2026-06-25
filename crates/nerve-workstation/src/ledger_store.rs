@@ -120,12 +120,20 @@ pub(crate) fn append_evidence(
 /// Resolve a `ledger.query`: filter [`LedgerStore::read_all`] by the optional facets
 /// and return `{"records":[...]}` (newest-matching first, capped at `limit`). A `None`
 /// store yields an empty list. The `outcome` facet matches a [`VerdictStatus`] against
-/// `Verdict`/`ReceiptIssued` records; `record_kind` matches the serde `kind` tag.
+/// `Verdict`/`ReceiptIssued` records; `record_kind` matches the serde `kind` tag; the
+/// `run_root_hash` facet matches a run's content address against the records that carry it
+/// (`RunRecorded`, and the post-wave-3 `Verdict`/`ReceiptIssued` lineage edges), so a run's
+/// whole lineage is selectable by content address (v13).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one fn per optional ledger.query facet"
+)]
 pub(crate) fn run_ledger_query(
     store: Option<&LedgerStore>,
     run_id: Option<&str>,
     agent: Option<&str>,
     diff_hash: Option<&str>,
+    run_root_hash: Option<&str>,
     outcome: Option<VerdictStatus>,
     record_kind: Option<&str>,
     limit: u64,
@@ -134,7 +142,17 @@ pub(crate) fn run_ledger_query(
     let records: Vec<Value> = all
         .into_iter()
         .rev()
-        .filter(|r| matches_filters(r, run_id, agent, diff_hash, outcome, record_kind))
+        .filter(|r| {
+            matches_filters(
+                r,
+                run_id,
+                agent,
+                diff_hash,
+                run_root_hash,
+                outcome,
+                record_kind,
+            )
+        })
         .take(usize::try_from(limit).unwrap_or(usize::MAX))
         .map(|r| serde_json::to_value(&r).unwrap_or(Value::Null))
         .collect();
@@ -176,11 +194,16 @@ pub(crate) fn verify_error_class(
 }
 
 /// Whether one record passes every supplied facet (an unset facet always matches).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one arg per optional ledger.query facet"
+)]
 fn matches_filters(
     record: &LedgerRecord,
     run_id: Option<&str>,
     agent: Option<&str>,
     diff_hash: Option<&str>,
+    run_root_hash: Option<&str>,
     outcome: Option<VerdictStatus>,
     record_kind: Option<&str>,
 ) -> bool {
@@ -196,6 +219,11 @@ fn matches_filters(
     }
     if let Some(want) = diff_hash
         && kind_diff_hash(&record.kind) != Some(want)
+    {
+        return false;
+    }
+    if let Some(want) = run_root_hash
+        && kind_run_root_hash(&record.kind) != Some(want)
     {
         return false;
     }
@@ -251,6 +279,19 @@ fn kind_diff_hash(kind: &LedgerKind) -> Option<&str> {
     match kind {
         LedgerKind::DiffRecorded { diff_hash, .. } => Some(diff_hash.as_str()),
         LedgerKind::Verdict { diff_hash, .. } => diff_hash.as_deref(),
+        _ => None,
+    }
+}
+
+/// The run **content address** (`run_root_hash`) a record carries, when any. Every
+/// `RunRecorded` carries one; the post-wave-3 `Verdict`/`ReceiptIssued` lineage edges
+/// carry an optional one (the verdict→run / receipt→run pin). This is what makes a run's
+/// whole lineage selectable by content address (v13), independent of the mutable `run_id`.
+fn kind_run_root_hash(kind: &LedgerKind) -> Option<&str> {
+    match kind {
+        LedgerKind::RunRecorded { run_root_hash, .. } => Some(run_root_hash.as_str()),
+        LedgerKind::Verdict { run_root_hash, .. }
+        | LedgerKind::ReceiptIssued { run_root_hash, .. } => run_root_hash.as_deref(),
         _ => None,
     }
 }
@@ -447,22 +488,50 @@ mod tests {
             .unwrap();
 
         // by run_id
-        let by_run = run_ledger_query(Some(&store), Some("run-0"), None, None, None, None, 200);
+        let by_run = run_ledger_query(
+            Some(&store),
+            Some("run-0"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            200,
+        );
         assert_eq!(by_run["records"].as_array().unwrap().len(), 3);
 
         // by agent (only RunRecorded carry one)
-        let by_agent = run_ledger_query(Some(&store), None, Some("claude"), None, None, None, 200);
+        let by_agent = run_ledger_query(
+            Some(&store),
+            None,
+            Some("claude"),
+            None,
+            None,
+            None,
+            None,
+            200,
+        );
         let agent_recs = by_agent["records"].as_array().unwrap();
         assert_eq!(agent_recs.len(), 1);
         assert_eq!(agent_recs[0]["kind"]["run_id"], json!("run-1"));
 
         // by diff_hash (DiffRecorded + Verdict)
-        let by_diff = run_ledger_query(Some(&store), None, None, Some("deadbeef"), None, None, 200);
+        let by_diff = run_ledger_query(
+            Some(&store),
+            None,
+            None,
+            Some("deadbeef"),
+            None,
+            None,
+            None,
+            200,
+        );
         assert_eq!(by_diff["records"].as_array().unwrap().len(), 2);
 
         // by outcome (Verdict)
         let by_outcome = run_ledger_query(
             Some(&store),
+            None,
             None,
             None,
             None,
@@ -479,16 +548,99 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("run_recorded"),
             200,
         );
         assert_eq!(by_kind["records"].as_array().unwrap().len(), 2);
 
         // newest-matching first + limit
-        let limited = run_ledger_query(Some(&store), None, None, None, None, None, 1);
+        let limited = run_ledger_query(Some(&store), None, None, None, None, None, None, 1);
         let limited_recs = limited["records"].as_array().unwrap();
         assert_eq!(limited_recs.len(), 1);
         assert_eq!(limited_recs[0]["kind"]["kind"], json!("verdict"));
+    }
+
+    /// v13: a `run_root_hash` filter selects a run's WHOLE lineage by content address —
+    /// the `RunRecorded` whose hash it is, plus the `Verdict`/`ReceiptIssued` records that
+    /// pin back to it — across two interleaved runs sharing the same `run_id` space.
+    #[test]
+    fn query_filters_by_run_root_hash_lineage() {
+        let dir = tempdir().unwrap();
+        let store = LedgerStore::new(dir.path().join("ledger"));
+        // run-A: RunRecorded (root "root-a") + a Verdict + a ReceiptIssued pinned to it.
+        store
+            .append(LedgerKind::RunRecorded {
+                run_id: "run-a".into(),
+                run_root_hash: "root-a".into(),
+                agent: "claude".into(),
+                task_hash: "task-a".into(),
+                event_count: 3,
+            })
+            .unwrap();
+        store
+            .append(LedgerKind::Verdict {
+                run_id: "run-a".into(),
+                diff_hash: Some("da".into()),
+                verdict: VerdictStatus::Passed,
+                checks: vec![],
+                advisory_llm_judge: None,
+                run_root_hash: Some("root-a".into()),
+            })
+            .unwrap();
+        store
+            .append(LedgerKind::ReceiptIssued {
+                run_id: "run-a".into(),
+                receipt_id: "rc-a".into(),
+                inputs_hash: "ih".into(),
+                policy_version: "v1".into(),
+                verdict: VerdictStatus::Passed,
+                run_root_hash: Some("root-a".into()),
+                verdict_id: Some("vd-a".into()),
+            })
+            .unwrap();
+        // A second run with a DIFFERENT content address — must not leak in.
+        store
+            .append(LedgerKind::RunRecorded {
+                run_id: "run-b".into(),
+                run_root_hash: "root-b".into(),
+                agent: "codex".into(),
+                task_hash: "task-b".into(),
+                event_count: 1,
+            })
+            .unwrap();
+
+        let lineage = run_ledger_query(
+            Some(&store),
+            None,
+            None,
+            None,
+            Some("root-a"),
+            None,
+            None,
+            200,
+        );
+        let recs = lineage["records"].as_array().unwrap();
+        assert_eq!(
+            recs.len(),
+            3,
+            "RunRecorded + Verdict + ReceiptIssued for root-a"
+        );
+        for rec in recs {
+            assert_eq!(rec["kind"]["run_root_hash"], json!("root-a"));
+        }
+        // The other run's record is excluded.
+        let other = run_ledger_query(
+            Some(&store),
+            None,
+            None,
+            None,
+            Some("root-b"),
+            None,
+            None,
+            200,
+        );
+        assert_eq!(other["records"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -517,6 +669,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("outcome_recorded"),
             200,
         );
@@ -524,7 +677,16 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0]["kind"]["kind"], json!("outcome_recorded"));
         assert_eq!(recs[0]["kind"]["label_hash"], json!("lh-abc"));
-        let by_run = run_ledger_query(Some(&store), Some("run-0"), None, None, None, None, 200);
+        let by_run = run_ledger_query(
+            Some(&store),
+            Some("run-0"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            200,
+        );
         assert_eq!(by_run["records"].as_array().unwrap().len(), 2);
 
         // ledger.verify still reports the chain intact after the additive append.
@@ -577,7 +739,7 @@ mod tests {
 
     #[test]
     fn query_none_store_is_empty() {
-        let result = run_ledger_query(None, None, None, None, None, None, 200);
+        let result = run_ledger_query(None, None, None, None, None, None, None, 200);
         assert_eq!(result["records"].as_array().unwrap().len(), 0);
     }
 

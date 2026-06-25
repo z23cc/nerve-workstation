@@ -308,7 +308,8 @@ pub enum RuntimeCommand {
     #[serde(rename = "replay.start")]
     ReplayStart { run_id: String },
     /// L1 — query the append-only cross-run evidence ledger (read-only). Optional
-    /// filters narrow by run / agent / diff / verdict outcome / record kind.
+    /// filters narrow by run / agent / diff / run-root-hash lineage / verdict outcome /
+    /// record kind.
     #[serde(rename = "ledger.query")]
     LedgerQuery {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,6 +318,11 @@ pub enum RuntimeCommand {
         agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff_hash: Option<String>,
+        /// Filter to the lineage of one run by its content address (`run_root_hash`):
+        /// matches the `RunRecorded` whose hash this is, plus the post-wave-3
+        /// `Verdict`/`ReceiptIssued` records that pin back to it (v13).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_root_hash: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<VerdictStatus>,
         // NOT `kind`: that field name collides with the enum's internal `tag = "kind"`

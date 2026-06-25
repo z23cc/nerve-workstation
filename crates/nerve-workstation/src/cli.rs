@@ -55,6 +55,9 @@ enum LedgerCommand {
     /// Re-derive the evidence ledger's hash chain and report whether it is intact
     /// (read-only; exit 0 intact, non-zero on a detected tamper).
     Verify(commands::ledger::LedgerVerifyArgs),
+    /// Read the append-only evidence ledger offline, optionally filtered by run /
+    /// run-root-hash lineage / record kind / agent (read-only; exit 0).
+    Query(commands::ledger::LedgerQueryArgs),
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +128,12 @@ pub(crate) fn run() -> Result<()> {
                 let code = commands::ledger::verify(verify_args)?;
                 std::process::exit(code)
             }
+            // `ledger query` is a read-only audit surface; it always exits 0 (a query
+            // that matches nothing is still a successful read).
+            LedgerCommand::Query(query_args) => {
+                let code = commands::ledger::query(query_args)?;
+                std::process::exit(code)
+            }
         },
         CommandKind::Flow(args) => match args.command {
             FlowCommand::Run(flow_args) => commands::flow::run(flow_args),
@@ -163,6 +172,30 @@ mod tests {
         let with_flags =
             Cli::try_parse_from(["nerve", "ledger", "verify", "--root", ".", "--json"])
                 .expect("ledger verify flags parse");
+        assert!(matches!(with_flags.command, CommandKind::Ledger(_)));
+    }
+
+    #[test]
+    fn cli_parses_ledger_query() {
+        let bare = Cli::try_parse_from(["nerve", "ledger", "query"]).expect("ledger query parse");
+        assert!(matches!(bare.command, CommandKind::Ledger(_)));
+        let with_flags = Cli::try_parse_from([
+            "nerve",
+            "ledger",
+            "query",
+            "--root",
+            ".",
+            "--run-root-hash",
+            "root-abc",
+            "--record-kind",
+            "verdict",
+            "--agent",
+            "claude",
+            "--limit",
+            "10",
+            "--json",
+        ])
+        .expect("ledger query flags parse");
         assert!(matches!(with_flags.command, CommandKind::Ledger(_)));
     }
 
