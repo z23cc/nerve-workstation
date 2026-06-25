@@ -2740,6 +2740,13 @@
             },
             "task": {
               "type": "string"
+            },
+            "workspace": {
+              "description": "The workspace whose root confines this delegated run (`cwd` resolves under\nthat root). Resolves the sole workspace when omitted, but is REQUIRED once\nmore than one workspace is registered — otherwise resolution is ambiguous\nand the start fails. Mirrors `SessionStart`'s `workspace`.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [

@@ -306,6 +306,7 @@ pub fn App() -> impl IntoView {
                     autonomy: &au,
                     model: &md,
                     root: &root,
+                    workspace: &ws_name,
                 })
                 .await
             };

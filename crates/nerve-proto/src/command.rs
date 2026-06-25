@@ -235,6 +235,12 @@ pub enum RuntimeCommand {
     DelegateStart {
         agent: String,
         task: String,
+        /// The workspace whose root confines this delegated run (`cwd` resolves under
+        /// that root). Resolves the sole workspace when omitted, but is REQUIRED once
+        /// more than one workspace is registered — otherwise resolution is ambiguous
+        /// and the start fails. Mirrors `SessionStart`'s `workspace`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
         #[serde(default)]
@@ -709,6 +715,7 @@ mod tests {
             RuntimeCommand::DelegateStart {
                 agent,
                 task,
+                workspace,
                 cwd,
                 autonomy,
                 role,
@@ -717,6 +724,7 @@ mod tests {
             } => {
                 assert_eq!(agent, "codex");
                 assert_eq!(task, "add a test");
+                assert_eq!(workspace, None);
                 assert_eq!(cwd, None);
                 assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
                 assert_eq!(role, DelegateRole::Standard);
@@ -750,6 +758,7 @@ mod tests {
         let with = RuntimeCommand::DelegateStart {
             agent: "codex".into(),
             task: "t".into(),
+            workspace: None,
             cwd: None,
             autonomy: DelegateAutonomy::ReadOnly,
             role: DelegateRole::Standard,
@@ -761,6 +770,7 @@ mod tests {
         let without = RuntimeCommand::DelegateStart {
             agent: "codex".into(),
             task: "t".into(),
+            workspace: None,
             cwd: None,
             autonomy: DelegateAutonomy::ReadOnly,
             role: DelegateRole::Standard,

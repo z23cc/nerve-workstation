@@ -93,6 +93,9 @@ fn delegate_start_command(agent: String, task: String, role: DelegateRole) -> Ru
     RuntimeCommand::DelegateStart {
         agent,
         task,
+        // The TUI drives the daemon's single served workspace; the sole workspace
+        // resolves without an explicit name.
+        workspace: None,
         cwd: None,
         autonomy: DelegateAutonomy::ReadOnly,
         role,
@@ -177,6 +180,7 @@ mod tests {
             RuntimeCommand::DelegateStart {
                 agent,
                 task,
+                workspace,
                 cwd,
                 autonomy,
                 role,
@@ -185,6 +189,7 @@ mod tests {
             } => {
                 assert_eq!(agent, "claude");
                 assert_eq!(task, "fix the bug");
+                assert_eq!(workspace, None);
                 assert_eq!(cwd, None);
                 assert_eq!(autonomy, DelegateAutonomy::ReadOnly);
                 assert_eq!(role, DelegateRole::Standard);

@@ -30,6 +30,9 @@ fn start_command(agent: &str, task: &str, autonomy: DelegateAutonomy) -> Runtime
     RuntimeCommand::DelegateStart {
         agent: agent.to_string(),
         task: task.to_string(),
+        // The WeChat bridge serves a single workspace (the daemon's --root); the sole
+        // workspace resolves without an explicit name.
+        workspace: None,
         cwd: None,
         autonomy,
         role: DelegateRole::Standard,

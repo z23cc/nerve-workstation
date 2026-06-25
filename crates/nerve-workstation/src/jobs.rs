@@ -470,13 +470,14 @@ impl JobManager {
             RuntimeCommand::DelegateStart {
                 agent,
                 task,
+                workspace,
                 cwd,
                 autonomy,
                 role,
                 model,
                 mcp_enable,
             } => self.run_delegate_start(
-                job_id, &agent, &task, cwd, autonomy, role, model, mcp_enable, token,
+                job_id, &agent, &task, workspace, cwd, autonomy, role, model, mcp_enable, token,
             ),
             RuntimeCommand::DelegateSteer {
                 session_id,
@@ -1084,6 +1085,7 @@ impl JobManager {
         job_id: &str,
         agent: &str,
         task: &str,
+        workspace: Option<String>,
         cwd: Option<String>,
         autonomy: DelegateAutonomy,
         role: DelegateRole,
@@ -1097,7 +1099,9 @@ impl JobManager {
         let task = task.as_str();
         let resolved = DelegateAgent::from_name(agent)
             .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
-        let root = self.delegate_root()?;
+        // Confine to the ACTIVE workspace's root (the GUI passes which one); only when
+        // no workspace is given does this fall back to the sole/default workspace.
+        let root = self.served_root(workspace.as_deref())?;
         let run_cwd = delegate_runtime::resolve_delegate_cwd(&root, cwd.as_deref())
             .map_err(delegate_error)?;
         // L3↔L1: commit the authorization posture to the evidence ledger once the request
@@ -1423,10 +1427,18 @@ impl JobManager {
 
     /// Resolve the workspace root a delegated run is confined to (the default
     /// workspace's first root). Delegation needs a concrete root to confine `cwd`.
-    fn delegate_root(&self) -> Result<std::path::PathBuf, nerve_runtime::RuntimeError> {
+    /// Resolve the served root for a specific `workspace` (the ACTIVE one for a delegated
+    /// run), falling back to the sole/default workspace when `None`. Errors when the
+    /// resolved workspace has no root, or when the choice is ambiguous (more than one
+    /// workspace registered and none specified) — the case the GUI hits after adding a
+    /// project, which is why delegation must pass the active workspace.
+    fn served_root(
+        &self,
+        workspace: Option<&str>,
+    ) -> Result<std::path::PathBuf, nerve_runtime::RuntimeError> {
         self.runtime
             .resolver()
-            .resolve_workspace(None)
+            .resolve_workspace(workspace)
             .ok()
             .and_then(|workspace| workspace.roots().first().map(|root| root.path.clone()))
             .ok_or_else(|| {
@@ -1434,6 +1446,12 @@ impl JobManager {
                     "delegation requires a served workspace root (start the daemon with --root)",
                 )
             })
+    }
+
+    /// The served root for the sole/default workspace — the scope the trust-substrate
+    /// stores (run/ledger/verdict/receipt/outcome) resolve their `.nerve/` dir against.
+    fn delegate_root(&self) -> Result<std::path::PathBuf, nerve_runtime::RuntimeError> {
+        self.served_root(None)
     }
 
     /// Reveal a served workspace root in the OS file manager (`workspace.reveal`).

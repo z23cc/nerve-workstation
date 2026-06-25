@@ -144,6 +144,9 @@ pub(crate) struct DelegateTurn<'a> {
     pub(crate) autonomy: &'a str,
     pub(crate) model: &'a str,
     pub(crate) root: &'a str,
+    /// The active workspace name, routed to `delegate.start` so the daemon confines
+    /// the run to that workspace's root (needed once more than one is registered).
+    pub(crate) workspace: &'a str,
 }
 
 pub(crate) async fn send_delegate_turn(turn: DelegateTurn<'_>) -> Result<(), String> {
@@ -154,6 +157,7 @@ pub(crate) async fn send_delegate_turn(turn: DelegateTurn<'_>) -> Result<(), Str
         turn.autonomy,
         turn.model,
         turn.root,
+        turn.workspace,
     );
     start_job_with_id(turn.token, turn.turn_id, cmd)
         .await
@@ -167,6 +171,7 @@ fn delegate_command(
     autonomy: &str,
     model: &str,
     root: &str,
+    workspace: &str,
 ) -> serde_json::Value {
     match existing {
         Some(session_id) => json!({
@@ -181,6 +186,11 @@ fn delegate_command(
                 "task": text,
                 "autonomy": autonomy,
             });
+            // Route to the ACTIVE workspace's root (REQUIRED once more than one is
+            // registered, e.g. after adding a project — else the daemon can't pick one).
+            if !workspace.is_empty() {
+                cmd["workspace"] = json!(workspace);
+            }
             if !model.is_empty() {
                 cmd["model"] = json!(model);
             }
