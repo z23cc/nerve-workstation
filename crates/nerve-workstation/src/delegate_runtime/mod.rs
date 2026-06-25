@@ -36,7 +36,7 @@
 //! granted only when the caller passes the explicit `autonomy` arg.
 
 mod tool_events;
-pub(crate) use tool_events::parse_tool_events;
+pub(crate) use tool_events::{parse_tool_events, tool_event_to_agent_event};
 
 use crate::sandbox::{CommandSpec, NetPolicy, SandboxPolicy};
 use nerve_runtime::DelegateAutonomy;

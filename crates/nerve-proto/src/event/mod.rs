@@ -111,6 +111,18 @@ pub enum RuntimeEvent {
         agent: String,
         text: String,
     },
+    /// A structured, content-addressed step of a *delegated* (external-CLI) agent run —
+    /// the per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text
+    /// tail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`
+    /// job/node scoping); `event` reuses the in-process `AgentEventKind` shape
+    /// (TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client
+    /// rendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing
+    /// it would be a breaking bump; agents whose tool structure we don't lift, e.g.
+    /// gemini, keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.
+    DelegateAgent {
+        job_id: String,
+        event: AgentEventKind,
+    },
     /// A delegated run's tape has been sealed and persisted to the `RunStore` —
     /// the L0 flight-recorder "run recorded" announcement (`trust-substrate.md`
     /// §6). `root_hash` is the content address committing to the whole ordered
@@ -697,6 +709,33 @@ mod tests {
         assert_eq!(event.session_id(), None);
         let back: RuntimeEvent = serde_json::from_value(value).expect("round-trip");
         assert_eq!(back, event);
+    }
+
+    #[test]
+    fn delegate_agent_round_trips_and_routes_like_delegate_progress() {
+        // The structured live delegate step reuses AgentEventKind verbatim and
+        // serializes round-trip.
+        let event = RuntimeEvent::delegate_agent(
+            "job-9",
+            AgentEventKind::ToolStarted {
+                tool: "Edit".into(),
+                arguments: serde_json::Value::String("src/lib.rs".into()),
+            },
+        );
+        let value = serde_json::to_value(&event).expect("delegate_agent json");
+        assert_eq!(value["type"], "delegate_agent");
+        assert_eq!(value["job_id"], "job-9");
+        assert_eq!(value["event"]["kind"], "tool_started");
+        assert_eq!(value["event"]["tool"], "Edit");
+        let back: RuntimeEvent = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, event);
+
+        // It routes exactly like its DelegateProgress text tail: job-carrying +
+        // broadcast (session_id() -> None), so live ordering/replay treat the
+        // per-tool row identically to the text line.
+        let progress = RuntimeEvent::delegate_progress("job-9", "claude", "x");
+        assert_eq!(event.session_id(), None);
+        assert_eq!(event.session_id(), progress.session_id());
     }
 
     #[test]

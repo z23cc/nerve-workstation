@@ -911,3 +911,142 @@ fn close_and_assert_result(
         "result `{result}` lacks `{needle}`"
     );
 }
+
+/// A fake claude that, on turn 1, streams a structured `tool_use` (an `Edit` of
+/// `src/lib.rs`) and its matching `tool_result` before the assistant text + result.
+/// This is the stream shape Wave 3 lifts into LIVE `delegate_agent` per-tool rows.
+const FAKE_CLAUDE_TOOL: &str = r#"#!/bin/sh
+printf '{"type":"system","subtype":"init","session_id":"tool-sess-1"}\n'
+while IFS= read -r line; do
+  msg=$(printf '%s' "$line" | sed 's/.*"text":"\([^"]*\)".*/\1/')
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Edit","input":{"file_path":"src/lib.rs","old_string":"a","new_string":"b"}}]}}\n'
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"edited","is_error":false}]}}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"done %s"}]}}\n' "$msg"
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"reply to %s","session_id":"tool-sess-1","num_turns":1,"total_cost_usd":0.001,"usage":{"input_tokens":5,"output_tokens":3}}\n' "$msg"
+done
+"#;
+
+/// A launcher that spawns [`FAKE_CLAUDE_TOOL`] on the persistent path.
+struct FakeClaudeToolLauncher {
+    _dir: tempfile::TempDir,
+    script: std::path::PathBuf,
+}
+
+impl FakeClaudeToolLauncher {
+    fn new() -> Arc<Self> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-claude-tool.sh");
+        std::fs::write(&script, FAKE_CLAUDE_TOOL).expect("write fake claude tool");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake claude tool");
+        Arc::new(Self { _dir: dir, script })
+    }
+}
+
+impl crate::sandbox::SandboxLauncher for FakeClaudeToolLauncher {
+    fn launch(
+        &self,
+        _spec: &crate::sandbox::CommandSpec,
+        _policy: &crate::sandbox::SandboxPolicy,
+        _cancel: &nerve_core::CancelToken,
+    ) -> anyhow::Result<crate::sandbox::Output> {
+        anyhow::bail!("fake claude tool launcher only supports the persistent path")
+    }
+
+    fn launch_persistent(
+        &self,
+        _spec: &crate::sandbox::CommandSpec,
+        policy: &crate::sandbox::SandboxPolicy,
+    ) -> anyhow::Result<crate::sandbox::PersistentChild> {
+        let spec = crate::sandbox::CommandSpec {
+            command: self.script.display().to_string(),
+            args: Vec::new(),
+        };
+        crate::sandbox::PersistentChild::spawn(&spec, policy)
+    }
+}
+
+/// Collect the lifted `delegate_agent` events (Wave 3) seen for `session_id` as
+/// `(kind, tool)` pairs — the structured per-tool rows that supplement the text tail.
+fn delegate_agent_rows(output: &Arc<Mutex<Vec<Value>>>, session_id: &str) -> Vec<(String, String)> {
+    output
+        .lock()
+        .expect("output lock")
+        .iter()
+        .filter_map(|value| {
+            let params = value.get("params")?;
+            let is_agent = params.get("type") == Some(&json!("delegate_agent"));
+            let matches = params.get("job_id") == Some(&json!(session_id));
+            (is_agent && matches).then(|| {
+                let event = params.get("event")?;
+                Some((
+                    event.get("kind")?.as_str()?.to_string(),
+                    event.get("tool")?.as_str()?.to_string(),
+                ))
+            })?
+        })
+        .collect()
+}
+
+#[test]
+fn live_claude_tool_stream_emits_structured_delegate_agent_rows() {
+    // Wave 3 (trust-substrate §6): a delegated claude run whose stream carries a
+    // structured `tool_use` / `tool_result` ALSO emits live `delegate_agent` per-tool
+    // rows (ToolStarted / ToolFinished) on the wire — supplementing, never replacing,
+    // the retained `delegate_progress` text tail.
+    let fixture = runtime_with_file();
+    let (router, output) =
+        output_router_with_delegate(Arc::clone(&fixture.runtime), FakeClaudeToolLauncher::new());
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(1),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "tool-live-1",
+                "command": {
+                    "kind": "delegate.start",
+                    "agent": "claude",
+                    "task": "edit the file"
+                }
+            }),
+        ),
+    );
+    // Turn 1's assistant text still streams as a `delegate_progress` line (additive:
+    // the text tail is RETAINED alongside the new structured rows).
+    wait_for_progress_containing(&output, "tool-live-1", "done edit the file");
+
+    // The structured tool calls lifted into live `delegate_agent` rows: a ToolStarted
+    // for the `Edit`, then a ToolFinished.
+    let rows = delegate_agent_rows(&output, "tool-live-1");
+    assert!(
+        rows.iter()
+            .any(|(kind, tool)| kind == "tool_started" && tool == "Edit"),
+        "expected a delegate_agent ToolStarted(Edit) row, got {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|(kind, _)| kind == "tool_finished"),
+        "expected a delegate_agent ToolFinished row, got {rows:?}"
+    );
+
+    // Close ends the session and seals the run; its persisted tape still carries the
+    // L0 `tool_started` (the live rows supplement, never replace, the persisted index).
+    dispatch(
+        &router,
+        &output,
+        rpc(
+            json!(2),
+            "runtime/jobs/start",
+            json!({
+                "job_id": "tool-close-1",
+                "command": { "kind": "delegate.close", "session_id": "tool-live-1" }
+            }),
+        ),
+    );
+    wait_for_job_event(&output, "job_completed", "tool-live-1");
+    let recorded = output.lock().expect("output lock").iter().any(|value| {
+        value.get("params").and_then(|p| p.get("type")) == Some(&json!("run_recorded"))
+    });
+    assert!(recorded, "the sealed run was announced via run_recorded");
+}
