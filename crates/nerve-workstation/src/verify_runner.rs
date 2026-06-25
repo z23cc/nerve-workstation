@@ -203,20 +203,35 @@ pub(crate) struct AttestStores<'a> {
     pub(crate) receipt: Option<&'a ReceiptStore>,
 }
 
+/// The outcome of the canonical seal tail: the reloaded signed Receipt (when a receipt
+/// store persisted one) plus every L1 ledger record the tail appended (Verdict, then
+/// ReceiptIssued). The appended records are returned so the daemon can announce each via
+/// [`RuntimeEvent::ledger_appended`](nerve_runtime::RuntimeEvent); the CLISeal path
+/// ignores them (no broadcast).
+pub(crate) struct SealOutcome {
+    /// The reloaded, signed Verification Receipt, when one was issued + persisted.
+    pub(crate) receipt: Option<Receipt>,
+    /// The L1 records appended by this seal, in append order (for live announcement).
+    pub(crate) appended: Vec<nerve_core::ledger::LedgerRecord>,
+}
+
 /// **The single canonical seal tail** shared by the daemon (`verify.start`) and the CLI
-/// (`nerve verify`): append the sealed [`Verdict`] to the L1 ledger, then issue, sign,
-/// and persist the L4 Verification [`Receipt`] that **borrows** the verdict verbatim
-/// (INV-R1 — never re-derived from the evidence checks). Returns the full persisted
-/// receipt (reloaded from `stores.receipt`) so a caller can report it; `None` when there
-/// is no receipt store (nothing to persist/return) or persistence failed.
+/// (`nerve verify`): append the sealed [`Verdict`] to the L1 ledger, issue/sign/persist
+/// the L4 Verification [`Receipt`] that **borrows** the verdict verbatim (INV-R1 — never
+/// re-derived from the evidence checks), then append a `ReceiptIssued` evidence record
+/// attesting the receipt's occurrence (INV-R1 — it asserts only that the receipt was
+/// issued, borrowing the verdict). Returns the reloaded receipt plus the appended L1
+/// records (so the daemon can announce them). `receipt` is `None` when there is no
+/// receipt store or persistence failed.
 pub(crate) fn seal_and_attest(
     run: &Run,
     verdict: &Verdict,
     stores: &AttestStores,
     signer: &dyn Signer,
     issued_at_ms: u64,
-) -> Option<Receipt> {
-    append_evidence(
+) -> SealOutcome {
+    let mut appended = Vec::new();
+    if let Some(record) = append_evidence(
         stores.ledger,
         LedgerKind::Verdict {
             run_id: verdict.run_id.clone(),
@@ -225,10 +240,12 @@ pub(crate) fn seal_and_attest(
             checks: verdict.checks.clone(),
             advisory_llm_judge: None,
         },
-    );
+    ) {
+        appended.push(record);
+    }
     let toolchain_digest =
         (!run.inputs.toolchain_digest.is_empty()).then(|| run.inputs.toolchain_digest.clone());
-    let issued = issue_receipt_for_run(
+    let Some(issued) = issue_receipt_for_run(
         run,
         receipt_checks_for(verdict),
         verdict.status,
@@ -238,10 +255,39 @@ pub(crate) fn seal_and_attest(
         issued_at_ms,
         signer,
         stores.receipt,
-    )?;
+    ) else {
+        return SealOutcome {
+            receipt: None,
+            appended,
+        };
+    };
     // Reload the freshly persisted receipt so the caller (CLI gate) gets the full,
     // signed artifact — not just its id — without forking the issue path.
-    stores.receipt?.load_record(&issued.receipt_id).ok()
+    let receipt = stores
+        .receipt
+        .and_then(|store| store.load_record(&issued.receipt_id).ok());
+    // Attest that a receipt was issued (INV-R1: records occurrence; the verdict is
+    // borrowed verbatim from the reloaded receipt, never re-derived).
+    if let Some(receipt) = &receipt
+        && let Some(record) = append_evidence(
+            stores.ledger,
+            LedgerKind::ReceiptIssued {
+                run_id: verdict.run_id.clone(),
+                receipt_id: receipt.receipt_id.clone(),
+                inputs_hash: receipt.statement.provenance.inputs_hash.clone(),
+                policy_version: receipt
+                    .statement
+                    .provenance
+                    .policy_version
+                    .clone()
+                    .unwrap_or_default(),
+                verdict: receipt.statement.verdict,
+            },
+        )
+    {
+        appended.push(record);
+    }
+    SealOutcome { receipt, appended }
 }
 
 /// Map a sealed [`Verdict`]'s per-check results into the receipt's evidence
@@ -671,5 +717,69 @@ mod tests {
             &v.checks,
         );
         assert_eq!(v.verdict_id, rebuilt);
+    }
+
+    #[test]
+    fn seal_and_attest_appends_verdict_then_receipt_issued_to_the_ledger() {
+        use crate::ledger_store::{LedgerStore, run_ledger_query};
+        use crate::receipt_store::ReceiptStore;
+        use crate::signer::LocalEd25519Signer;
+
+        let (dir, runs, verdicts, run_id) = fixtures();
+        write_checks(
+            dir.path(),
+            serde_json::json!({"checks":[{"name":"test","command":"t","required":true}]}),
+        );
+        let launcher: Arc<dyn SandboxLauncher> = Arc::new(ScriptedLauncher::new());
+        let verdict = handle_verify_start(
+            Some(&runs),
+            Some(&verdicts),
+            &launcher,
+            dir.path(),
+            &run_id,
+            Some(1),
+            None,
+            &CancelToken::never(),
+            1,
+        )
+        .unwrap();
+
+        let run = runs.load_record(&run_id).unwrap();
+        let ledger = LedgerStore::new(dir.path().join("ledger"));
+        let receipts = ReceiptStore::new(dir.path().join("receipts"));
+        let signer = LocalEd25519Signer::deterministic_test_key();
+        let stores = AttestStores {
+            ledger: Some(&ledger),
+            receipt: Some(&receipts),
+        };
+
+        let outcome = seal_and_attest(&run, &verdict, &stores, &signer, 1);
+        // Both an L1 Verdict record and an L1 ReceiptIssued record were appended.
+        assert_eq!(outcome.appended.len(), 2);
+        let receipt = outcome.receipt.expect("a receipt was issued + reloaded");
+
+        // ledger.query for this run returns both, newest-first (ReceiptIssued, Verdict).
+        let result = run_ledger_query(Some(&ledger), Some(&run_id), None, None, None, None, 200);
+        let records = result["records"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0]["kind"]["kind"],
+            serde_json::json!("receipt_issued")
+        );
+        assert_eq!(
+            records[0]["kind"]["receipt_id"],
+            serde_json::json!(receipt.receipt_id)
+        );
+        assert_eq!(records[1]["kind"]["kind"], serde_json::json!("verdict"));
+        // The ReceiptIssued record borrows the verdict verbatim (INV-R1).
+        assert_eq!(
+            records[0]["kind"]["verdict"],
+            serde_json::to_value(verdict.status).unwrap()
+        );
+        // The freshly-built chain re-derives intact.
+        assert_eq!(
+            crate::ledger_store::run_ledger_verify(Some(&ledger))["ok"],
+            serde_json::json!(true)
+        );
     }
 }

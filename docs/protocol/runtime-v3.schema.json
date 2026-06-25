@@ -2997,6 +2997,19 @@
           "type": "object"
         },
         {
+          "description": "L1 — re-derive the append-only evidence ledger and report whether the hash\nchain is intact (read-only; the tamper-detection moat). No facets: the whole\nchain is re-derived via `nerve_core::ledger::verify_chain`. The result is\n`{ \"ok\": true, \"count\": N, \"head_hash\": \"…\" }` on an intact chain, or\n`{ \"ok\": false, \"error\": \"<HashMismatch|SeqGap|PrevMismatch>\", \"seq\": K }`\npointing at the first record where the re-derivation diverged.",
+          "properties": {
+            "kind": {
+              "const": "ledger.verify",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
           "description": "L2 — re-run the org's own checks over a Run's diff in the pinned closure,\nproducing an execution-grounded Verdict. The authority is BORROWED from the\norg's CI (INV-R3); Nerve never invents a correctness verdict.",
           "properties": {
             "kind": {

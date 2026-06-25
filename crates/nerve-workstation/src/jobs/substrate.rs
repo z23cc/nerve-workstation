@@ -95,6 +95,9 @@ impl JobManager {
                 record_kind.as_deref(),
                 limit.unwrap_or(200),
             )),
+            RuntimeCommand::LedgerVerify => Ok(crate::ledger_store::run_ledger_verify(
+                self.ledger_store().as_ref(),
+            )),
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected ledger.* command",
             )),
@@ -317,9 +320,12 @@ impl JobManager {
             ledger: ledger.as_ref(),
             receipt: receipt.as_ref(),
         };
-        if let Some(sealed) =
-            crate::verify_runner::seal_and_attest(&run, verdict, &stores, &self.signer(), now_ms())
-        {
+        let outcome =
+            crate::verify_runner::seal_and_attest(&run, verdict, &stores, &self.signer(), now_ms());
+        for record in &outcome.appended {
+            self.emit_ledger_appended(record);
+        }
+        if let Some(sealed) = outcome.receipt {
             self.emit(RuntimeEvent::ReceiptIssued {
                 session_id: run.session_id.clone(),
                 run_id: sealed.statement.provenance.run_id.clone(),
@@ -327,6 +333,20 @@ impl JobManager {
                 verdict: sealed.statement.verdict,
             });
         }
+    }
+
+    /// Announce a freshly-appended L1 evidence-ledger record (the live ledger-growth
+    /// signal, broadcast to every client). The record carries its own `seq` /
+    /// `record_hash`; the chain head it advanced equals that `record_hash`, so the
+    /// announced `head_hash` is the same value.
+    pub(super) fn emit_ledger_appended(&self, record: &nerve_core::ledger::LedgerRecord) {
+        let kind = crate::ledger_store::ledger_kind_tag(&record.kind);
+        self.emit(RuntimeEvent::ledger_appended(
+            record.seq,
+            kind,
+            record.record_hash.clone(),
+            record.record_hash.clone(),
+        ));
     }
 
     /// The local ed25519 receipt signer, keyed under `config_home()/keys` (stable

@@ -130,6 +130,7 @@ where
             | RuntimeCommand::RunGet { .. }
             | RuntimeCommand::ReplayStart { .. }
             | RuntimeCommand::LedgerQuery { .. }
+            | RuntimeCommand::LedgerVerify
             | RuntimeCommand::VerifyStart { .. }
             | RuntimeCommand::VerifyGet { .. }
             | RuntimeCommand::VerifyList { .. }

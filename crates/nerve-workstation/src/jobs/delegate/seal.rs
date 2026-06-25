@@ -115,16 +115,35 @@ impl JobManager {
         self.emit_run_recorded(job_id, writer.seal(finished, self.run_store().as_ref()));
     }
 
-    /// Emit a `RunRecorded` announcement for a sealed run, if it persisted. A
-    /// best-effort no-op when sealing was skipped (no served root / write failure).
+    /// Emit a `RunRecorded` announcement for a sealed run, if it persisted, AND append
+    /// a `RunRecorded` evidence record to the L1 cross-run ledger (announcing each
+    /// append via `LedgerAppended`). Both are best-effort no-ops when sealing was
+    /// skipped (no served root / write failure) — capture/ledger is an audit seam,
+    /// never a gate on the delegated turn (INV-R1/INV-R2).
     fn emit_run_recorded(&self, job_id: &str, sealed: Option<crate::run_store::SealedRun>) {
-        if let Some(sealed) = sealed {
-            self.emit(RuntimeEvent::run_recorded(
-                job_id,
-                sealed.run_id,
-                sealed.root_hash,
-                sealed.event_count,
-            ));
+        let Some(sealed) = sealed else {
+            return;
+        };
+        self.emit(RuntimeEvent::run_recorded(
+            job_id,
+            sealed.run_id.clone(),
+            sealed.root_hash.clone(),
+            sealed.event_count,
+        ));
+        // L1: record that the run occurred (INV-R1 — attests occurrence, asserts nothing
+        // about correctness). No diff hash is available at the delegate seal tail, so
+        // `DiffRecorded` is honestly skipped rather than fabricated.
+        let kind = nerve_core::ledger::LedgerKind::RunRecorded {
+            run_id: sealed.run_id,
+            run_root_hash: sealed.root_hash,
+            agent: sealed.agent,
+            task_hash: sealed.task_hash,
+            event_count: sealed.event_count,
+        };
+        if let Some(record) =
+            crate::ledger_store::append_evidence(self.ledger_store().as_ref(), kind)
+        {
+            self.emit_ledger_appended(&record);
         }
     }
 

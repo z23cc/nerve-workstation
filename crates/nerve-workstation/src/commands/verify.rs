@@ -64,6 +64,7 @@ pub(crate) fn run_verify_flow(root: &Path, run_id: &str, reruns: Option<u32>) ->
         receipt: Some(&receipt_store),
     };
     seal_and_attest(&run, &verdict, &stores, &signer, now_ms())
+        .receipt
         .ok_or_else(|| anyhow!("failed to seal/persist a Verification Receipt for run `{run_id}`"))
 }
 

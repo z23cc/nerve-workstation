@@ -8,6 +8,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
+// v10 (trust-substrate L1 closure): additive read-only `ledger.verify` command —
+// re-derive the append-only evidence ledger via `nerve_core::ledger::verify_chain`
+// and report `{ ok, count, head_hash }` (intact) or `{ ok:false, error, seq }`
+// (tamper), making the L1 hash-chain's tamper-detection reachable over the protocol
+// and the CLI. A single appended serde-tagged command variant; the previously-dead
+// `ledger_appended` event now fires on every successful append. `ledger.query` and
+// every existing command/event are RETAINED, so a v9 client keeps working byte-for-byte.
 // v9 (trust-substrate live delegate granularity): additive `delegate_agent` event —
 // the per-tool LIVE structured step of a delegated (external-CLI) run, reusing the
 // existing `AgentEventKind` payload so GUI/TUI render per-tool rows instead of only the
@@ -42,7 +49,7 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
 // policy / receipt / outcome schema roots. Additive serde-tagged variants and new
 // schema-roots only — a v6 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "9";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "10";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";
