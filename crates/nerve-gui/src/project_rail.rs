@@ -129,7 +129,7 @@ pub(crate) fn ProjectRail(
                         <button type="button" class="proj-add-choose" disabled=move || picking.get()
                             aria-label="Choose project folder with native picker"
                             aria-controls="project-add project-add-status"
-                            on:click=move |_| choose_project_folder(token, new_path, pick_status, picking)>
+                            on:click=move |_| choose_project_folder(token, workspace, workspaces, new_path, adding, pick_status, picking)>
                             "Choose…"
                         </button>
                     })}
@@ -161,9 +161,15 @@ fn normalize_workspace(workspace: RwSignal<String>, list: &[(String, String)]) {
     }
 }
 
+/// The "+" row's native folder picker: pick a folder, then add it as a project and
+/// switch to it in ONE step (no Enter), reusing [`add_project`] — matching the composer
+/// chip's picker. The text input + Enter (`do_add`) stays as the manual path-entry path.
 fn choose_project_folder(
     token: StoredValue<Option<String>>,
+    workspace: RwSignal<String>,
+    workspaces: RwSignal<Vec<(String, String)>>,
     new_path: RwSignal<String>,
+    adding: RwSignal<bool>,
     status: RwSignal<String>,
     picking: RwSignal<bool>,
 ) {
@@ -179,9 +185,11 @@ fn choose_project_folder(
     leptos::task::spawn_local(async move {
         match crate::data::pick_host_folder(&tok, "Choose project folder").await {
             Ok(path) => {
-                new_path.set(path);
-                status.set("Folder selected.".into());
-                crate::dom::focus_element_by_id_next_frame("project-add");
+                // Feed the picked path into the same add+switch+close flow as Enter, so
+                // selecting a folder immediately adds the project — no extra keystroke.
+                status.set(String::new());
+                new_path.set(path.trim().to_string());
+                add_project(token, workspace, workspaces, new_path, adding);
             }
             Err(err) if err.to_ascii_lowercase().contains("cancel") => {
                 status.set("Folder selection cancelled.".into());
