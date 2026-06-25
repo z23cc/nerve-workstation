@@ -16,7 +16,7 @@ pub(crate) fn Composer(
     mode: RwSignal<&'static str>,
     model: RwSignal<String>,
     palette_open: RwSignal<bool>,
-    workspace: RwSignal<String>,
+    label: Signal<String>,
     busy: Signal<bool>,
     send: Callback<()>,
     stop: Callback<()>,
@@ -123,8 +123,8 @@ pub(crate) fn Composer(
             </div>
             <div class="context-pills">
                 <button type="button" class="ctx-pill ctx-pill-act" title="Choose working directory"
-                    aria-label=move || format!("Choose working directory (current: {})", workspace.get())
-                    on:click=move |_| pick.run(())>"📁 "{move || workspace.get()}</button>
+                    aria-label=move || format!("Choose working directory (current: {})", label.get())
+                    on:click=move |_| pick.run(())>"📁 "{move || label.get()}</button>
                 <span class="ctx-pill" aria-label=move || format!("Agent: {}", crate::data::agent_label(&agent.get()))>{move || format!("Agent: {}", crate::data::agent_label(&agent.get()))}</span>
                 <span class="ctx-pill" aria-label=move || format!("Git branch: {}", branch.get())>"⎇ "{move || branch.get()}</span>
             </div>

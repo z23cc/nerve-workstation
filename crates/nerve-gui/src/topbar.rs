@@ -9,7 +9,7 @@ pub(crate) fn Topbar(
     agent: RwSignal<String>,
     model: RwSignal<String>,
     mode: RwSignal<&'static str>,
-    workspace: RwSignal<String>,
+    display: Signal<String>,
     branch: RwSignal<String>,
     inspector_open: RwSignal<bool>,
     open_command_palette: Callback<()>,
@@ -20,8 +20,8 @@ pub(crate) fn Topbar(
             <div class="topbar-left">
                 <div class="topbar-product">
                     <span class="topbar-eyebrow">"Nerve Runtime"</span>
-                    <span class="topbar-status" role="status" aria-live="polite" aria-label=move || workspace_label(&workspace.get(), &branch.get())>{move || {
-                        let ws = workspace.get();
+                    <span class="topbar-status" role="status" aria-live="polite" aria-label=move || workspace_label(&display.get(), &branch.get())>{move || {
+                        let ws = display.get();
                         let br = branch.get();
                         if ws.is_empty() { "No workspace selected".to_string() } else { format!("{ws} · {br}") }
                     }}</span>

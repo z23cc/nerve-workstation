@@ -105,6 +105,19 @@ pub fn App() -> impl IntoView {
                 .unwrap_or_default()
         })
     };
+    // The active workspace's DISPLAY label: its root folder's name, so every surface
+    // (composer chip, topbar, hero subtitle) reads as the opened directory rather than
+    // the routing name (`default`). Reactive — tracks workspace + workspaces.
+    let workspace_label = Signal::derive(move || {
+        let name = workspace.get();
+        let root = workspaces.with(|all| {
+            all.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, root)| root.clone())
+                .unwrap_or_default()
+        });
+        crate::project_rail::display_name(&name, &root)
+    });
 
     Effect::new(move |_| {
         let Some(tok) = token.get_value() else {
@@ -427,7 +440,7 @@ pub fn App() -> impl IntoView {
                 mode=mode
                 model=model
                 palette_open=palette_open
-                workspace=workspace
+                label=workspace_label
                 busy=Signal::derive(active_busy)
                 send=send_message
                 stop=stop_turn
@@ -470,7 +483,7 @@ pub fn App() -> impl IntoView {
                 reveal_workspace=reveal_workspace
                 busy=Signal::derive(active_busy) />
             <main class="main chat">
-                <Topbar agent=agent model=model mode=mode workspace=workspace branch=branch
+                <Topbar agent=agent model=model mode=mode display=workspace_label branch=branch
                     inspector_open=inspector_open toggle_inspector=toggle_inspector
                     open_command_palette=Callback::new(move |_| palette_open.set(true)) />
                 {move || error.get().map(|e| view! { <div class="shell-error" role="alert">{e}</div> })}
@@ -490,7 +503,7 @@ pub fn App() -> impl IntoView {
                             <div class="hero-copy">
                                 <h1 class="hero-title">"Work with code, context first"</h1>
                                 <p class="hero-sub">{move || {
-                                    let name = workspace.get();
+                                    let name = workspace_label.get();
                                     if name.is_empty() { "No workspace selected".to_string() } else { format!("{name} · chat, context, review, tools") }
                                 }}</p>
                             </div>

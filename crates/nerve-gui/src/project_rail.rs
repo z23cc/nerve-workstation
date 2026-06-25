@@ -229,6 +229,20 @@ pub(crate) fn project_name_from_path(path: &str) -> String {
         .to_string()
 }
 
+/// The label a workspace is *displayed* as: its root folder's name (basename), so a
+/// project always reads as the directory it opens — including the daemon's startup
+/// workspace (named `"default"` for routing, but shown by its folder). Falls back to
+/// the routing `name` when the root is unknown/empty. Display-only — routing still
+/// keys on the workspace name.
+pub(crate) fn display_name(name: &str, root: &str) -> String {
+    let folder = project_name_from_path(root);
+    if folder.is_empty() {
+        name.to_string()
+    } else {
+        folder
+    }
+}
+
 fn remove_project(
     token: StoredValue<Option<String>>,
     workspace: RwSignal<String>,
@@ -386,7 +400,7 @@ fn project_row(
                 on:click=move |_| focus_project(index, pick.clone())>
                 <span class="project-dot" class:on=selected></span>
                 <span class="rail-copy">
-                    <span class="rail-title">{name}</span>
+                    <span class="rail-title">{display_name(&name, &root)}</span>
                     {selected.then(|| project_meta(signals))}
                 </span>
             </button>
