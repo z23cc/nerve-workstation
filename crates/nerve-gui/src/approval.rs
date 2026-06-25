@@ -5,7 +5,6 @@
 use crate::app::ApprovalReq;
 use crate::rpc::start_job;
 use leptos::{ev, leptos_dom::helpers::window_event_listener, prelude::*};
-use serde_json::json;
 
 #[component]
 pub(crate) fn ApprovalModal(
@@ -78,12 +77,7 @@ fn respond(
         return;
     };
     leptos::task::spawn_local(async move {
-        let cmd = json!({
-            "kind": "session.respond",
-            "session_id": req.session_id,
-            "request_id": req.request_id,
-            "decision": decision,
-        });
+        let cmd = crate::command::session_respond(&req.session_id, &req.request_id, decision);
         let _ = start_job(&tok, cmd).await;
     });
 }

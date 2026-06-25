@@ -301,12 +301,7 @@ fn request_start(args: StartArgs) {
     let status = args.status;
     let busy = args.busy;
     leptos::task::spawn_local(async move {
-        let cmd = json!({
-            "kind": "wechat.start",
-            "owners": owners,
-            "agent": agent,
-            "autonomy": autonomy,
-        });
+        let cmd = crate::command::wechat_start(owners, &agent, &autonomy);
         match start_job_await(&tok, cmd).await {
             Ok(_) => status.set("Bridge start requested.".into()),
             Err(err) => status.set(format!("Start failed: {err}")),

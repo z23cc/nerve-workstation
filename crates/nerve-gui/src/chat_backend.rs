@@ -9,7 +9,6 @@
 use crate::app::Chat;
 use crate::rpc::{cancel_job, start_job, start_job_await, start_job_with_id};
 use leptos::prelude::*;
-use serde_json::json;
 
 pub(crate) fn default_chat_backend() -> String {
     "delegate".into()
@@ -44,11 +43,7 @@ pub(crate) fn active_turn_route(chats: RwSignal<Vec<Chat>>, idx: usize) -> Optio
 
 pub(crate) async fn close_session_if_any(token: &str, session_id: Option<String>) {
     if let Some(session_id) = session_id {
-        let _ = start_job(
-            token,
-            json!({ "kind": "session.close", "session_id": session_id }),
-        )
-        .await;
+        let _ = start_job(token, crate::command::session_close(&session_id)).await;
     }
 }
 
@@ -56,11 +51,7 @@ pub(crate) async fn stop_backend_turn(token: &str, route: TurnRoute) {
     if route.backend == "session"
         && let Some(session_id) = route.session
     {
-        let _ = start_job(
-            token,
-            json!({ "kind": "session.interrupt", "session_id": session_id }),
-        )
-        .await;
+        let _ = start_job(token, crate::command::session_interrupt(&session_id)).await;
     }
     let _ = cancel_job(token, &route.job).await;
 }
@@ -95,7 +86,7 @@ pub(crate) async fn send_session_turn(turn: SessionTurn<'_>) -> Result<(), Strin
     start_job_with_id(
         turn.token,
         turn.turn_id,
-        json!({ "kind": "session.message", "session_id": session_id, "text": turn.text }),
+        crate::command::session_message(&session_id, turn.text),
     )
     .await
     .map_err(|err| format!("session.message: {err}"))
@@ -109,14 +100,7 @@ async fn start_session(
     model: &str,
     workspace: &str,
 ) -> Result<String, String> {
-    let mut command = json!({
-        "kind": "session.start",
-        "provider": provider,
-        "model": model,
-    });
-    if !workspace.is_empty() {
-        command["workspace"] = json!(workspace);
-    }
+    let command = crate::command::session_start(provider, model, workspace);
     let result = start_job_await(token, command)
         .await
         .map_err(|err| format!("session.start: {err}"))?;
@@ -174,30 +158,10 @@ fn delegate_command(
     workspace: &str,
 ) -> serde_json::Value {
     match existing {
-        Some(session_id) => json!({
-            "kind": "delegate.steer",
-            "session_id": session_id,
-            "message": text,
-        }),
-        None => {
-            let mut cmd = json!({
-                "kind": "delegate.start",
-                "agent": agent,
-                "task": text,
-                "autonomy": autonomy,
-            });
-            // Route to the ACTIVE workspace's root (REQUIRED once more than one is
-            // registered, e.g. after adding a project — else the daemon can't pick one).
-            if !workspace.is_empty() {
-                cmd["workspace"] = json!(workspace);
-            }
-            if !model.is_empty() {
-                cmd["model"] = json!(model);
-            }
-            if !root.is_empty() {
-                cmd["cwd"] = json!(root);
-            }
-            cmd
-        }
+        Some(session_id) => crate::command::delegate_steer(&session_id, text),
+        // Route to the ACTIVE workspace's root (REQUIRED once more than one is
+        // registered, e.g. after adding a project — else the daemon can't pick one);
+        // `model`/`cwd` are omitted from the wire when empty (see the constructor).
+        None => crate::command::delegate_start(agent, text, autonomy, workspace, model, root),
     }
 }

@@ -17,6 +17,7 @@ pub(crate) mod artifact_export;
 pub(crate) mod chat_backend;
 pub(crate) mod chat_ops;
 pub(crate) mod clipboard;
+pub(crate) mod command;
 pub(crate) mod command_catalog;
 pub(crate) mod command_palette;
 pub(crate) mod composer;
