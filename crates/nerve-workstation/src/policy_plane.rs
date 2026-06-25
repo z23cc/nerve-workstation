@@ -9,25 +9,21 @@
 //! **Court reporter, not judge (INV-R1):** the plane *records* the decision the
 //! org's own policy implied; it never asserts a change is "correct".
 //!
-//! The decision-evidence sink is a deferred-infra seam (master-spec §5): today the
-//! shipped default is [`NullEvidenceSink`] (hashes nothing, returns `seq=None`).
-//! When the L1 evidence ledger lands, a `LedgerStore`-backed `impl EvidenceSink` is
-//! swapped in at the composition root with **no L3 type change** — the plane only
-//! ever sees `&dyn EvidenceSink`.
+//! The decision-evidence sink is the live L3↔L1 link: the composition root wires the
+//! [`LedgerEvidenceSink`] (commits each decision to the L1 evidence ledger as a
+//! [`LedgerKind::PolicyDecision`], returning its `seq`) whenever a served scope resolves
+//! a `LedgerStore`, falling back to [`NullEvidenceSink`] (no-op, `seq=None`) otherwise.
+//! The plane only ever sees `&dyn EvidenceSink`, so the backing store is swappable with
+//! no L3 type change. `policy.decisions` reads the committed records straight from L1.
 //!
 //! Best-effort throughout (mirrors [`RunStore`](crate::run_store)): a missing served
 //! root, an absent or malformed `policy-plane.json`, or a sink failure degrades to
 //! the empty (deny-by-default) sealed policy / a `None` sequence — it never panics
 //! and never fails the delegated turn.
 
-// WAVE-B CHECKPOINT: the read side (resolve / policy_version / run_policy_get /
-// run_policy_decisions) is wired into the `policy.*` executor; the EvidenceSink
-// (append_decision / record_decision / the sink field) is the deferred L3↔L1 half —
-// it routes decisions into the ledger once the PolicyToolBox gate records them, the
-// finalization increment. Dead until then.
-#![allow(dead_code)]
-
-use nerve_core::policy::{PolicyDecisionRecord, PolicyDoc, seal_policy};
+use crate::ledger_store::LedgerStore;
+use nerve_core::ledger::{LedgerKind, PolicyDecisionOutcome};
+use nerve_core::policy::{Capability, PolicyDecisionRecord, PolicyDoc, seal_policy};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,6 +56,55 @@ impl EvidenceSink for NullEvidenceSink {
     }
 }
 
+/// The L3↔L1 [`EvidenceSink`]: commits each policy decision to the L1 evidence ledger
+/// as a [`LedgerKind::PolicyDecision`] record, returning the appended ledger `seq` so a
+/// host can announce it on the `policy_decision_recorded` event. Best-effort — an
+/// append failure yields `None` and never propagates (the audit trail is *evidence*,
+/// not the live admission gate). This is the sink swapped in at the composition root
+/// now that L1 has merged (master-spec §5).
+pub(crate) struct LedgerEvidenceSink {
+    store: LedgerStore,
+}
+
+impl LedgerEvidenceSink {
+    pub(crate) fn new(store: LedgerStore) -> Self {
+        Self { store }
+    }
+}
+
+impl EvidenceSink for LedgerEvidenceSink {
+    fn append_decision(&self, record: &PolicyDecisionRecord) -> Option<u64> {
+        let kind = LedgerKind::PolicyDecision {
+            run_id: record.session_id.clone(),
+            policy_version: record.policy_version.clone(),
+            capability: capability_label(record.capability).to_string(),
+            decision: decision_outcome(&record.decision),
+            // The redacted rationale/args stay out-of-band; only their hash is committed.
+            detail_hash: (!record.args_hash.is_empty()).then(|| record.args_hash.clone()),
+        };
+        self.store.append(kind).ok().map(|appended| appended.seq)
+    }
+}
+
+/// Stable lowercase label for a capability class (the ledger record's `capability`).
+fn capability_label(capability: Capability) -> &'static str {
+    match capability {
+        Capability::Read => "read",
+        Capability::Write => "write",
+        Capability::Egress => "egress",
+        Capability::Exec => "exec",
+    }
+}
+
+/// Map the host-interpreted decision string to the ledger's binary outcome. Anything
+/// other than an explicit `allow` records as `deny` — fail-closed (INV-R1).
+fn decision_outcome(decision: &str) -> PolicyDecisionOutcome {
+    match decision {
+        "allow" => PolicyDecisionOutcome::Allow,
+        _ => PolicyDecisionOutcome::Deny,
+    }
+}
+
 /// The resolved policy plane for a served scope: a sealed [`PolicyDoc`] plus the
 /// [`EvidenceSink`] every recorded decision is routed to. Construct with
 /// [`PolicyPlane::resolve`] (reads + seals from disk) or [`PolicyPlane::with_sink`]
@@ -89,6 +134,13 @@ impl PolicyPlane {
         Self { doc, sink }
     }
 
+    /// Resolve the plane wired to the L1-backed [`LedgerEvidenceSink`] over `store`, so
+    /// every recorded decision lands in the evidence ledger (the live L3↔L1 link). The
+    /// composition root passes the served scope's `LedgerStore`.
+    pub(crate) fn with_ledger(root: Option<&Path>, store: LedgerStore) -> Self {
+        Self::with_sink(root, Arc::new(LedgerEvidenceSink::new(store)))
+    }
+
     /// The content-addressed `policy_version` of the in-force sealed policy — the
     /// value a [`PolicyDecisionRecord`] and an L4 receipt pin to.
     pub(crate) fn policy_version(&self) -> String {
@@ -98,7 +150,7 @@ impl PolicyPlane {
     /// The sealed policy document currently in force.
     #[allow(
         dead_code,
-        reason = "read by the policy.rs gate extension wired by the integrator"
+        reason = "test-only accessor; runtime reads self.doc directly via run_policy_get"
     )]
     pub(crate) fn doc(&self) -> &PolicyDoc {
         &self.doc
@@ -125,16 +177,34 @@ pub(crate) fn run_policy_get(plane: Option<&PolicyPlane>) -> Value {
 /// a `session_id`.
 ///
 /// The decision *corpus* is owned by the L1 evidence ledger (the plane only *routes*
-/// decisions to its [`EvidenceSink`]); until that ledger-backed query is wired at the
-/// composition root, this returns the current `policy_version` plus an empty
-/// `decisions` array — never a transport error. A `None` plane (no served root) is
-/// likewise an empty list, mirroring `run.list`.
-pub(crate) fn run_policy_decisions(session_id: Option<&str>, plane: Option<&PolicyPlane>) -> Value {
+/// decisions to its [`EvidenceSink`]); this surfaces the `policy_decision` records the
+/// plane committed there — scoped to the session/run handle when given — alongside the
+/// in-force `policy_version`. A `None` ledger (no served root) yields an empty list,
+/// mirroring `run.list`; never a transport error.
+pub(crate) fn run_policy_decisions(
+    session_id: Option<&str>,
+    plane: Option<&PolicyPlane>,
+    ledger: Option<&LedgerStore>,
+) -> Value {
     let policy_version = plane.map(PolicyPlane::policy_version).unwrap_or_default();
+    // Reuse the L1 query path: policy_decision records key on the session/run handle.
+    let queried = crate::ledger_store::run_ledger_query(
+        ledger,
+        session_id,
+        None,
+        None,
+        None,
+        Some("policy_decision"),
+        200,
+    );
+    let decisions = queried
+        .get("records")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
     json!({
         "policy_version": policy_version,
         "session_id": session_id,
-        "decisions": Value::Array(Vec::new()),
+        "decisions": decisions,
     })
 }
 
@@ -344,15 +414,48 @@ mod tests {
         let dir = tempdir().unwrap();
         let plane = PolicyPlane::resolve(Some(dir.path()));
 
-        let value = run_policy_decisions(Some("job-7"), Some(&plane));
+        // No ledger wired -> empty corpus (mirrors run.list), never a transport error.
+        let value = run_policy_decisions(Some("job-7"), Some(&plane), None);
         assert_eq!(value["session_id"], "job-7");
         assert_eq!(value["policy_version"], json!(plane.policy_version()));
         assert!(value["decisions"].as_array().unwrap().is_empty());
 
         // No plane / no session -> empty version + null session + empty corpus.
-        let none = run_policy_decisions(None, None);
+        let none = run_policy_decisions(None, None, None);
         assert_eq!(none["policy_version"], "");
         assert_eq!(none["session_id"], Value::Null);
         assert!(none["decisions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ledger_backed_sink_records_a_decision_and_policy_decisions_surfaces_it() {
+        // The live L3↔L1 wiring: a plane built `with_ledger` routes every recorded
+        // decision into the L1 evidence ledger, and `policy.decisions` reads it back.
+        let dir = tempdir().unwrap();
+        let ledger_dir = dir.path().join("ledger");
+        let plane =
+            PolicyPlane::with_ledger(Some(dir.path()), LedgerStore::new(ledger_dir.clone()));
+        // Both an allow and a deny are committed, with monotonic ledger sequences.
+        assert_eq!(plane.record_decision(&sample_record("allow")), Some(0));
+        assert_eq!(plane.record_decision(&sample_record("deny")), Some(1));
+
+        // `policy.decisions` (scoped to the recorded session/run handle "job-7") reads
+        // the two PolicyDecision records straight out of L1.
+        let query_store = LedgerStore::new(ledger_dir);
+        let value = run_policy_decisions(Some("job-7"), Some(&plane), Some(&query_store));
+        let decisions = value["decisions"].as_array().unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| d["kind"]["kind"] == "policy_decision")
+        );
+        // The decision string maps to the ledger's binary outcome (allow + deny present).
+        let outcomes: Vec<&str> = decisions
+            .iter()
+            .filter_map(|d| d["kind"]["decision"].as_str())
+            .collect();
+        assert!(outcomes.contains(&"allow"));
+        assert!(outcomes.contains(&"deny"));
     }
 }

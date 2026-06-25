@@ -656,9 +656,13 @@ impl JobManager {
         let plane = self.policy_plane();
         match command {
             RuntimeCommand::PolicyGet => Ok(crate::policy_plane::run_policy_get(plane.as_ref())),
-            RuntimeCommand::PolicyDecisions { session_id } => Ok(
-                crate::policy_plane::run_policy_decisions(session_id.as_deref(), plane.as_ref()),
-            ),
+            RuntimeCommand::PolicyDecisions { session_id } => {
+                Ok(crate::policy_plane::run_policy_decisions(
+                    session_id.as_deref(),
+                    plane.as_ref(),
+                    self.ledger_store().as_ref(),
+                ))
+            }
             _ => Err(nerve_runtime::RuntimeError::adapter(
                 "expected policy.* command",
             )),
@@ -757,9 +761,93 @@ impl JobManager {
     /// L3 policy plane for the served root (sealed policy doc + a null evidence sink;
     /// the ledger-backed sink is wired when L3↔L1 is promoted).
     fn policy_plane(&self) -> Option<crate::policy_plane::PolicyPlane> {
-        Some(crate::policy_plane::PolicyPlane::resolve(
-            self.delegate_root().ok().as_deref(),
-        ))
+        let root = self.delegate_root().ok();
+        // Wire the L1-backed evidence sink when a served scope resolves a ledger, so
+        // recorded policy decisions land in the ledger (the live L3↔L1 link); fall back
+        // to the no-op sink when there is no served root.
+        Some(match self.ledger_store() {
+            Some(store) => crate::policy_plane::PolicyPlane::with_ledger(root.as_deref(), store),
+            None => crate::policy_plane::PolicyPlane::resolve(root.as_deref()),
+        })
+    }
+
+    /// L3↔L1 — record what Nerve authorized a delegated agent to do, committing the
+    /// decision(s) to the L1 evidence ledger via the policy plane (best-effort) and
+    /// announcing each. Two axes are recorded so the audit trail does not UNDER-state
+    /// the posture: (1) the filesystem/exec ceiling the (role-expanded) autonomy
+    /// authorizes, and (2) the **always-granted outbound network** — every delegate
+    /// spawns with `NetPolicy::Allow` to reach its LLM API, so even a read-only scout
+    /// holds egress (the exfiltration axis); recording it keeps that visible.
+    ///
+    /// INV-R1: records the authorization posture, never asserts the run's output is
+    /// correct. Never fails the start (a missing plane is a no-op). The fs/exec class
+    /// reflects the autonomy *contract* (`ReadOnly`→Read, `Edit`→Write, `Full`→Exec); an
+    /// agent sandbox may differ (codex `workspace-write` permits confined exec), which is
+    /// captured separately by the run's pinned inputs.
+    ///
+    /// Scope: this covers the protocol `delegate.start` path. The in-chat `delegate_agent`
+    /// ToolBox path (the demoted built-in orchestrator, INV-R4) has no session handle here
+    /// and is not yet recorded — a documented follow-up.
+    fn record_delegate_authorization(
+        &self,
+        job_id: &str,
+        agent: &str,
+        role: DelegateRole,
+        autonomy: DelegateAutonomy,
+    ) {
+        let Some(plane) = self.policy_plane() else {
+            return;
+        };
+        let policy_version = plane.policy_version();
+        let fs_capability = match autonomy {
+            DelegateAutonomy::ReadOnly => nerve_core::policy::Capability::Read,
+            DelegateAutonomy::Edit => nerve_core::policy::Capability::Write,
+            DelegateAutonomy::Full => nerve_core::policy::Capability::Exec,
+        };
+        self.record_one_authorization(
+            &plane,
+            &policy_version,
+            job_id,
+            agent,
+            fs_capability,
+            format!("delegated agent authorized at {autonomy:?} autonomy (role {role:?})"),
+        );
+        self.record_one_authorization(
+            &plane,
+            &policy_version,
+            job_id,
+            agent,
+            nerve_core::policy::Capability::Egress,
+            "delegated agent granted outbound network (LLM API egress, all autonomy levels)"
+                .to_string(),
+        );
+    }
+
+    /// Commit one capability authorization to the ledger via `plane` and announce it
+    /// (best-effort; a `None` ledger seq just means the no-op sink). Shared by the two
+    /// axes [`Self::record_delegate_authorization`] records.
+    fn record_one_authorization(
+        &self,
+        plane: &crate::policy_plane::PolicyPlane,
+        policy_version: &str,
+        job_id: &str,
+        agent: &str,
+        capability: nerve_core::policy::Capability,
+        reason: String,
+    ) {
+        let record = nerve_core::policy::PolicyDecisionRecord {
+            schema_version: nerve_core::policy::POLICY_SCHEMA_VERSION,
+            policy_version: policy_version.to_string(),
+            session_id: job_id.to_string(),
+            agent: agent.to_string(),
+            tool: "delegate.start".to_string(),
+            capability,
+            decision: "allow".to_string(),
+            reason,
+            args_hash: String::new(),
+        };
+        let ledger_seq = plane.record_decision(&record);
+        self.emit(RuntimeEvent::PolicyDecisionRecorded { record, ledger_seq });
     }
 
     /// L4 — issue a signed Verification Receipt binding a sealed verdict (best-effort),
@@ -1063,6 +1151,9 @@ impl JobManager {
         // downstream paths inherit the scout's wrapped task + forced read-only posture.
         let (task, autonomy) = crate::delegate_roles::apply_role(role, task, autonomy);
         let task = task.as_str();
+        // L3↔L1: commit the authorization posture (capability ceiling) to the evidence
+        // ledger before the agent runs — both the live and one-shot paths inherit it.
+        self.record_delegate_authorization(job_id, agent, role, autonomy);
         let resolved = DelegateAgent::from_name(agent)
             .map_err(|err| nerve_runtime::RuntimeError::adapter(err.to_string()))?;
         let root = self.delegate_root()?;
