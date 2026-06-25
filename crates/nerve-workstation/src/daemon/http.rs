@@ -203,7 +203,7 @@ fn handle_request(ctx: &HttpContext, request: Request) -> Result<()> {
         }),
         (Method::Options, _) => respond_preflight(request, cors.as_deref()),
         // The Leptos WASM frontend is the primary GUI at `/` (G4 flip). It is a
-        // client of this same Protocol v4 transport (POST /rpc + GET /events),
+        // client of this same Protocol v7 transport (POST /rpc + GET /events),
         // never a new protocol.
         (Method::Get, "/") => {
             super::app::serve_index(ctx.security.embed_token(), request, cors.as_deref())
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn legacy_gui_exposes_sticky_approval_decisions() {
-        // The fallback GUI should expose the full Protocol-v4 approval vocabulary,
+        // The fallback GUI should expose the full Protocol-v7 approval vocabulary,
         // matching the TUI and Codex-style approval wording.
         assert!(GUI_HTML.contains("Allow for session"));
         assert!(GUI_HTML.contains("Always deny"));

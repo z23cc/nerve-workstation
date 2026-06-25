@@ -3,7 +3,7 @@
 > **Positioning note (2026-06-24):** governed by `docs/designs/trust-substrate.md` — Nerve's moat is the deterministic flight-recorder + execution-grounded re-verifier (replayable **Run** + signed **Receipt**); the `delegate.*` cockpit is the distribution body. Under that thesis, this doc is the GUI component README — the WASM frontend is the cockpit/distribution body that will host the Receipt/Review/fleet surfaces.
 
 The Leptos (Rust → WASM) **client-side-rendered** frontend for `nerve daemon`.
-It is a client of the runtime protocol (Protocol v4), talking **only** over HTTP
+It is a client of the runtime protocol (Protocol v7), talking **only** over HTTP
 `POST /rpc` (JSON-RPC) and `GET /events` (SSE) — never Tauri IPC. It shares the
 engine's exact wire types via the [`nerve-proto`](../nerve-proto) crate, so there
 is no hand-duplicated protocol vocabulary and no TS/codegen drift.

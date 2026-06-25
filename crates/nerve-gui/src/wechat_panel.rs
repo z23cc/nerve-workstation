@@ -1,7 +1,7 @@
 //! The WeChat (个人微信) bridge panel: QR login + bridge config/control + a live
 //! status and message log driven by folding `RuntimeEvent::Wechat` SSE events.
 //!
-//! The panel is a Protocol-v4 client like the rest of the GUI: `Log in` runs a
+//! The panel is a Protocol-v7 client like the rest of the GUI: `Log in` runs a
 //! `wechat.login` job (the daemon streams the QR + login transitions back as
 //! global `wechat` events, folded by [`crate::events::route_event`]), and
 //! `Start`/`Stop` run `wechat.start` / `wechat.stop`. `wechat.start` requires the
