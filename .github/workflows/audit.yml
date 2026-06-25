@@ -1,0 +1,32 @@
+name: audit
+
+# RUSTSEC advisory audit. Advisories are disclosed over time, not per-commit, so
+# running this on every push wastes a full job spin-up. Instead it runs weekly,
+# whenever the dependency set actually changes (Cargo.toml/Cargo.lock), and on
+# demand — which catches both newly-disclosed advisories and newly-added deps.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: RUSTSEC advisory audit
+        run: cargo audit

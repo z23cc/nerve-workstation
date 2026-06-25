@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Local pre-push gate — runs the FAST, deterministic checks locally so a trivial
+# failure aborts the push before it ever costs a CI minute. The heavy correctness
+# gates (clippy -D warnings + the full workspace test suite) stay in CI as the
+# objective backstop; opt into running them locally too with NERVE_PREPUSH_FULL=1.
+#
+# Install once (version-controlled, applies to every checkout that runs it):
+#   git config core.hooksPath Scripts/git-hooks
+#
+# Bypass for a one-off push:  git push --no-verify
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+run() {
+  printf '\033[1m[pre-push] %s\033[0m\n' "$1"
+  shift
+  "$@"
+}
+
+run "rustfmt"               cargo fmt --all --check
+run "file-size cap"         bash Scripts/check-file-size.sh --strict
+run "version coherence"     bash Scripts/check-versions.sh
+run "dist SRI consistency"  bash Scripts/check-dist-consistency.sh
+
+if [ "${NERVE_PREPUSH_FULL:-0}" = "1" ]; then
+  run "clippy (-D warnings)" cargo clippy --workspace --all-targets -- -D warnings
+  run "clippy wasm32"        cargo clippy -p nerve-gui --target wasm32-unknown-unknown -- -D warnings
+  run "test (workspace)"     cargo test --workspace
+fi
+
+printf '\033[1;32m[pre-push] all local gates passed\033[0m\n'

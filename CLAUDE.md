@@ -34,10 +34,16 @@ cargo test --workspace golden_build_context             # run a single test by n
 # Golden snapshots (insta) — after an *intentional* change to tool output:
 cargo insta test --review                               # or: cargo insta accept
 
-# CI gates (all enforced; clippy runs with -D warnings)
+# Gates. CI (.github/workflows/ci.yml) is the backstop and runs the heavy ones
+# (clippy + the full test suite) on every non-doc push/PR to main. The fast
+# deterministic ones also run locally via a pre-push hook so a trivial failure
+# never burns a CI run — install once: `git config core.hooksPath Scripts/git-hooks`
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ./Scripts/check-file-size.sh                            # files <= 600 non-test lines (hard gate)
+./Scripts/check-versions.sh                             # engine <-> desktop version coherence
+./Scripts/check-dist-consistency.sh                    # committed nerve-gui dist matches its SRI
+# RUSTSEC audit runs on a weekly schedule (audit.yml), not per-push.
 
 # Runtime protocol: Rust types in nerve-runtime are the source of truth. The
 # export-runtime-protocol bin emits docs/protocol/runtime-v3.*.json; a Rust drift

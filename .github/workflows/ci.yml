@@ -1,16 +1,23 @@
 name: CI
 
-# Enforces the documented gates (CLAUDE.md "CI gates") on every push/PR to main —
-# previously these ran only on Windows/release, never on each commit. Mirrors the
-# local gates so main stays green: fmt, clippy -D warnings, the file-size cap, the
-# full workspace test suite, and runtime-protocol drift. A separate job runs a
-# RUSTSEC advisory audit.
+# The objective backstop on main: the heavy correctness gates (clippy -D warnings
+# + the full workspace test suite) that need the compile. The fast, deterministic
+# gates (fmt, file-size, version + dist SRI consistency) also run locally via the
+# Scripts/git-hooks/pre-push hook, so a trivial failure aborts the push before it
+# ever costs a CI minute. Doc-only (*.md) changes skip the heavy compile, and the
+# RUSTSEC advisory audit runs on its own schedule (audit.yml), not every push.
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
 
 permissions:
   contents: read
@@ -54,18 +61,7 @@ jobs:
 
       - name: Test (whole workspace)
         run: cargo test --workspace
-
-      - name: Runtime-protocol drift
-        run: cargo run -p nerve-runtime --bin export-runtime-protocol -- --check
-
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Set up Rust
-        run: |
-          rustup update stable
-          rustup default stable
-      - uses: taiki-e/install-action@cargo-audit
-      - name: RUSTSEC advisory audit
-        run: cargo audit
+        # Runtime-protocol drift is already asserted by the
+        # `generated_protocol_rust_artifacts_are_current` test in nerve-runtime
+        # (run here), so a separate `export-runtime-protocol --check` step would
+        # only recompile the bin to repeat a check the suite already made.
