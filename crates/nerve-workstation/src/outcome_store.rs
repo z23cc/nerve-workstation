@@ -34,28 +34,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Deferred calibration seam (`trust-substrate.md` §5, INV-R3/R4): a model that
-/// reads the outcome corpus to *advise* (e.g. flaky-class, evidence→shipped
-/// likelihood) — never to judge. Ships disabled today; calibration is therefore
-/// advisory-by-construction.
-// L6 calibration is the late dividend (needs adoption data); the seam ships disabled
-// (NoCalibrator) and is unconsumed until a model is wired — deferred infra.
-#[allow(dead_code)]
+/// Calibration seam (`trust-substrate.md` §5, INV-R1/R3/R4): a model that reads the
+/// outcome corpus to *advise* (ship rate, per-agent rates, the passed-then-regressed
+/// weak signal) — never to judge. The result is **observational only**: it MUST NOT feed
+/// back into any verdict or gate. The shipped impl is the deterministic
+/// [`CorpusCalibrator`]; a trained ML model (needing adoption data + an inference runtime,
+/// hence above the kernel's determinism boundary) is the deferred upgrade behind this
+/// same trait — mirroring the L4 `Signer` seam (local-ed25519 shipped, sigstore deferred).
 pub(crate) trait OutcomeCalibrator {
-    /// Advise over a corpus of records, returning `Some(advisory_json)` when a
-    /// calibration model is wired, else `None`. The result is observational only —
-    /// it MUST NOT feed back into any verdict (INV-R1).
+    /// Advise over a corpus of records, returning `Some(advisory_json)` when there is
+    /// signal (≥1 labeled run), else `None`. Observational only — never a verdict.
     fn calibrate(&self, records: &[OutcomeRecord]) -> Option<Value>;
 }
 
-/// The shipped default calibrator: no model, so it always declines. Keeps the
-/// corpus advisory-by-construction until a real calibrator is wired.
-#[allow(dead_code)]
-pub(crate) struct NoCalibrator;
+/// The shipped calibrator: the pure, deterministic [`nerve_core::outcome::calibrate`]
+/// fold (counts + integer ship rates, no ML, no floats). Returns `None` on an unlabeled
+/// corpus (no signal yet — honest), else the advisory `OutcomeCalibration` as JSON.
+pub(crate) struct CorpusCalibrator;
 
-impl OutcomeCalibrator for NoCalibrator {
-    fn calibrate(&self, _records: &[OutcomeRecord]) -> Option<Value> {
-        None
+impl OutcomeCalibrator for CorpusCalibrator {
+    fn calibrate(&self, records: &[OutcomeRecord]) -> Option<Value> {
+        let calibration = nerve_core::outcome::calibrate(records);
+        if calibration.labeled_runs == 0 {
+            return None;
+        }
+        serde_json::to_value(&calibration).ok()
     }
 }
 
@@ -204,10 +207,12 @@ pub(crate) fn handle_outcome_get(
 
 /// Resolve an `outcome.query`: the matching records (filtered by `agent` and/or by
 /// the presence of an `outcome` disposition, capped at `limit`) plus a rolled-up
-/// [`OutcomeSummary`](nerve_core::outcome::OutcomeSummary) over the *matched* set.
-/// `None` store (no served root) yields
-/// an empty result. The summary is computed by the pure
-/// [`summarize`](nerve_core::outcome::summarize) fold.
+/// [`OutcomeSummary`](nerve_core::outcome::OutcomeSummary) and the advisory
+/// `calibration` (the [`CorpusCalibrator`] over the *matched* set — `null` when no run
+/// is labeled). `None` store (no served root) yields an empty result. Both rollups are
+/// pure folds ([`summarize`](nerve_core::outcome::summarize) /
+/// [`calibrate`](nerve_core::outcome::calibrate)); the calibration is **observational
+/// only** (INV-R1/R3), never a gate.
 pub(crate) fn handle_outcome_query(
     agent: Option<&str>,
     outcome: Option<Outcome>,
@@ -229,7 +234,9 @@ pub(crate) fn handle_outcome_query(
         .map(|record| serde_json::to_value(record).unwrap_or(Value::Null))
         .collect::<Vec<_>>();
     let summary = serde_json::to_value(&summary).unwrap_or(Value::Null);
-    json!({ "records": records, "summary": summary })
+    // Advisory only (INV-R1/R3): surfaced for a human to read, never fed to a verdict.
+    let calibration = CorpusCalibrator.calibrate(&matched);
+    json!({ "records": records, "summary": summary, "calibration": calibration })
 }
 
 /// Atomic file write: temp file + rename, so a reader never observes a half-written
@@ -329,10 +336,35 @@ mod tests {
     }
 
     #[test]
-    fn no_calibrator_declines() {
-        assert!(NoCalibrator.calibrate(&[]).is_none());
-        let record = nerve_core::outcome::empty_record("r", None, None);
-        assert!(NoCalibrator.calibrate(&[record]).is_none());
+    fn outcome_query_surfaces_advisory_calibration() {
+        let dir = tempdir().unwrap();
+        let store = OutcomeStore::new(dir.path().join("outcomes"));
+        // One clean ship + one merged-then-reverted (passed the bar, then regressed).
+        let label = |run: &str, outcome: Outcome, source: LabelSource| {
+            handle_outcome_label(run, outcome, source, None, None, None, Some(&store)).unwrap();
+        };
+        label("run-ship", Outcome::Merged, LabelSource::Human);
+        label("run-regress", Outcome::Merged, LabelSource::Human);
+        label("run-regress", Outcome::Reverted, LabelSource::Ci);
+
+        // The query surfaces the advisory calibration alongside the summary.
+        let value = handle_outcome_query(None, None, 100, Some(&store));
+        let cal = &value["calibration"];
+        assert_eq!(cal["labeled_runs"], json!(2));
+        assert_eq!(cal["shipped"], json!(1)); // run-ship
+        assert_eq!(cal["regressed"], json!(1)); // run-regress
+        assert_eq!(cal["passed_and_regressed"], json!(1)); // run-regress (Merged + Reverted)
+        assert_eq!(cal["ship_permille"], json!(500)); // 1/2
+
+        // No signal => the calibrator declines and the query renders calibration: null
+        // (never fabricates an advisory). Verified both directly and end-to-end.
+        assert!(CorpusCalibrator.calibrate(&[]).is_none());
+        let unlabeled = nerve_core::outcome::empty_record("u", None, None);
+        assert!(CorpusCalibrator.calibrate(&[unlabeled]).is_none());
+        let empty_dir = tempdir().unwrap();
+        let empty_store = OutcomeStore::new(empty_dir.path().join("outcomes"));
+        let empty_value = handle_outcome_query(None, None, 100, Some(&empty_store));
+        assert!(empty_value["calibration"].is_null());
     }
 
     #[test]

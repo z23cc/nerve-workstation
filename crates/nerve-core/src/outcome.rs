@@ -26,7 +26,9 @@
 pub use nerve_proto::outcome::{
     LabelSource, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeLabel, OutcomeRecord, OutcomeSummary,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// Lowercase-hex SHA-256 of one label's *identity* — its content **excluding** the
 /// derived `label_hash`/`chained_hash` and the host-supplied `observed_at_ms`. The
@@ -134,6 +136,129 @@ pub fn summarize(records: &[OutcomeRecord]) -> OutcomeSummary {
         }
     }
     summary
+}
+
+/// Advisory calibration over an outcome corpus — historical, observational signal a
+/// human reads, **never** a gate (INV-R1: court reporter, not judge; INV-R3: advisory,
+/// non-load-bearing). Integer-only (counts + parts-per-thousand rates, **no floats**), a
+/// pure fold of its records, so it stays deterministic + golden-testable (INV-R2). This
+/// is the shipped *deterministic* calibrator; a trained ML model (needing adoption data
+/// and an inference runtime, hence out of the kernel) is the deferred upgrade behind the
+/// same `OutcomeCalibrator` seam.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OutcomeCalibration {
+    /// Records carrying at least one label (the population the rates are over).
+    pub labeled_runs: u64,
+    /// Labeled runs that shipped cleanly (a positive label, no negative one).
+    pub shipped: u64,
+    /// Labeled runs that regressed (any `reverted`/`incident` label).
+    pub regressed: u64,
+    /// Labeled runs carrying **both** a positive (`merged`/`shipped_no_regress`) and a
+    /// negative (`reverted`/`incident`) label — the change cleared the bar but reality
+    /// disagreed. Order-agnostic set membership (not a `seq`-ordered "then"); the
+    /// corpus's weak-signal count, advisory only.
+    pub passed_and_regressed: u64,
+    /// Parts-per-thousand of labeled runs that shipped cleanly (`0` when none labeled).
+    pub ship_permille: u64,
+    /// Per-agent breakdown, agents in deterministic (sorted) order.
+    pub by_agent: Vec<AgentCalibration>,
+}
+
+/// One agent's slice of the [`OutcomeCalibration`] — its labeled-run population and ship
+/// rate, so a reader can compare agents. Advisory only.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentCalibration {
+    /// The agent the slice is for (`"unattributed"` for records with no agent).
+    pub agent: String,
+    pub labeled_runs: u64,
+    pub shipped: u64,
+    pub regressed: u64,
+    pub ship_permille: u64,
+}
+
+/// A running per-population tally of label classifications.
+#[derive(Default, Clone, Copy)]
+struct Tally {
+    labeled: u64,
+    shipped: u64,
+    regressed: u64,
+    passed_and_regressed: u64,
+}
+
+impl Tally {
+    /// Fold one labeled run's `(has_positive, has_negative)` classification in.
+    fn add(&mut self, (positive, negative): (bool, bool)) {
+        self.labeled += 1;
+        if negative {
+            self.regressed += 1;
+        }
+        if positive && !negative {
+            self.shipped += 1;
+        }
+        if positive && negative {
+            self.passed_and_regressed += 1;
+        }
+    }
+}
+
+/// Classify a record's labels: did it accrue any positive (`merged`/`shipped_no_regress`)
+/// and/or any negative (`reverted`/`incident`) outcome?
+fn classify(record: &OutcomeRecord) -> (bool, bool) {
+    let (mut positive, mut negative) = (false, false);
+    for label in &record.labels {
+        match label.outcome {
+            Outcome::Merged | Outcome::ShippedNoRegress => positive = true,
+            Outcome::Reverted | Outcome::Incident => negative = true,
+        }
+    }
+    (positive, negative)
+}
+
+/// Parts-per-thousand of `num` out of `den` (integer; `0` when `den == 0`). Avoids
+/// floats so the calibration stays `Eq`-derivable + byte-stable across platforms.
+fn permille(num: u64, den: u64) -> u64 {
+    num.saturating_mul(1000).checked_div(den).unwrap_or(0)
+}
+
+/// Calibrate an outcome corpus into advisory [`OutcomeCalibration`] statistics — a pure,
+/// deterministic fold (no IO, no wall-clock, no ML inference, no randomness; INV-R2).
+/// Unlabeled records are skipped (no signal). Per-agent slices are emitted in sorted
+/// agent order. **Observational only — the result MUST NOT feed back into any verdict
+/// or gate** (INV-R1/R3); it answers "historically, how often did such runs ship?", for
+/// a human to read, not Nerve to decide.
+#[must_use]
+pub fn calibrate(records: &[OutcomeRecord]) -> OutcomeCalibration {
+    let mut overall = Tally::default();
+    let mut per_agent: BTreeMap<String, Tally> = BTreeMap::new();
+    for record in records {
+        if record.labels.is_empty() {
+            continue;
+        }
+        let class = classify(record);
+        overall.add(class);
+        let agent = record
+            .agent
+            .clone()
+            .unwrap_or_else(|| "unattributed".to_string());
+        per_agent.entry(agent).or_default().add(class);
+    }
+    OutcomeCalibration {
+        labeled_runs: overall.labeled,
+        shipped: overall.shipped,
+        regressed: overall.regressed,
+        passed_and_regressed: overall.passed_and_regressed,
+        ship_permille: permille(overall.shipped, overall.labeled),
+        by_agent: per_agent
+            .into_iter()
+            .map(|(agent, tally)| AgentCalibration {
+                agent,
+                labeled_runs: tally.labeled,
+                shipped: tally.shipped,
+                regressed: tally.regressed,
+                ship_permille: permille(tally.shipped, tally.labeled),
+            })
+            .collect(),
+    }
 }
 
 /// Lowercase-hex encode bytes (mirrors [`crate::provenance`]'s `hex`).
@@ -276,5 +401,48 @@ mod tests {
         let json = serde_json::to_string(&record).expect("serialize");
         let back: OutcomeRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(record, back);
+    }
+
+    #[test]
+    fn calibrate_is_a_deterministic_advisory_fold() {
+        let rec = |run: &str, agent: Option<&str>, outcomes: &[Outcome]| {
+            let mut record = empty_record(run, None, agent.map(str::to_string));
+            for (seq, outcome) in outcomes.iter().enumerate() {
+                record
+                    .labels
+                    .push(label(seq as u64, *outcome, LabelSource::Human));
+            }
+            record
+        };
+        let corpus = vec![
+            rec("r1", Some("codex"), &[Outcome::Merged]), // shipped
+            rec("r2", Some("codex"), &[Outcome::Merged, Outcome::Reverted]), // passed_then_regressed
+            rec("r3", Some("claude"), &[Outcome::Incident]),                 // regressed
+            rec("r4", Some("claude"), &[Outcome::ShippedNoRegress]),         // shipped
+            rec("r5", Some("codex"), &[]),                                   // unlabeled -> skipped
+        ];
+        let cal = calibrate(&corpus);
+        assert_eq!(cal.labeled_runs, 4);
+        assert_eq!(cal.shipped, 2); // r1, r4
+        assert_eq!(cal.regressed, 2); // r2, r3
+        assert_eq!(cal.passed_and_regressed, 1); // r2 (both Merged and Reverted)
+        assert_eq!(cal.ship_permille, 500); // 2/4
+
+        // Per-agent slices in sorted agent order; unlabeled r5 doesn't inflate codex.
+        assert_eq!(cal.by_agent.len(), 2);
+        assert_eq!(cal.by_agent[0].agent, "claude");
+        assert_eq!(cal.by_agent[0].labeled_runs, 2);
+        assert_eq!(cal.by_agent[0].shipped, 1); // r4
+        assert_eq!(cal.by_agent[1].agent, "codex");
+        assert_eq!(cal.by_agent[1].labeled_runs, 2); // r1, r2
+        assert_eq!(cal.by_agent[1].shipped, 1); // r1
+
+        // Pure + deterministic: same corpus -> identical result.
+        assert_eq!(cal, calibrate(&corpus));
+        // Empty corpus -> zeroed, no agents, no div-by-zero panic.
+        let empty = calibrate(&[]);
+        assert_eq!(empty.labeled_runs, 0);
+        assert_eq!(empty.ship_permille, 0);
+        assert!(empty.by_agent.is_empty());
     }
 }
