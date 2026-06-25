@@ -93,6 +93,24 @@ impl RuntimeEvent {
         }
     }
 
+    /// Announce a freshly-appended L1 evidence-ledger record (the live ledger-growth
+    /// signal). `kind` is the record's serde discriminant tag; `record_hash` is its
+    /// chained identity and `head_hash` the advanced chain head.
+    #[must_use]
+    pub fn ledger_appended(
+        seq: u64,
+        kind: impl Into<String>,
+        record_hash: impl Into<String>,
+        head_hash: impl Into<String>,
+    ) -> Self {
+        Self::LedgerAppended {
+            seq,
+            kind: kind.into(),
+            record_hash: record_hash.into(),
+            head_hash: head_hash.into(),
+        }
+    }
+
     #[must_use]
     pub fn flow_started(flow_id: impl Into<String>, strategy: Strategy) -> Self {
         Self::FlowStarted {

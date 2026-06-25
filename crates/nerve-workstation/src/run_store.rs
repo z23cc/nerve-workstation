@@ -125,6 +125,12 @@ pub(crate) struct SealedRun {
     pub(crate) run_id: String,
     pub(crate) root_hash: String,
     pub(crate) event_count: u64,
+    /// The delegated agent this run captured (carried so the L1 `RunRecorded` evidence
+    /// record can name it without re-loading the persisted run).
+    pub(crate) agent: String,
+    /// Content hash of the run's task text (the first `RunStarted` event's `task`), so
+    /// the L1 record commits to *what was asked* without inlining the prompt.
+    pub(crate) task_hash: String,
 }
 
 impl RunWriter {
@@ -173,6 +179,8 @@ impl RunWriter {
     /// store or the write failed (best-effort — the caller continues regardless).
     pub(crate) fn seal(self, finished: bool, store: Option<&RunStore>) -> Option<SealedRun> {
         let event_count = self.events.len() as u64;
+        let agent = self.agent.clone();
+        let task_hash = task_hash_of(&self.events);
         let run = nerve_core::build_run(
             self.session_id,
             self.agent,
@@ -191,6 +199,8 @@ impl RunWriter {
                 run_id: run.run_id,
                 root_hash: run.root_hash,
                 event_count,
+                agent,
+                task_hash,
             }),
             Err(_) => None,
         }
@@ -315,6 +325,21 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+/// Content hash of a run's task text — the first `RunStarted` event's `task`, hashed via
+/// the pure kernel canonical-JSON SHA-256 so the L1 `RunRecorded` record commits to
+/// *what was asked* without inlining the prompt. An empty string (no `RunStarted`) hashes
+/// to a stable digest of `""`.
+fn task_hash_of(events: &[Event]) -> String {
+    let task = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::RunStarted { task, .. } => Some(task.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    nerve_core::provenance::hash_canonical_json(&json!(task))
 }
 
 #[cfg(test)]

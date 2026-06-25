@@ -141,6 +141,40 @@ pub(crate) fn run_ledger_query(
     json!({ "records": records })
 }
 
+/// Resolve a `ledger.verify`: re-derive the whole chain via the pure
+/// [`nerve_core::ledger::verify_chain`] and report whether it is intact. A `None` store
+/// (no served root) verifies an empty chain (`ok:true, count:0`). On an intact chain the
+/// result is `{ "ok": true, "count": N, "head_hash": "…" }`; on tamper it is
+/// `{ "ok": false, "error": "<HashMismatch|SeqGap|PrevMismatch>", "seq": K }` pointing at
+/// the first record where the re-derivation diverged (INV-R5: the tamper-detection moat).
+pub(crate) fn run_ledger_verify(store: Option<&LedgerStore>) -> Value {
+    let records = store.map(LedgerStore::read_all).unwrap_or_default();
+    match nerve_core::ledger::verify_chain(&records) {
+        Ok(head) => json!({
+            "ok": true,
+            "count": head.count,
+            "head_hash": head.head_hash,
+        }),
+        Err(err) => {
+            let (class, seq) = verify_error_class(&err);
+            json!({ "ok": false, "error": class, "seq": seq })
+        }
+    }
+}
+
+/// Map a [`nerve_core::ledger::LedgerVerifyError`] to its `(class, seq)` wire pair. For a
+/// `SeqGap` the reported `seq` is the position the chain required (`expected`).
+pub(crate) fn verify_error_class(
+    err: &nerve_core::ledger::LedgerVerifyError,
+) -> (&'static str, u64) {
+    use nerve_core::ledger::LedgerVerifyError as E;
+    match err {
+        E::HashMismatch { seq } => ("HashMismatch", *seq),
+        E::SeqGap { expected, .. } => ("SeqGap", *expected),
+        E::PrevMismatch { seq } => ("PrevMismatch", *seq),
+    }
+}
+
 /// Whether one record passes every supplied facet (an unset facet always matches).
 fn matches_filters(
     record: &LedgerRecord,
@@ -171,15 +205,16 @@ fn matches_filters(
         return false;
     }
     if let Some(want) = record_kind
-        && kind_tag(&record.kind) != want
+        && ledger_kind_tag(&record.kind) != want
     {
         return false;
     }
     true
 }
 
-/// The serde `kind` tag for a [`LedgerKind`] (matches the on-wire discriminant).
-fn kind_tag(kind: &LedgerKind) -> &'static str {
+/// The serde `kind` tag for a [`LedgerKind`] (matches the on-wire discriminant). Used
+/// both to resolve a `record_kind` query facet and to label a `LedgerAppended` event.
+pub(crate) fn ledger_kind_tag(kind: &LedgerKind) -> &'static str {
     match kind {
         LedgerKind::RunRecorded { .. } => "run_recorded",
         LedgerKind::DiffRecorded { .. } => "diff_recorded",
@@ -457,6 +492,66 @@ mod tests {
     fn query_none_store_is_empty() {
         let result = run_ledger_query(None, None, None, None, None, None, 200);
         assert_eq!(result["records"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn verify_reports_ok_on_a_fresh_chain() {
+        let dir = tempdir().unwrap();
+        let store = LedgerStore::new(dir.path().join("ledger"));
+        let r0 = store.append(run_recorded(0)).unwrap();
+        let r1 = store.append(run_recorded(1)).unwrap();
+        let result = run_ledger_verify(Some(&store));
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["count"], json!(2));
+        assert_eq!(result["head_hash"], json!(r1.record_hash));
+        assert_ne!(r0.record_hash, r1.record_hash);
+    }
+
+    #[test]
+    fn verify_none_store_is_an_intact_empty_chain() {
+        let result = run_ledger_verify(None);
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["count"], json!(0));
+        assert_eq!(result["head_hash"], json!(""));
+    }
+
+    #[test]
+    fn verify_reports_hash_mismatch_on_a_flipped_byte() {
+        let dir = tempdir().unwrap();
+        let store = LedgerStore::new(dir.path().join("ledger"));
+        store.append(run_recorded(0)).unwrap();
+        store.append(run_recorded(1)).unwrap();
+        // Flip a byte in the first record's payload (still valid JSON), leaving the
+        // stored record_hash stale -> the recompute at seq 0 diverges.
+        let raw = fs::read_to_string(store.log_path()).unwrap();
+        fs::write(store.log_path(), raw.replacen("run-0", "run-X", 1)).unwrap();
+        let result = run_ledger_verify(Some(&store));
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["error"], json!("HashMismatch"));
+        assert_eq!(result["seq"], json!(0));
+    }
+
+    #[test]
+    fn verify_reports_seq_gap_when_a_record_is_dropped() {
+        let dir = tempdir().unwrap();
+        let store = LedgerStore::new(dir.path().join("ledger"));
+        store.append(run_recorded(0)).unwrap();
+        store.append(run_recorded(1)).unwrap();
+        store.append(run_recorded(2)).unwrap();
+        // Drop the middle line: the third record's seq (2) no longer matches its new
+        // position (1), so verify_chain reports a SeqGap at the required position.
+        let raw = fs::read_to_string(store.log_path()).unwrap();
+        let kept: Vec<&str> = raw
+            .lines()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, line)| line)
+            .collect();
+        fs::write(store.log_path(), format!("{}\n", kept.join("\n"))).unwrap();
+        let result = run_ledger_verify(Some(&store));
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["error"], json!("SeqGap"));
+        assert_eq!(result["seq"], json!(1));
     }
 
     #[test]

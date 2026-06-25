@@ -58,6 +58,7 @@ impl RuntimeCommand {
             Self::RunGet { .. } => "run.get",
             Self::ReplayStart { .. } => "replay.start",
             Self::LedgerQuery { .. } => "ledger.query",
+            Self::LedgerVerify => "ledger.verify",
             Self::VerifyStart { .. } => "verify.start",
             Self::VerifyGet { .. } => "verify.get",
             Self::VerifyList { .. } => "verify.list",
@@ -119,6 +120,7 @@ impl RuntimeCommand {
             | Self::RunGet { .. }
             | Self::ReplayStart { .. }
             | Self::LedgerQuery { .. }
+            | Self::LedgerVerify
             | Self::VerifyStart { .. }
             | Self::VerifyGet { .. }
             | Self::VerifyList { .. }

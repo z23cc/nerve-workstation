@@ -36,10 +36,25 @@ enum CommandKind {
     Verify(commands::gate::VerifyArgs),
     /// Translate a sealed Receipt into a merge-gate decision + exit code (L5).
     Gate(commands::gate::GateArgs),
+    /// Inspect the L1 cross-run evidence ledger (re-derive its hash chain).
+    Ledger(LedgerArgs),
     /// EXPERIMENTAL: run a declarative agent-orchestration workflow (C1). Hidden
     /// from help; off-protocol, the WorkflowDef shape is not yet a stable contract.
     #[command(hide = true)]
     Flow(FlowArgs),
+}
+
+#[derive(Debug, Args)]
+struct LedgerArgs {
+    #[command(subcommand)]
+    command: LedgerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum LedgerCommand {
+    /// Re-derive the evidence ledger's hash chain and report whether it is intact
+    /// (read-only; exit 0 intact, non-zero on a detected tamper).
+    Verify(commands::ledger::LedgerVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -103,6 +118,14 @@ pub(crate) fn run() -> Result<()> {
             let code = commands::gate::gate(args)?;
             std::process::exit(code)
         }
+        // `ledger verify` is a CI surface whose exit code IS the verdict (0 intact,
+        // non-zero on a detected tamper), so propagate it to the process.
+        CommandKind::Ledger(args) => match args.command {
+            LedgerCommand::Verify(verify_args) => {
+                let code = commands::ledger::verify(verify_args)?;
+                std::process::exit(code)
+            }
+        },
         CommandKind::Flow(args) => match args.command {
             FlowCommand::Run(flow_args) => commands::flow::run(flow_args),
         },
@@ -131,6 +154,16 @@ mod tests {
             Cli::try_parse_from(["nerve", "gate", "--receipt", "r.json", "--run", "x"]).is_err(),
             "--receipt conflicts with --run"
         );
+    }
+
+    #[test]
+    fn cli_parses_ledger_verify() {
+        let bare = Cli::try_parse_from(["nerve", "ledger", "verify"]).expect("ledger verify parse");
+        assert!(matches!(bare.command, CommandKind::Ledger(_)));
+        let with_flags =
+            Cli::try_parse_from(["nerve", "ledger", "verify", "--root", ".", "--json"])
+                .expect("ledger verify flags parse");
+        assert!(matches!(with_flags.command, CommandKind::Ledger(_)));
     }
 
     #[test]

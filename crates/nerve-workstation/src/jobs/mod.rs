@@ -510,7 +510,7 @@ fn executor_for(command: &RuntimeCommand) -> Executor {
         | RuntimeCommand::RunGet { .. }
         | RuntimeCommand::OtelIngest { .. } => Executor::Run,
         RuntimeCommand::ReplayStart { .. } => Executor::Replay,
-        RuntimeCommand::LedgerQuery { .. } => Executor::Ledger,
+        RuntimeCommand::LedgerQuery { .. } | RuntimeCommand::LedgerVerify => Executor::Ledger,
         RuntimeCommand::VerifyStart { .. }
         | RuntimeCommand::VerifyGet { .. }
         | RuntimeCommand::VerifyList { .. } => Executor::Verify,
@@ -632,7 +632,8 @@ mod command_executor_partition {
             "flow.respond" => json!({ "flow_id": "f", "request_id": "r", "decision": "allow" }),
             "wechat.login" | "wechat.start" | "wechat.stop" | "wechat.status" => json!({}),
             "replay.start" => json!({ "run_id": "r" }),
-            "ledger.query" | "policy.get" | "policy.decisions" | "verify.list" => json!({}),
+            "ledger.query" | "ledger.verify" | "policy.get" | "policy.decisions"
+            | "verify.list" => json!({}),
             "verify.start" => json!({ "run_id": "r" }),
             "verify.get" => json!({ "verdict_id": "v" }),
             "receipt.get" => json!({ "receipt_id": "r" }),

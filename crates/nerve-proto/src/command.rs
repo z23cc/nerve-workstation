@@ -44,6 +44,7 @@ pub const RUNTIME_COMMAND_NAMES: &[&str] = &[
     "run.get",
     "replay.start",
     "ledger.query",
+    "ledger.verify",
     "verify.start",
     "verify.get",
     "verify.list",
@@ -325,6 +326,14 @@ pub enum RuntimeCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
     },
+    /// L1 — re-derive the append-only evidence ledger and report whether the hash
+    /// chain is intact (read-only; the tamper-detection moat). No facets: the whole
+    /// chain is re-derived via `nerve_core::ledger::verify_chain`. The result is
+    /// `{ "ok": true, "count": N, "head_hash": "…" }` on an intact chain, or
+    /// `{ "ok": false, "error": "<HashMismatch|SeqGap|PrevMismatch>", "seq": K }`
+    /// pointing at the first record where the re-derivation diverged.
+    #[serde(rename = "ledger.verify")]
+    LedgerVerify,
     /// L2 — re-run the org's own checks over a Run's diff in the pinned closure,
     /// producing an execution-grounded Verdict. The authority is BORROWED from the
     /// org's CI (INV-R3); Nerve never invents a correctness verdict.
