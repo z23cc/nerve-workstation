@@ -1,0 +1,48 @@
+name: Artifacts
+
+# Enforces the two pure-shell artifact gates that ci.yml does not cover, keeping
+# the committed release artifacts honest on every push/PR to main:
+#   - check-versions.sh: the desktop app version must match the engine
+#     [workspace.package] version (the desktop crate is its own cargo workspace
+#     and does not inherit it), so the four version strings cannot drift.
+#   - check-dist-consistency.sh: the committed crates/nerve-gui/dist/ bundle that
+#     the nerve binary include_bytes!'s and serves at /app must match its own
+#     index.html SRI hashes (catches an index-updated-but-asset-stale mismatch).
+# No Rust toolchain or trunk needed — both gates are pure shell (openssl + shasum
+# are present on ubuntu-latest). The engine determinism CI lives in ci.yml and is
+# intentionally left untouched here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/nerve-gui/dist/**"
+      - "apps/desktop/**"
+      - "Cargo.toml"
+      - "Scripts/check-*.sh"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/nerve-gui/dist/**"
+      - "apps/desktop/**"
+      - "Cargo.toml"
+      - "Scripts/check-*.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Version consistency (engine <-> desktop)
+        run: bash Scripts/check-versions.sh
+
+      - name: Dist SRI consistency (committed nerve-gui bundle)
+        run: bash Scripts/check-dist-consistency.sh
