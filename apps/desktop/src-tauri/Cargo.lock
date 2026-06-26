@@ -1768,7 +1768,7 @@ dependencies = [
 
 [[package]]
 name = "nerve-desktop"
-version = "0.0.74"
+version = "0.0.75"
 dependencies = [
  "libc",
  "serde",
