@@ -137,6 +137,45 @@ pub async fn fetch_ledger_integrity(token: &str) -> Option<LedgerIntegrity> {
     })
 }
 
+/// The L6 advisory **flaky-rate** calibration, folded from `outcome.query`'s
+/// `flaky_rates` array for the sidebar badge. Purely observational (INV-R1) — it
+/// is a signal a human reads ("agent wrong vs. test flaky?"), never a gate.
+/// `flaky_checks` = checks with any flakiness; `total_checks` = corpus breadth;
+/// `worst_permille` = the highest per-check flaky parts-per-thousand.
+#[derive(Clone, Default)]
+pub struct FlakySummary {
+    pub flaky_checks: u64,
+    pub total_checks: u64,
+    pub worst_permille: u64,
+}
+
+/// Fold the advisory per-check flaky-rate corpus via the daemon's read-only
+/// `outcome.query` job (no filters), mirroring [`fetch_ledger_integrity`] so the
+/// sidebar can surface the same "agent wrong vs. test flaky?" signal CI/MCP get.
+/// `None` if the job fails, so the badge stays absent rather than showing a stale
+/// rate. Advisory only — the result is informational, never a pass/fail verdict.
+pub async fn fetch_flaky_summary(token: &str) -> Option<FlakySummary> {
+    let value = start_job_await(token, crate::command::outcome_query())
+        .await
+        .ok()?;
+    let rates = value.get("flaky_rates").and_then(Value::as_array)?;
+    let mut summary = FlakySummary {
+        total_checks: rates.len() as u64,
+        ..FlakySummary::default()
+    };
+    for rate in rates {
+        let permille = rate
+            .get("flaky_permille")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if permille > 0 {
+            summary.flaky_checks += 1;
+        }
+        summary.worst_permille = summary.worst_permille.max(permille);
+    }
+    Some(summary)
+}
+
 pub async fn pick_host_folder(token: &str, title: &str) -> Result<String, String> {
     let result = start_job_await(token, crate::command::host_folder_pick(title)).await?;
     result

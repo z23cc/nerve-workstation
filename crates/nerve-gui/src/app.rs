@@ -91,6 +91,9 @@ pub fn App() -> impl IntoView {
     // The L1 evidence-ledger chain-integrity verdict (`ledger.verify`), shown as a
     // read-only sidebar badge; `None` until fetched (badge stays neutral).
     let ledger_integrity = RwSignal::new(None::<crate::data::LedgerIntegrity>);
+    // The L6 advisory flaky-rate calibration (`outcome.query`), shown as a read-only
+    // sidebar badge; `None` until fetched (badge stays absent). Informational only.
+    let flaky_summary = RwSignal::new(None::<crate::data::FlakySummary>);
     let branch = RwSignal::new("—".to_string());
     // True while the active workspace's branch is being (re)fetched — drives the
     // project rail's loading skeleton instead of flashing the previous repo's branch.
@@ -157,8 +160,12 @@ pub fn App() -> impl IntoView {
         leptos::task::spawn_local(async move {
             protocol_version.set(crate::data::fetch_protocol_version(&proto_tok).await);
         });
+        let ledger_tok = tok.clone();
         leptos::task::spawn_local(async move {
-            ledger_integrity.set(crate::data::fetch_ledger_integrity(&tok).await);
+            ledger_integrity.set(crate::data::fetch_ledger_integrity(&ledger_tok).await);
+        });
+        leptos::task::spawn_local(async move {
+            flaky_summary.set(crate::data::fetch_flaky_summary(&tok).await);
         });
     });
 
@@ -498,6 +505,7 @@ pub fn App() -> impl IntoView {
                 reveal_workspace=reveal_workspace
                 protocol_version=protocol_version
                 ledger_integrity=ledger_integrity
+                flaky_summary=flaky_summary
                 busy=Signal::derive(active_busy) />
             <main class="main chat">
                 <Topbar agent=agent model=model mode=mode display=workspace_label branch=branch

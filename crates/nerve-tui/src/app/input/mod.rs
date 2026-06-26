@@ -31,8 +31,9 @@ use std::collections::BTreeMap;
 use super::Shell;
 use super::state::{ApprovalState, Mode, Tone};
 use crate::ui::commands::{
-    COMMANDS, CommandSpec, HELP_TEXT, SlashCommand, approval_mode_label, format_ledger_verdict,
-    format_models, match_commands, parse_approval_mode, parse_command, provider_models_tool,
+    COMMANDS, CommandSpec, HELP_TEXT, SlashCommand, approval_mode_label, format_flaky_rates,
+    format_ledger_verdict, format_models, match_commands, parse_approval_mode, parse_command,
+    provider_models_tool,
 };
 use crate::ui::theme::THEMES;
 use delegate::{SubmitRoute, submit_route};
@@ -273,6 +274,7 @@ impl Shell {
             "login" => self.cmd_login(&rest),
             "lease" => self.cmd_lease(&rest).await,
             "ledger" => self.cmd_ledger().await,
+            "flaky" => self.cmd_flaky().await,
             "theme" => self.cmd_theme(),
             other => self.state.hint = format!("unknown command: /{other} — try /help"),
         }
@@ -446,6 +448,22 @@ impl Shell {
         }
     }
 
+    /// `/flaky`: surface the L6 flaky-rate calibration ("agent wrong vs test flaky")
+    /// via an unfiltered read-only [`RuntimeCommand::OutcomeQuery`] (proto v13). Pure
+    /// advisory (INV-R1): always [`Tone::Info`], never a gate; mirrors `/ledger`.
+    async fn cmd_flaky(&mut self) {
+        self.state.note("querying flaky-rate corpus…");
+        match self.client.run_job(outcome_query_command(), None).await {
+            Ok(result) => {
+                self.state.hint.clear();
+                let (tone, block) = format_flaky_rates(&result);
+                self.state
+                    .push_notice(tone, format!("flaky rates (advisory):\n{block}"));
+            }
+            Err(err) => self.state.push_notice(Tone::Error, err.to_string()),
+        }
+    }
+
     /// Ctrl-C interrupt of the in-flight turn (a no-op when idle).
     async fn interrupt(&mut self) {
         let Some(session_id) = self.state.session_id.clone() else {
@@ -538,6 +556,18 @@ fn respond_command(
 #[must_use]
 fn ledger_verify_command() -> RuntimeCommand {
     RuntimeCommand::LedgerVerify
+}
+
+/// Build the read-only unfiltered `outcome.query` command (proto v13) that `/flaky`
+/// runs (`agent`/`outcome`/`limit` all `None`); the result carries the per-check
+/// `flaky_rates`. Pure so dispatch is testable (mirrors [`ledger_verify_command`]).
+#[must_use]
+fn outcome_query_command() -> RuntimeCommand {
+    RuntimeCommand::OutcomeQuery {
+        agent: None,
+        outcome: None,
+        limit: None,
+    }
 }
 
 /// Past-tense verb for a decision notice. Ports the TS `decisionVerb`.
@@ -743,5 +773,22 @@ mod tests {
             RuntimeCommand::LedgerVerify
         ));
         assert_eq!(ledger_verify_command().name(), "ledger.verify");
+    }
+
+    #[test]
+    fn flaky_command_is_in_palette_and_builds_outcome_query() {
+        // The `/flaky` slash command is offered by the palette and its dispatch
+        // builds the read-only `outcome.query` runtime command (proto v13) with no
+        // filters — the L6 flaky-rate calibration, advisory not a gate (INV-R1).
+        assert!(palette_specs().iter().any(|c| c.name == "flaky"));
+        assert!(matches!(
+            outcome_query_command(),
+            RuntimeCommand::OutcomeQuery {
+                agent: None,
+                outcome: None,
+                limit: None,
+            }
+        ));
+        assert_eq!(outcome_query_command().name(), "outcome.query");
     }
 }
