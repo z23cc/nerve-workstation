@@ -320,7 +320,7 @@ still resolves to `Hermetic` on Linux and `BestEffort` on macOS. Claim less wher
 
 | Crate | Coverage | Mechanism | License | Verdict |
 |---|---|---|---|---|
-| **`birdcage`** (phylum-dev) | Linux + macOS | Landlock (Linux) + Seatbelt/`sandbox-exec` (macOS), unified **FS + network** API — exactly our surface | **GPL-3.0-or-later** | **Adoptable — Nerve is open-source and accepts copyleft.** See the license note below. |
+| **`birdcage`** (phylum-dev) | **Linux + macOS only (no Windows** — confirmed against its README) | **namespaces** (Linux) + Seatbelt/`sandbox_init` (macOS), unified **FS + network** API — exactly our surface | **GPL-3.0-or-later** | **Adoptable — Nerve is open-source and accepts copyleft.** See the license note below. Operational note: its Linux backend uses namespaces, so it typically needs **unprivileged user namespaces** enabled (some hardened CI hosts disable them) — the §7.4 Landlock kit avoids that requirement. |
 | **`gaol`** (servo) | Linux + macOS + Windows | multiprocess broker | MPL-2.0 | Adds Windows, but self-described "lightly reviewed… not battle-tested" and effectively dormant — unfit for a determinism-critical dependency. |
 
 **License note (decided 2026-06-27).** `birdcage` is `GPL-3.0-or-later`. This workspace is
