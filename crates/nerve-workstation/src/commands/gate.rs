@@ -20,14 +20,37 @@
 //! Wired into `cli.rs` as `nerve verify` / `nerve gate`; each returns its raw exit
 //! code (`i32`) so the CLI arm can `std::process::exit` with it — the exit code is the
 //! authoritative gate output.
+//!
+//! **Signature re-verification at the gate (INV-R5).** Before trusting a pre-sealed
+//! Receipt's verdict, `nerve gate` re-verifies it offline via the pure
+//! [`verify_receipt`](nerve_core::receipt::verify_receipt) (statement re-hashes to the
+//! receipt id + the embedded ed25519 public key checks the detached signature over the
+//! DSSE PAE). A receipt that does not verify is **refused** — exit non-zero, no verdict
+//! trusted, no check run posted — so a tampered/forged receipt file can never gate a
+//! fabricated pass through CI (INV-R1). **Honest trust model:** self-signature
+//! verification proves the receipt is *tamper-evident* (it wasn't modified after
+//! signing) but NOT issuer identity — a forger can re-sign with their OWN key. The
+//! optional `--trusted-key` / `NERVE_TRUSTED_RECEIPT_KEY` pin adds issuer identity by
+//! requiring the signing key to equal a known org key; sigstore-keyless issuer identity
+//! remains the deferred upgrade.
 
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use nerve_core::receipt::Receipt;
 use nerve_core::receipt_gate::{GateOutcome, gate_outcome};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Command;
+
+/// The env-var fallback for `--trusted-key`: a base64 (standard) ed25519 public key the
+/// gate requires the receipt to be signed by (issuer-identity pin). When neither the
+/// flag nor this var is set, the gate verifies only self-consistency (tamper-evidence)
+/// and prints an advisory that issuer identity is not pinned.
+const TRUSTED_KEY_ENV: &str = "NERVE_TRUSTED_RECEIPT_KEY";
+
+/// Exit code for a refused gate (mirrors the Inconclusive/Error neutral exit): a receipt
+/// that fails integrity / signature / trusted-key verification is never trusted.
+const REFUSE_EXIT: i32 = 2;
 
 /// `nerve verify <run_id>` — re-verify a captured run by re-running the org's own
 /// checks (`<root>/.nerve/checks.json`) in the recorded closure, sealing a borrowed
@@ -79,6 +102,12 @@ pub(crate) struct GateArgs {
     /// attaches to (required for `--emit gh` and `--emit gitlab`).
     #[arg(long)]
     repo: Option<String>,
+    /// Pin the receipt's issuer identity: a base64 (standard) ed25519 public key the
+    /// receipt MUST be signed by, else the gate refuses (`NERVE_TRUSTED_RECEIPT_KEY` is
+    /// the env fallback). Unset → self-consistency (tamper-evidence) only, with an
+    /// advisory that issuer identity is not pinned.
+    #[arg(long = "trusted-key")]
+    trusted_key: Option<String>,
     /// Print the [`GateOutcome`] as JSON in addition to setting the exit code.
     #[arg(long)]
     json: bool,
@@ -274,10 +303,24 @@ pub(crate) fn verify(args: VerifyArgs) -> Result<i32> {
     report_receipt(&receipt, args.json)
 }
 
-/// `nerve gate`: load a sealed Receipt, decide the merge outcome, optionally post a
-/// check run, and exit with the authoritative code.
+/// `nerve gate`: load a sealed Receipt, **re-verify its signature + statement integrity**
+/// (INV-R5), and only then decide the merge outcome, optionally post a check run, and
+/// exit with the authoritative code.
+///
+/// A receipt that does not verify — a tampered statement, a corrupted/forged signature,
+/// or (with `--trusted-key`) one not signed by the pinned issuer key — is **refused**:
+/// the gate exits non-zero, NEVER trusts the claimed verdict, and posts NO check run /
+/// commit status (INV-R1, court reporter: never fabricate a pass).
 pub(crate) fn gate(args: GateArgs) -> Result<i32> {
     let receipt = load_gate_receipt(&args)?;
+    let trusted_key = resolve_trusted_key(&args);
+    let verification = verify_gate_receipt(&receipt, trusted_key.as_deref());
+    if !verification.trusted {
+        // REFUSE: integrity / signature / trusted-key check failed. No emit, no trusted
+        // verdict — exit non-zero so CI blocks the merge (INV-R1 / INV-R5).
+        print_refusal(&receipt, &verification, args.json);
+        return Ok(REFUSE_EXIT);
+    }
     let outcome = gate_outcome(&receipt);
     let emitter = select_emitter(&args.emit)?;
     if let (Some(repo), Some(sha)) = (args.repo.as_deref(), args.sha.as_deref()) {
@@ -291,8 +334,77 @@ pub(crate) fn gate(args: GateArgs) -> Result<i32> {
             args.emit
         );
     }
-    print_outcome(&outcome, args.json);
+    if !verification.issuer_pinned {
+        eprintln!(
+            "note: receipt issuer identity is NOT pinned (signed_by={}); --trusted-key / \
+             {TRUSTED_KEY_ENV} verifies the signing key against a known org key. The \
+             signature only proves the receipt is tamper-evident, not who issued it.",
+            verification.keyid
+        );
+    }
+    print_verified_outcome(&outcome, &verification, args.json);
     Ok(outcome.exit_code)
+}
+
+/// The result of re-verifying a receipt at the gate (INV-R5): the pure self-verification
+/// flags plus the resolved issuer-pin decision and the receipt's signing key id.
+struct GateVerification {
+    /// The statement re-hashes to the receipt id (no tampering after signing).
+    statement_intact: bool,
+    /// The embedded public key checks the detached signature over the DSSE PAE.
+    signature_valid: bool,
+    /// `--trusted-key` (or the env fallback) was supplied AND matched the signing key.
+    issuer_pinned: bool,
+    /// The signing public key the signature was VERIFIED against (the embedded
+    /// `public_key`, NOT the spoofable self-declared `keyid`), echoed so a consumer
+    /// sees who the gate actually trusted.
+    keyid: String,
+    /// All required checks held: statement intact, signature valid, and — when a
+    /// trusted key was supplied — the signing key matched it.
+    trusted: bool,
+}
+
+/// Re-verify `receipt` offline (INV-R5): re-derive its content address (tamper-evidence),
+/// check the detached ed25519 signature over the DSSE PAE with the embedded public key,
+/// and — when `trusted_key` is set — require the signing key to equal it (issuer pin).
+/// Pure except for delegating to the host [`ed25519_verify`](crate::signer::ed25519_verify)
+/// predicate; never trusts a verdict it could not verify.
+fn verify_gate_receipt(receipt: &Receipt, trusted_key: Option<&str>) -> GateVerification {
+    let v = nerve_core::receipt::verify_receipt(receipt, crate::signer::ed25519_verify);
+    // The issuer identity is the key the signature was VERIFIED against — the embedded
+    // `public_key` — NEVER the self-declared `keyid`. `keyid` is a free-form label a
+    // forger can spoof to a trusted key while signing with their own key; pinning it
+    // would gate a forged pass. (A `None` public_key already fails `signature_valid`.)
+    let signing_key = receipt.signature.public_key.as_deref();
+    let self_ok = v.statement_intact && v.signature_valid;
+    let (issuer_pinned, key_ok) = match trusted_key {
+        Some(pin) => {
+            let matched = signing_key == Some(pin);
+            (matched, matched)
+        }
+        // No pin requested: self-consistency only, issuer identity unproven (advisory).
+        None => (false, true),
+    };
+    GateVerification {
+        statement_intact: v.statement_intact,
+        signature_valid: v.signature_valid,
+        issuer_pinned,
+        // Report the verified signing key (security-relevant), falling back to the
+        // display-only keyid when no public key is embedded — that case is refused.
+        keyid: signing_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| receipt.signature.keyid.clone()),
+        trusted: self_ok && key_ok,
+    }
+}
+
+/// Resolve the issuer-pin key: the `--trusted-key` flag, else the
+/// `NERVE_TRUSTED_RECEIPT_KEY` env var. An empty string is treated as unset.
+fn resolve_trusted_key(args: &GateArgs) -> Option<String> {
+    args.trusted_key
+        .clone()
+        .or_else(|| std::env::var(TRUSTED_KEY_ENV).ok())
+        .filter(|k| !k.is_empty())
 }
 
 /// Resolve the sealed Receipt a `gate` invocation acts on: by explicit `--receipt`
@@ -328,7 +440,9 @@ fn select_emitter(emit: &str) -> Result<Box<dyn CheckRunEmitter>> {
     }
 }
 
-/// Render a receipt's gate decision and return its exit code (shared by `verify`).
+/// Render a freshly sealed receipt's gate decision and return its exit code (shared by
+/// `verify`). The receipt was just signed in-process, so it is trusted by construction;
+/// the `gate` path re-verifies a *pre-sealed* receipt before trusting it (INV-R5).
 fn report_receipt(receipt: &Receipt, as_json: bool) -> Result<i32> {
     let outcome = gate_outcome(receipt);
     print_outcome(&outcome, as_json);
@@ -348,6 +462,84 @@ fn print_outcome(outcome: &GateOutcome, as_json: bool) {
             outcome.conclusion, outcome.exit_code, outcome.summary
         );
     }
+}
+
+/// Emit a verified gate outcome, surfacing the signature re-verification (INV-R5) so a
+/// consumer sees the gate checked the receipt before trusting its verdict.
+fn print_verified_outcome(outcome: &GateOutcome, v: &GateVerification, as_json: bool) {
+    if as_json {
+        let mut value = serde_json::to_value(outcome).unwrap_or_else(|_| json!({}));
+        if let Value::Object(map) = &mut value {
+            map.insert(
+                "verification".to_string(),
+                verification_json(v, /* refused */ false),
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else {
+        println!(
+            "{} (exit {}): {} [receipt verified: statement_intact={} signature_valid={} \
+             signed_by={} issuer_pinned={}]",
+            outcome.conclusion,
+            outcome.exit_code,
+            outcome.summary,
+            v.statement_intact,
+            v.signature_valid,
+            v.keyid,
+            v.issuer_pinned,
+        );
+    }
+}
+
+/// Emit a REFUSAL (INV-R1 / INV-R5): the receipt did not verify, so the gate refuses to
+/// trust/post its claimed verdict. No `GateOutcome` is computed from the claimed verdict
+/// — only the verification failure is reported, with a non-zero exit.
+fn print_refusal(receipt: &Receipt, v: &GateVerification, as_json: bool) {
+    let reason = refusal_reason(v);
+    if as_json {
+        let value = json!({
+            "status": "refused",
+            "exit_code": REFUSE_EXIT,
+            "reason": reason,
+            "receipt_id": receipt.receipt_id,
+            "verification": verification_json(v, /* refused */ true),
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else {
+        eprintln!(
+            "REFUSED (exit {REFUSE_EXIT}): {reason} (statement_intact={} signature_valid={} \
+             signed_by={} issuer_pinned={}) — claimed verdict NOT trusted, no status posted",
+            v.statement_intact, v.signature_valid, v.keyid, v.issuer_pinned,
+        );
+    }
+}
+
+/// The human reason a refusal occurred, most-fundamental failure first.
+fn refusal_reason(v: &GateVerification) -> &'static str {
+    if !v.statement_intact || !v.signature_valid {
+        "receipt integrity check FAILED — refusing to gate (a tampered or forged receipt \
+         never gates a fabricated pass)"
+    } else {
+        "receipt not signed by the trusted key — refusing to gate"
+    }
+}
+
+/// The verification block surfaced in `--json` output (mirrors `nerve_verify`'s reported
+/// fields), shared by the verified and refused paths.
+fn verification_json(v: &GateVerification, refused: bool) -> Value {
+    json!({
+        "statement_intact": v.statement_intact,
+        "signature_valid": v.signature_valid,
+        "issuer_pinned": v.issuer_pinned,
+        "signed_by": { "keyid": v.keyid },
+        "refused": refused,
+    })
 }
 
 /// Read + parse a sealed Receipt from a JSON file.
@@ -401,46 +593,75 @@ fn resolve_root(root: Option<PathBuf>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signer::{LocalEd25519Signer, Signer};
     use nerve_core::receipt::{
-        RECEIPT_PREDICATE_TYPE, RECEIPT_SCHEMA_VERSION, Receipt, ReceiptProvenance,
-        ReceiptSignature, ReceiptStatement, ReplayManifest,
+        RECEIPT_PREDICATE_TYPE, Receipt, ReceiptProvenance, ReceiptSignature, ReceiptStatement,
+        ReplayManifest,
     };
     use nerve_core::verdict::VerdictStatus;
     use std::fs;
     use tempfile::tempdir;
 
-    fn receipt_for(run_id: &str, verdict: VerdictStatus) -> Receipt {
-        Receipt {
-            schema_version: RECEIPT_SCHEMA_VERSION,
-            receipt_id: format!("rcpt-{run_id}"),
-            statement: ReceiptStatement {
-                predicate_type: RECEIPT_PREDICATE_TYPE.to_string(),
-                provenance: ReceiptProvenance {
-                    run_id: run_id.to_string(),
-                    inputs_hash: "h".to_string(),
-                    toolchain_digest: None,
-                    policy_version: None,
-                    ledger_ref: None,
-                },
-                checks: vec![],
-                verdict,
-                replay_manifest: ReplayManifest {
-                    run_schema_version: 2,
-                    root_hash: "root".to_string(),
-                    event_count: 0,
-                    command: None,
-                },
-                issued_at_ms: 1,
+    /// Build the (unsigned) statement a `run_id`+`verdict` test receipt attests to.
+    fn statement_for(run_id: &str, verdict: VerdictStatus) -> ReceiptStatement {
+        ReceiptStatement {
+            predicate_type: RECEIPT_PREDICATE_TYPE.to_string(),
+            provenance: ReceiptProvenance {
+                run_id: run_id.to_string(),
+                inputs_hash: "h".to_string(),
+                toolchain_digest: None,
+                policy_version: None,
+                ledger_ref: None,
             },
-            signature: ReceiptSignature {
-                payload_type: "application/vnd.in-toto+json".to_string(),
-                backend: "local-ed25519".to_string(),
-                keyid: "k1".to_string(),
-                sig: "s".to_string(),
-                public_key: None,
+            checks: vec![],
+            verdict,
+            replay_manifest: ReplayManifest {
+                run_schema_version: 2,
+                root_hash: "root".to_string(),
+                event_count: 0,
+                command: None,
+            },
+            issued_at_ms: 1,
+        }
+    }
+
+    /// A GENUINELY SIGNED receipt: seal the statement via the real `nerve-core` seal path
+    /// signed by the fixed `deterministic_test_key`, so `verify_receipt` passes (mirrors
+    /// how golden receipts are built). The gate now refuses anything that does not
+    /// verify, so positive-path tests must use this, not a hand-built fake signature.
+    fn receipt_for(run_id: &str, verdict: VerdictStatus) -> Receipt {
+        signed_receipt(
+            run_id,
+            verdict,
+            &LocalEd25519Signer::deterministic_test_key(),
+        )
+    }
+
+    /// Seal `statement_for` with `signer` through the real DSSE PAE + seal path.
+    fn signed_receipt(run_id: &str, verdict: VerdictStatus, signer: &dyn Signer) -> Receipt {
+        let statement = statement_for(run_id, verdict);
+        let pae = nerve_core::receipt::dsse_pae(
+            RECEIPT_PREDICATE_TYPE,
+            &nerve_core::receipt::canonical_statement_bytes(&statement),
+        );
+        let (sig, public_key) = signer.sign(&pae);
+        nerve_core::receipt::seal_receipt(
+            statement,
+            ReceiptSignature {
+                payload_type: RECEIPT_PREDICATE_TYPE.to_string(),
+                backend: signer.backend().to_string(),
+                keyid: signer.keyid(),
+                sig,
+                public_key: Some(public_key),
                 bundle: None,
             },
-        }
+        )
+    }
+
+    /// The base64 public key the fixed `deterministic_test_key` signs with — the value a
+    /// `--trusted-key` pin must equal to accept a receipt it sealed.
+    fn deterministic_key_id() -> String {
+        LocalEd25519Signer::deterministic_test_key().keyid()
     }
 
     fn write_receipt(root: &std::path::Path, receipt: &Receipt) {
@@ -450,23 +671,35 @@ mod tests {
         fs::write(path, serde_json::to_string_pretty(receipt).unwrap()).unwrap();
     }
 
-    #[test]
-    fn gate_reads_receipt_and_maps_passed_to_exit_zero() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("receipt.json");
-        let receipt = receipt_for("run-a", VerdictStatus::Passed);
-        fs::write(&path, serde_json::to_string(&receipt).unwrap()).unwrap();
-
-        let code = gate(GateArgs {
+    /// A `GateArgs` over an explicit `--receipt` path (the common test shape).
+    fn args_for_path(path: PathBuf, trusted_key: Option<String>) -> GateArgs {
+        GateArgs {
             receipt: Some(path),
             run: None,
             root: None,
             emit: "none".to_string(),
             sha: None,
             repo: None,
+            trusted_key,
             json: false,
-        })
-        .unwrap();
+        }
+    }
+
+    /// Write a receipt to a temp JSON path and return that path.
+    fn write_to_temp(dir: &std::path::Path, receipt: &Receipt) -> PathBuf {
+        let path = dir.join(format!("{}.json", receipt.receipt_id));
+        fs::write(&path, serde_json::to_string(receipt).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn gate_reads_receipt_and_maps_passed_to_exit_zero() {
+        let dir = tempdir().unwrap();
+        let receipt = receipt_for("run-a", VerdictStatus::Passed);
+        let path = write_to_temp(dir.path(), &receipt);
+
+        // A genuinely signed receipt verifies, so the gate trusts its Passed verdict.
+        let code = gate(args_for_path(path, None)).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -496,6 +729,7 @@ mod tests {
             emit: "none".to_string(),
             sha: None,
             repo: None,
+            trusted_key: None,
             json: false,
         })
         .unwrap();
@@ -513,10 +747,138 @@ mod tests {
             emit: "none".to_string(),
             sha: None,
             repo: None,
+            trusted_key: None,
             json: false,
         })
         .unwrap_err();
         assert!(err.to_string().contains("absent"), "{err}");
+    }
+
+    /// INV-R5 / INV-R1: a TAMPERED statement (verdict flipped to Passed AFTER signing)
+    /// breaks the content-address integrity check, so the gate REFUSES — exit non-zero,
+    /// NOT the flipped pass (exit 0), and no status posted.
+    #[test]
+    fn gate_refuses_a_tampered_receipt_and_never_trusts_the_flip() {
+        let dir = tempdir().unwrap();
+        // Seal an honest Failed receipt, then flip its verdict to Passed in the file.
+        let receipt = receipt_for("tampered", VerdictStatus::Failed);
+        let mut tampered = receipt.clone();
+        tampered.statement.verdict = VerdictStatus::Passed; // forge a pass post-signing
+        let path = write_to_temp(dir.path(), &tampered);
+
+        let v = verify_gate_receipt(&tampered, None);
+        assert!(
+            !v.statement_intact,
+            "flipping the statement breaks the hash"
+        );
+        assert!(!v.trusted, "an unverified receipt is never trusted");
+
+        let code = gate(args_for_path(path, None)).unwrap();
+        // REFUSED at exit 2 — NOT the forged Passed (which would be exit 0).
+        assert_eq!(code, REFUSE_EXIT, "tampered receipt is refused, not gated");
+        assert_ne!(code, 0, "the forged pass is never trusted");
+    }
+
+    /// INV-R5: a CORRUPTED signature fails ed25519 verification, so the gate REFUSES even
+    /// though the statement itself still hashes intact.
+    #[test]
+    fn gate_refuses_a_corrupted_signature() {
+        let dir = tempdir().unwrap();
+        let mut receipt = receipt_for("badsig", VerdictStatus::Passed);
+        // Corrupt the detached signature without touching the statement.
+        receipt.signature.sig = "AAAA".to_string();
+        let path = write_to_temp(dir.path(), &receipt);
+
+        let v = verify_gate_receipt(&receipt, None);
+        assert!(
+            v.statement_intact,
+            "statement is untouched, hash still holds"
+        );
+        assert!(
+            !v.signature_valid,
+            "the corrupted signature does not verify"
+        );
+
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_eq!(code, REFUSE_EXIT, "corrupted-signature receipt is refused");
+    }
+
+    /// OPTIONAL ISSUER PIN: with `--trusted-key`, the MATCHING key is accepted (the
+    /// receipt gates its verdict) while a WRONG key is refused (issuer identity, INV-R5).
+    #[test]
+    fn gate_trusted_key_accepts_matching_and_refuses_wrong_key() {
+        let dir = tempdir().unwrap();
+        let receipt = receipt_for("pinned", VerdictStatus::Passed);
+        let path = write_to_temp(dir.path(), &receipt);
+
+        // Matching pin: the deterministic key id == the receipt's signing key -> gated.
+        let code = gate(args_for_path(path.clone(), Some(deterministic_key_id()))).unwrap();
+        assert_eq!(code, 0, "matching trusted key accepts the receipt");
+        // And the pin is recorded as satisfied.
+        let v = verify_gate_receipt(&receipt, Some(&deterministic_key_id()));
+        assert!(v.issuer_pinned && v.trusted);
+
+        // Wrong pin: a different key -> refused, even though the self-signature is valid.
+        let wrong = "not-the-signing-key".to_string();
+        let code = gate(args_for_path(path, Some(wrong.clone()))).unwrap();
+        assert_eq!(code, REFUSE_EXIT, "a wrong trusted key refuses the receipt");
+        let v = verify_gate_receipt(&receipt, Some(&wrong));
+        assert!(v.signature_valid, "self-signature still valid");
+        assert!(!v.trusted, "but the issuer pin failed, so it is refused");
+    }
+
+    /// REGRESSION (security): a forger who signs with their OWN key but SPOOFS the
+    /// self-declared `keyid` to the org's trusted key must NOT clear an issuer pin —
+    /// the pin compares the VERIFIED public key (what the signature checks out against),
+    /// never the spoofable `keyid`. Pinning `keyid` would gate a forged pass (INV-R1/R5).
+    #[test]
+    fn gate_refuses_a_keyid_spoofed_receipt_under_the_trusted_key() {
+        use ed25519_dalek::SigningKey;
+        let dir = tempdir().unwrap();
+        // A forger signs a `Passed` verdict with their OWN distinct key...
+        let forger = LocalEd25519Signer::new(SigningKey::from_bytes(&[42u8; 32]));
+        let mut receipt = signed_receipt("spoof", VerdictStatus::Passed, &forger);
+        let org_key = deterministic_key_id();
+        // ...then spoofs the self-declared keyid to the org's trusted key, while the
+        // embedded public_key (what the signature verifies against) stays the forger's.
+        receipt.signature.keyid = org_key.clone();
+
+        // The forger's self-signature is valid, but the VERIFIED key is the forger's,
+        // not the org's, so pinning the org key must refuse the forged pass.
+        let v = verify_gate_receipt(&receipt, Some(&org_key));
+        assert!(v.signature_valid, "the forger's self-signature is valid");
+        assert!(
+            !v.issuer_pinned,
+            "the pin must compare the verified public key, not keyid"
+        );
+        assert!(
+            !v.trusted,
+            "a keyid-spoofed receipt must never be trusted under a pin"
+        );
+
+        // End-to-end: gate() refuses (non-zero), never the forged `Passed` -> exit 0.
+        let path = write_to_temp(dir.path(), &receipt);
+        let code = gate(args_for_path(path, Some(org_key))).unwrap();
+        assert_eq!(
+            code, REFUSE_EXIT,
+            "a keyid-spoofed receipt gated a forged pass"
+        );
+    }
+
+    /// A garbage (unparseable-signature) UNSIGNED receipt — the old fake-receipt shape —
+    /// is now refused: its hand-built `sig`/`public_key` do not verify (INV-R5).
+    #[test]
+    fn gate_refuses_an_unsigned_fake_receipt() {
+        let dir = tempdir().unwrap();
+        let mut receipt = receipt_for("fake", VerdictStatus::Passed);
+        receipt.signature.public_key = None; // no key to verify against
+        receipt.signature.sig = "s".to_string();
+        // Re-seal the id so the statement still hashes intact; only the sig is bogus.
+        receipt.receipt_id = nerve_core::receipt::statement_id(&receipt.statement);
+        let path = write_to_temp(dir.path(), &receipt);
+
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_eq!(code, REFUSE_EXIT, "an unsigned/fake receipt is refused");
     }
 
     #[test]

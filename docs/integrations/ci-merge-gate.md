@@ -103,13 +103,63 @@ it is `success` only on a **Passed** verdict (exit 0); an **un-cleared verdict**
 (Failed / Inconclusive / Error) posts `failed`, **never** `success` (INV-R1). The exit
 code remains authoritative — a posting failure is reported but never overrides it.
 
+## Signature re-verification at the gate (INV-R5)
+
+Before trusting a **pre-sealed** Receipt's verdict, `nerve gate` **re-verifies the
+Receipt offline** (trust-substrate.md §L4/§L5, INV-R5 — *"re-verifiable by a party who
+trusts none of the participants"*). It re-derives the statement's content address
+(tamper-evidence) and checks the detached ed25519 signature over the DSSE PAE with the
+public key **embedded in the receipt** — no network, no key distribution needed.
+
+A Receipt that does **not** verify is **REFUSED**: the gate exits non-zero (`2`), never
+trusts the claimed verdict, and posts **no** check-run / commit-status. A tampered or
+forged receipt file therefore can never gate a fabricated pass through CI (INV-R1).
+
+```bash
+nerve gate --receipt receipt.json          # verifies, then gates the verdict
+# tampered/forged receipt:
+#   REFUSED (exit 2): receipt integrity check FAILED — refusing to gate …
+```
+
+The `--json` output (and `nerve verify`'s) carries a `verification` block —
+`{statement_intact, signature_valid, issuer_pinned, signed_by{keyid}, refused}` — so a
+consumer sees that the gate checked the signature before trusting the verdict.
+
+### Honest trust model — what the signature does and does NOT prove
+
+Self-signature verification proves the receipt is **tamper-evident**: it was not
+modified after signing. It does **NOT** prove **issuer identity** — a forger can simply
+re-sign a fabricated receipt with their **own** key, and that self-consistent receipt
+still validates. So without a pinned key, treat a receipt found in an untrusted location
+as *unproven provenance*. Unpinned, the gate still gates, but prints a one-line advisory
+that issuer identity is not pinned.
+
+To pin issuer identity, supply the org's known signing key:
+
+```bash
+nerve gate --receipt receipt.json --trusted-key "<base64-ed25519-public-key>"
+# or via env:
+NERVE_TRUSTED_RECEIPT_KEY="<base64-…>" nerve gate --receipt receipt.json
+```
+
+With a pin set, the gate **additionally** requires the receipt's **verified public key**
+— the embedded key the ed25519 signature actually checks out against, *not* the
+self-declared `keyid` — to equal the trusted key; a mismatch is **REFUSED** (exit 2)
+even when the self-signature is valid. (Pinning `keyid` would be forgeable: `keyid` is a
+free-form label, so a forger could spoof it to your key while signing with their own.)
+
+> We deliberately do **not** over-claim "trusts no one" without a pinned key.
+> **Sigstore-keyless** issuer identity (Fulcio short-lived cert + Rekor transparency
+> log) remains the deferred upgrade behind the same signing seam — it would establish
+> issuer identity without a manually distributed key.
+
 ## Honest limitations / follow-ups
 
 - **Hermetic isolation is partial.** Replay/re-run currently relies on the runner's
   environment; the strong Landlock/seccomp sandbox closure (agent-exec-sandbox.md)
   that makes replay bit-for-bit trustworthy is still being finished — it is
   load-bearing, not optional.
-- **Receipt signature verification at the gate** (re-checking the signature before
-  trusting a pre-sealed Receipt) is a planned hardening step.
+- **Issuer identity without a manual key pin** (sigstore-keyless) is the deferred
+  upgrade — today, issuer identity requires `--trusted-key` / `NERVE_TRUSTED_RECEIPT_KEY`.
 
 See `docs/designs/trust-substrate.md` §L4 / §L5 / §8 for the full design.
