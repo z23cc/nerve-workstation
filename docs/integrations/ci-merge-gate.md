@@ -94,15 +94,21 @@ deployed:
 On GitHub, `emit: gh` also posts a `nerve/verification-receipt` check-run via the
 `gh` CLI (authed with `GITHUB_TOKEN`); the exit code remains authoritative.
 
+On GitLab, `--emit gitlab` posts a `nerve-gate` **commit status** via the Commit
+Status API (shelling `curl`). GitLab CI provides everything it needs automatically —
+`CI_API_V4_URL` (defaults to `https://gitlab.com/api/v4` off-pipeline), `CI_PROJECT_ID`,
+`CI_COMMIT_SHA`, and `CI_JOB_TOKEN` (the auth) — or set a masked `GITLAB_TOKEN` CI
+variable to use a `PRIVATE-TOKEN` instead. The status only **mirrors** the exit code:
+it is `success` only on a **Passed** verdict (exit 0); an **un-cleared verdict**
+(Failed / Inconclusive / Error) posts `failed`, **never** `success` (INV-R1). The exit
+code remains authoritative — a posting failure is reported but never overrides it.
+
 ## Honest limitations / follow-ups
 
 - **Hermetic isolation is partial.** Replay/re-run currently relies on the runner's
   environment; the strong Landlock/seccomp sandbox closure (agent-exec-sandbox.md)
   that makes replay bit-for-bit trustworthy is still being finished — it is
   load-bearing, not optional.
-- **GitLab posts no commit status yet.** The GitLab template gates on the **exit
-  code** today (a complete gate on its own); a GitLab Commit Status / MR-badge
-  emitter (the equivalent of the GitHub `--emit gh` check-run) is a follow-up.
 - **Receipt signature verification at the gate** (re-checking the signature before
   trusting a pre-sealed Receipt) is a planned hardening step.
 

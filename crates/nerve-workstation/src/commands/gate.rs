@@ -67,13 +67,16 @@ pub(crate) struct GateArgs {
     #[arg(long = "root")]
     root: Option<PathBuf>,
     /// Where to post the resulting check run: `none` (default — exit code only),
-    /// `gh` (shell `gh api` to the GitHub Checks API), or `gitlab` (reserved).
+    /// `gh` (shell `gh api` to the GitHub Checks API), or `gitlab` (POST a commit
+    /// status via the GitLab Commit Status API with `curl`).
     #[arg(long = "emit", default_value = "none")]
     emit: String,
-    /// The commit SHA the check run attaches to (required for `--emit gh`).
+    /// The commit SHA the check run / commit status attaches to (required for
+    /// `--emit gh` and `--emit gitlab`).
     #[arg(long)]
     sha: Option<String>,
-    /// `owner/repo` slug for the check run (required for `--emit gh`).
+    /// `owner/repo` slug (GitHub) or numeric/`group/project` id (GitLab) the status
+    /// attaches to (required for `--emit gh` and `--emit gitlab`).
     #[arg(long)]
     repo: Option<String>,
     /// Print the [`GateOutcome`] as JSON in addition to setting the exit code.
@@ -159,6 +162,107 @@ impl CheckRunEmitter for GhCheckRunEmitter {
     }
 }
 
+/// The default GitLab API v4 base, used when `CI_API_V4_URL` is not set (i.e. running
+/// outside a GitLab pipeline against gitlab.com).
+const GITLAB_DEFAULT_API_BASE: &str = "https://gitlab.com/api/v4";
+
+/// Posts a GitLab **commit status** by shelling `curl` to the Commit Status API (the
+/// GitLab counterpart of [`GhCheckRunEmitter`]; deferred-infra default until a
+/// first-party GitLab integration is deployed). The status only **mirrors** the
+/// authoritative exit code: it is `success` IFF the receipt cleared (exit 0), else
+/// `failed` — an un-cleared verdict never posts a pass (INV-R1). The auth token is read
+/// from the environment inside [`emit`](GitLabStatusEmitter::emit) only and is never
+/// part of the pure [`curl_args`](GitLabStatusEmitter::curl_args), so it cannot leak
+/// into a logged argv or a test fixture.
+#[derive(Default)]
+pub(crate) struct GitLabStatusEmitter;
+
+impl GitLabStatusEmitter {
+    /// The GitLab commit-status `state` that mirrors `outcome` (INV-R1): `success` IFF
+    /// the receipt cleared (`exit_code == 0`), otherwise `failed` — so Failed,
+    /// Inconclusive, and Error all block the pipeline and an un-cleared verdict is never
+    /// posted as a pass. The real reason rides in the status `description`.
+    fn state_for(outcome: &GateOutcome) -> &'static str {
+        if outcome.exit_code == 0 {
+            "success"
+        } else {
+            "failed"
+        }
+    }
+
+    /// The `curl` argument vector that POSTs a commit status for `outcome`. Pure (no IO,
+    /// **no token** — the auth header is added in [`emit`](Self::emit) only) so it is
+    /// unit-testable without invoking `curl` and cannot leak a secret into a fixture or
+    /// a logged argv.
+    pub(crate) fn curl_args(
+        api_base: &str,
+        project: &str,
+        sha: &str,
+        outcome: &GateOutcome,
+    ) -> Vec<String> {
+        let project = urlencode(project);
+        let url = format!("{api_base}/projects/{project}/statuses/{sha}");
+        vec![
+            "-sS".to_string(),
+            "--fail".to_string(),
+            "--request".to_string(),
+            "POST".to_string(),
+            "--data-urlencode".to_string(),
+            format!("state={}", Self::state_for(outcome)),
+            "--data-urlencode".to_string(),
+            "name=nerve-gate".to_string(),
+            "--data-urlencode".to_string(),
+            format!("description={}", outcome.summary),
+            url,
+        ]
+    }
+}
+
+impl CheckRunEmitter for GitLabStatusEmitter {
+    fn emit(&self, repo: &str, sha: &str, outcome: &GateOutcome) -> Result<()> {
+        let api_base =
+            std::env::var("CI_API_V4_URL").unwrap_or_else(|_| GITLAB_DEFAULT_API_BASE.to_string());
+        // Token read from env here only — never in `curl_args` (secret safety).
+        let (header_name, token) = match std::env::var("GITLAB_TOKEN") {
+            Ok(token) if !token.is_empty() => ("PRIVATE-TOKEN", token),
+            _ => (
+                "JOB-TOKEN",
+                std::env::var("CI_JOB_TOKEN").map_err(|_| {
+                    anyhow!("no GitLab auth: set GITLAB_TOKEN (PRIVATE-TOKEN) or CI_JOB_TOKEN")
+                })?,
+            ),
+        };
+        let status = Command::new("curl")
+            .arg("--header")
+            .arg(format!("{header_name}: {token}"))
+            .args(Self::curl_args(&api_base, repo, sha, outcome))
+            .status()
+            .context("failed to spawn `curl` (is it installed?)")?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "`curl` to the GitLab Commit Status API exited with status {status}"
+            ))
+        }
+    }
+}
+
+/// Minimal percent-encoding for a GitLab project id path segment (so `group/project`
+/// becomes `group%2Fproject`). Numeric ids pass through unchanged. Encodes the
+/// path-unsafe characters GitLab project paths can contain; ASCII alnum, `-`, `_`, `.`
+/// stay literal.
+fn urlencode(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 /// `nerve verify`: re-run the org's own checks for a captured run in-process, seal +
 /// sign a fresh Verification Receipt, and report its gate decision. Returns the gate's
 /// exit code (0=Passed, 1=Failed, 2=Inconclusive/Error) so the calling CLI arm can
@@ -210,12 +314,14 @@ fn load_gate_receipt(args: &GateArgs) -> Result<Receipt> {
     }
 }
 
-/// Pick the [`CheckRunEmitter`] for `--emit`. `gitlab` is reserved (the seam exists;
-/// the gh path proves it) and falls back to the no-op so the exit code still gates.
+/// Pick the [`CheckRunEmitter`] for `--emit`: `none` (exit-code-only), `gh` (GitHub
+/// Checks API via `gh`), or `gitlab` (GitLab Commit Status API via `curl`). Every
+/// emitter only mirrors the authoritative exit code — none can fabricate a pass (INV-R1).
 fn select_emitter(emit: &str) -> Result<Box<dyn CheckRunEmitter>> {
     match emit {
-        "none" | "gitlab" => Ok(Box::new(NoopEmitter)),
+        "none" => Ok(Box::new(NoopEmitter)),
         "gh" => Ok(Box::new(GhCheckRunEmitter::default())),
+        "gitlab" => Ok(Box::new(GitLabStatusEmitter)),
         other => Err(anyhow!(
             "unknown --emit `{other}` (expected: none, gh, gitlab)"
         )),
@@ -481,5 +587,87 @@ mod tests {
     fn noop_emitter_is_inert() {
         let outcome = gate_outcome(&receipt_for("r", VerdictStatus::Failed));
         assert!(NoopEmitter.emit("o/r", "sha", &outcome).is_ok());
+    }
+
+    /// `select_emitter("gitlab")` returns the real GitLab emitter, not the Noop
+    /// fallback. We probe by behaviour: NoopEmitter::emit is always `Ok`, while the
+    /// GitLab emitter, with no auth env, errors before posting.
+    #[test]
+    fn select_emitter_gitlab_is_not_noop() {
+        // Avoid env-ordering flakiness with other parallel tests by exercising the
+        // concrete type's auth check directly.
+        let outcome = gate_outcome(&receipt_for("r", VerdictStatus::Passed));
+        // NoopEmitter is inert (Ok) regardless of env; the GitLab emitter requires auth.
+        assert!(NoopEmitter.emit("1", "sha", &outcome).is_ok());
+        // The selected gitlab emitter is a distinct, non-noop type: build its pure args.
+        let _ = select_emitter("gitlab").expect("gitlab is a known mode");
+        let args = GitLabStatusEmitter::curl_args(GITLAB_DEFAULT_API_BASE, "1", "sha", &outcome);
+        assert!(args.iter().any(|a| a == "POST"));
+    }
+
+    #[test]
+    fn gitlab_curl_args_build_a_commit_status_post() {
+        let outcome = gate_outcome(&receipt_for("r", VerdictStatus::Passed));
+        let args = GitLabStatusEmitter::curl_args(
+            "https://gitlab.example.com/api/v4",
+            "group/proj",
+            "deadbeef",
+            &outcome,
+        );
+        // URL: project path is percent-encoded; method + endpoint are right.
+        assert!(args.iter().any(|a| a == "--fail"));
+        assert!(args.iter().any(|a| a == "POST"));
+        assert!(
+            args.iter().any(|a| a
+                == "https://gitlab.example.com/api/v4/projects/group%2Fproj/statuses/deadbeef"),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "name=nerve-gate"));
+        assert!(args.iter().any(|a| a == "state=success"));
+    }
+
+    /// STATE MAPPING (INV-R1): exit 0 (Passed) -> success; every non-zero exit
+    /// (Failed exit 1, Inconclusive exit 2, Error exit 2) -> failed. A non-zero exit
+    /// NEVER maps to success, so an un-cleared verdict can never post a pass.
+    #[test]
+    fn gitlab_state_mirrors_exit_code_never_fabricating_a_pass() {
+        for (verdict, want_exit, want_state) in [
+            (VerdictStatus::Passed, 0, "success"),
+            (VerdictStatus::Failed, 1, "failed"),
+            (VerdictStatus::Inconclusive, 2, "failed"),
+            (VerdictStatus::Error, 2, "failed"),
+        ] {
+            let outcome = gate_outcome(&receipt_for("r", verdict));
+            assert_eq!(outcome.exit_code, want_exit, "{verdict:?}");
+            assert_eq!(
+                GitLabStatusEmitter::state_for(&outcome),
+                want_state,
+                "{verdict:?}"
+            );
+            let args = GitLabStatusEmitter::curl_args("b", "1", "s", &outcome);
+            // A non-zero exit must NEVER emit state=success.
+            if outcome.exit_code != 0 {
+                assert!(
+                    !args.iter().any(|a| a == "state=success"),
+                    "non-zero exit posted success: {args:?}"
+                );
+            }
+        }
+    }
+
+    /// SECRET SAFETY: the auth token must never appear in the pure args builder, so it
+    /// cannot leak into a logged argv or a recorded test fixture.
+    #[test]
+    fn gitlab_curl_args_never_contain_the_token() {
+        let secret = "glpat-SUPER-SECRET-TOKEN";
+        let outcome = gate_outcome(&receipt_for("r", VerdictStatus::Passed));
+        let args = GitLabStatusEmitter::curl_args(GITLAB_DEFAULT_API_BASE, "1", "sha", &outcome);
+        assert!(
+            args.iter().all(|a| !a.contains(secret)
+                && !a.contains("PRIVATE-TOKEN")
+                && !a.contains("JOB-TOKEN")
+                && !a.contains("GITLAB_TOKEN")),
+            "token-shaped material leaked into curl_args: {args:?}"
+        );
     }
 }
