@@ -19,7 +19,7 @@
 //! seam: `CheckSpec::load` reads JSON now; a richer/TOML source can slot in behind it.
 
 use crate::ledger_store::{LedgerStore, append_evidence};
-use crate::receipt_store::{ReceiptStore, issue_receipt_for_run};
+use crate::receipt_store::{ReceiptStore, SealedBar, issue_receipt_for_run};
 use crate::sandbox::{CommandSpec, SandboxLauncher, SandboxPolicy};
 use crate::signer::Signer;
 use crate::verify_store::VerifyStore;
@@ -227,6 +227,7 @@ pub(crate) fn seal_and_attest(
     run: &Run,
     verdict: &Verdict,
     stores: &AttestStores,
+    bar: &SealedBar,
     signer: &dyn Signer,
     issued_at_ms: u64,
 ) -> SealOutcome {
@@ -255,9 +256,10 @@ pub(crate) fn seal_and_attest(
         receipt_checks_for(verdict),
         verdict.status,
         toolchain_digest,
-        None,
+        bar.policy_version.clone(),
         None,
         issued_at_ms,
+        bar.clone(),
         signer,
         stores.receipt,
     ) else {
@@ -763,7 +765,7 @@ mod tests {
             receipt: Some(&receipts),
         };
 
-        let outcome = seal_and_attest(&run, &verdict, &stores, &signer, 1);
+        let outcome = seal_and_attest(&run, &verdict, &stores, &SealedBar::empty(), &signer, 1);
         // Both an L1 Verdict record and an L1 ReceiptIssued record were appended.
         assert_eq!(outcome.appended.len(), 2);
         let receipt = outcome.receipt.expect("a receipt was issued + reloaded");
@@ -836,7 +838,7 @@ mod tests {
             receipt: Some(&receipts),
         };
 
-        let outcome = seal_and_attest(&run, &verdict, &stores, &signer, 1);
+        let outcome = seal_and_attest(&run, &verdict, &stores, &SealedBar::empty(), &signer, 1);
         assert_eq!(outcome.appended.len(), 2);
 
         // The appended Verdict carries the verdict→run lineage edge = the run's root.

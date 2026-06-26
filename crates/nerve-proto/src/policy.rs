@@ -82,6 +82,17 @@ pub struct MergeBar {
     pub required_checks: Vec<String>,
 }
 
+impl MergeBar {
+    /// Whether the bar declares no required checks (the empty bar exercises nothing).
+    /// Used by [`crate::receipt::ReceiptStatement`]'s additive `skip_serializing_if`
+    /// so a receipt sealed without an org bar serializes byte-identically to a
+    /// pre-L3 receipt (additive-invariance) — the empty `merge_bar` key is omitted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.required_checks.is_empty()
+    }
+}
+
 /// A required piece of evidence a [`PolicyDoc`] demands beyond the merge-bar checks
 /// (e.g. a signed receipt, a replay manifest). `kind` is a free-form discriminator
 /// the host interprets; kept minimal and additive so the policy vocabulary can grow

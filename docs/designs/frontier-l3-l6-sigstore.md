@@ -3,7 +3,8 @@
 Status: **governing (design)** — the invariant-safe design for the three trust-substrate items deliberately
 left unbuilt while L0–L6 were wired (PRs #5–#16). Each was adversarially critiqued against
 INV-R1..R6 (`docs/designs/trust-substrate.md` §4); the designs below incorporate the fixes that critique
-forced. **Read this before opening a build wave on any of them.** Nothing here is implemented yet.
+forced. **Read this before opening a build wave on any of them.** **L3 (§1) is now SHIPPED** (protocol
+v14, embed-and-sign refinement); sigstore-keyless (§2) and the L6 ML calibrator (§3) remain unbuilt.
 Date: 2026-06-26.
 
 These three are "the frontier" because each carries real **invariant blast radius** — done naively, L3 turns
@@ -36,7 +37,21 @@ because the seams are missing (they all exist); they are hard because the *disci
 
 ---
 
-## 1. L3 — merge-bar enforcement  ·  build-NEXT  ·  invariant-risk: high (manageable)
+## 1. L3 — merge-bar enforcement  ·  **SHIPPED (protocol v14)**  ·  invariant-risk: high (manageable)
+
+> **Status update.** Shipped as a single green changeset. **Refinement vs. the design below:** rather
+> than have the gate fetch the bar *by* the pinned `policy_version` from a sealed/content-addressed
+> policy store, the in-force bar is **EMBEDDED IN (and signed as part of) the receipt statement** at
+> seal time — `ReceiptStatement.merge_bar` + `.required_evidence`, with `provenance.policy_version`
+> pinned alongside. This is strictly stronger for INV-R5 ("pin what is signed"): the load-bearing bar is
+> covered by the receipt's signature, so the wave-7 `verify_receipt` refusal already protects it and a
+> malicious gate host cannot strip or swap it without breaking the content address. The pure overlay
+> `nerve_core::receipt_gate::enforce_merge_bar(receipt)` therefore needs **no external policy argument**.
+> The `pinned != in-force` drift case in the original design is moot — there is no separate host-side
+> fetch to drift from. Protocol bumped **v13 → v14** (additive `skip_serializing_if`-empty fields, so
+> empty-bar receipts are byte-identical to pre-L3). **v1 trust assumption (follow-up):** `required_checks`
+> match **by name** within the co-sealed `checks`; binding to a content-addressed checkspec-id (the
+> critique's #2 fix) remains a documented follow-up.
 
 **Goal.** Make `PolicyDoc.merge_bar.required_checks` + `required_evidence` — declared, sealed into
 `policy_version`, served by `policy.get`, today **inert** — actually gate a merge, so a receipt reads `success`
@@ -181,7 +196,7 @@ the honest `None` we already ship.
 
 | Item | Value | Inv-risk | Verdict | Recommendation |
 |---|---|---|---|---|
-| **L3 merge-bar enforcement** | **High** — closes the substrate's headline lie (declared bar sits inert) | high (manageable) | needs-changes → designed | **build next** (one green PR; no proto bump) |
+| **L3 merge-bar enforcement** | **High** — closes the substrate's headline lie (declared bar sits inert) | high (manageable) | **SHIPPED** (embed-and-sign; protocol v14) | **done** — bar co-sealed into + signed in the receipt; pure `enforce_merge_bar` overlay |
 | **Sigstore-keyless** | High (strategic) — real issuer identity vs manual key distribution | high | needs-changes → designed | **build later** (after L3; feature-gated; opt-in) |
 | **L6 ML calibrator** | Low–Medium (late dividend) | high | needs-changes → designed | **keep deferred** (needs a real corpus + the read-side bones) |
 

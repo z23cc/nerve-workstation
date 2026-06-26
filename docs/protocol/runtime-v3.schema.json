@@ -2172,6 +2172,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "merge_bar": {
+          "$ref": "#/$defs/MergeBar",
+          "description": "The org's sealed merge bar, **co-sealed into (and signed as part of) this\nstatement** at issue time so the gate enforces the bar the receipt SIGNED —\nnever a policy re-read from the gate host's disk (INV-R5: pin what is signed).\nAdditive + omitted when empty (no `required_checks`), so a receipt sealed\nwithout an org bar is byte-identical to a pre-L3 receipt (additive-invariance)."
+        },
         "predicate_type": {
           "description": "The predicate type identifying this attestation kind.",
           "type": "string"
@@ -2183,6 +2187,13 @@
         "replay_manifest": {
           "$ref": "#/$defs/ReplayManifest2",
           "description": "The replay binding proving the run reproduces its recorded root hash."
+        },
+        "required_evidence": {
+          "description": "The org's required-evidence predicates, co-sealed alongside [`Self::merge_bar`]\n(same signature, same portability). Additive + omitted when empty.",
+          "items": {
+            "$ref": "#/$defs/EvidenceRequirement"
+          },
+          "type": "array"
         },
         "verdict": {
           "$ref": "#/$defs/VerdictStatus",

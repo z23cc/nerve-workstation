@@ -159,6 +159,30 @@ impl PolicyPlane {
         &self.doc
     }
 
+    /// The org's [`SealedBar`] to co-seal into a receipt at issue time (L3, INV-R5: pin
+    /// what is signed). Returns the in-force merge bar + required evidence; the pinned
+    /// `policy_version` is carried **only when** the bar/evidence is non-empty, so an
+    /// org that declares no bar leaves the receipt byte-identical to pre-L3
+    /// (additive-invariance). This is the host-boundary resolution the determinism-pure
+    /// `build_statement_with_bar` consumes — never a gate-side policy re-read.
+    pub(crate) fn sealed_bar(&self) -> crate::receipt_store::SealedBar {
+        let bar = crate::receipt_store::SealedBar {
+            merge_bar: self.doc.merge_bar.clone(),
+            required_evidence: self.doc.required_evidence.clone(),
+            policy_version: None,
+        };
+        if bar.is_empty() {
+            // Empty bar: co-seal nothing AND pin no policy_version, so the statement is
+            // byte-identical to a pre-L3 receipt (no churn for the no-policy case).
+            crate::receipt_store::SealedBar::empty()
+        } else {
+            crate::receipt_store::SealedBar {
+                policy_version: Some(self.policy_version()),
+                ..bar
+            }
+        }
+    }
+
     /// Record one gate decision to the evidence sink, returning the assigned ledger
     /// sequence (`None` with the shipped [`NullEvidenceSink`] or on append failure).
     pub(crate) fn record_decision(&self, record: &PolicyDecisionRecord) -> Option<u64> {

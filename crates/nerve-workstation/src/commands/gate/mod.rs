@@ -34,13 +34,15 @@
 //! requiring the signing key to equal a known org key; sigstore-keyless issuer identity
 //! remains the deferred upgrade.
 
+mod emit;
+
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
+use emit::select_emitter;
 use nerve_core::receipt::Receipt;
-use nerve_core::receipt_gate::{GateOutcome, gate_outcome};
+use nerve_core::receipt_gate::{GateOutcome, enforce_merge_bar};
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// The env-var fallback for `--trusted-key`: a base64 (standard) ed25519 public key the
 /// gate requires the receipt to be signed by (issuer-identity pin). When neither the
@@ -113,185 +115,6 @@ pub(crate) struct GateArgs {
     json: bool,
 }
 
-/// Side-effecting sink that posts a merge-gate decision to a code-host check surface.
-/// The default impl ([`NoopEmitter`]) does nothing — the exit code is authoritative —
-/// so a deployed merge App or a CI step both work without code change. This is the
-/// deferred-infra seam (trust-substrate §8): a GitHub App / GitLab status can replace
-/// the shelled `gh` path without touching the gate logic.
-pub(crate) trait CheckRunEmitter {
-    /// Post (or skip) a check run for `outcome` against `sha` in `repo`. Best-effort:
-    /// a posting failure is reported but never overrides the authoritative exit code.
-    fn emit(&self, repo: &str, sha: &str, outcome: &GateOutcome) -> Result<()>;
-}
-
-/// The no-op emitter: the exit code alone is the gate. Used when `--emit none`.
-pub(crate) struct NoopEmitter;
-
-impl CheckRunEmitter for NoopEmitter {
-    fn emit(&self, _repo: &str, _sha: &str, _outcome: &GateOutcome) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Posts a GitHub check run by shelling `gh api` (the deferred-infra default until a
-/// first-party GitHub App is deployed). The `gh` CLI carries the auth; we only build
-/// the Checks-API request body from the pure [`GateOutcome`].
-pub(crate) struct GhCheckRunEmitter {
-    /// The check run's display name (the row shown on the PR).
-    pub(crate) name: String,
-}
-
-impl Default for GhCheckRunEmitter {
-    fn default() -> Self {
-        Self {
-            name: "nerve/verification-receipt".to_string(),
-        }
-    }
-}
-
-impl GhCheckRunEmitter {
-    /// The `gh api` argument vector that POSTs a check run for `outcome`. Pure (no IO)
-    /// so it is unit-testable without invoking `gh`.
-    pub(crate) fn gh_args(&self, repo: &str, sha: &str, outcome: &GateOutcome) -> Vec<String> {
-        vec![
-            "api".to_string(),
-            "--method".to_string(),
-            "POST".to_string(),
-            format!("repos/{repo}/check-runs"),
-            "-f".to_string(),
-            format!("name={}", self.name),
-            "-f".to_string(),
-            format!("head_sha={sha}"),
-            "-f".to_string(),
-            "status=completed".to_string(),
-            "-f".to_string(),
-            format!("conclusion={}", outcome.conclusion),
-            "-f".to_string(),
-            format!(
-                "output[title]=Nerve verification receipt: {}",
-                outcome.conclusion
-            ),
-            "-f".to_string(),
-            format!("output[summary]={}", outcome.summary),
-        ]
-    }
-}
-
-impl CheckRunEmitter for GhCheckRunEmitter {
-    fn emit(&self, repo: &str, sha: &str, outcome: &GateOutcome) -> Result<()> {
-        let status = Command::new("gh")
-            .args(self.gh_args(repo, sha, outcome))
-            .status()
-            .context("failed to spawn `gh` (is the GitHub CLI installed and authed?)")?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("`gh api` exited with status {status}"))
-        }
-    }
-}
-
-/// The default GitLab API v4 base, used when `CI_API_V4_URL` is not set (i.e. running
-/// outside a GitLab pipeline against gitlab.com).
-const GITLAB_DEFAULT_API_BASE: &str = "https://gitlab.com/api/v4";
-
-/// Posts a GitLab **commit status** by shelling `curl` to the Commit Status API (the
-/// GitLab counterpart of [`GhCheckRunEmitter`]; deferred-infra default until a
-/// first-party GitLab integration is deployed). The status only **mirrors** the
-/// authoritative exit code: it is `success` IFF the receipt cleared (exit 0), else
-/// `failed` — an un-cleared verdict never posts a pass (INV-R1). The auth token is read
-/// from the environment inside [`emit`](GitLabStatusEmitter::emit) only and is never
-/// part of the pure [`curl_args`](GitLabStatusEmitter::curl_args), so it cannot leak
-/// into a logged argv or a test fixture.
-#[derive(Default)]
-pub(crate) struct GitLabStatusEmitter;
-
-impl GitLabStatusEmitter {
-    /// The GitLab commit-status `state` that mirrors `outcome` (INV-R1): `success` IFF
-    /// the receipt cleared (`exit_code == 0`), otherwise `failed` — so Failed,
-    /// Inconclusive, and Error all block the pipeline and an un-cleared verdict is never
-    /// posted as a pass. The real reason rides in the status `description`.
-    fn state_for(outcome: &GateOutcome) -> &'static str {
-        if outcome.exit_code == 0 {
-            "success"
-        } else {
-            "failed"
-        }
-    }
-
-    /// The `curl` argument vector that POSTs a commit status for `outcome`. Pure (no IO,
-    /// **no token** — the auth header is added in [`emit`](Self::emit) only) so it is
-    /// unit-testable without invoking `curl` and cannot leak a secret into a fixture or
-    /// a logged argv.
-    pub(crate) fn curl_args(
-        api_base: &str,
-        project: &str,
-        sha: &str,
-        outcome: &GateOutcome,
-    ) -> Vec<String> {
-        let project = urlencode(project);
-        let url = format!("{api_base}/projects/{project}/statuses/{sha}");
-        vec![
-            "-sS".to_string(),
-            "--fail".to_string(),
-            "--request".to_string(),
-            "POST".to_string(),
-            "--data-urlencode".to_string(),
-            format!("state={}", Self::state_for(outcome)),
-            "--data-urlencode".to_string(),
-            "name=nerve-gate".to_string(),
-            "--data-urlencode".to_string(),
-            format!("description={}", outcome.summary),
-            url,
-        ]
-    }
-}
-
-impl CheckRunEmitter for GitLabStatusEmitter {
-    fn emit(&self, repo: &str, sha: &str, outcome: &GateOutcome) -> Result<()> {
-        let api_base =
-            std::env::var("CI_API_V4_URL").unwrap_or_else(|_| GITLAB_DEFAULT_API_BASE.to_string());
-        // Token read from env here only — never in `curl_args` (secret safety).
-        let (header_name, token) = match std::env::var("GITLAB_TOKEN") {
-            Ok(token) if !token.is_empty() => ("PRIVATE-TOKEN", token),
-            _ => (
-                "JOB-TOKEN",
-                std::env::var("CI_JOB_TOKEN").map_err(|_| {
-                    anyhow!("no GitLab auth: set GITLAB_TOKEN (PRIVATE-TOKEN) or CI_JOB_TOKEN")
-                })?,
-            ),
-        };
-        let status = Command::new("curl")
-            .arg("--header")
-            .arg(format!("{header_name}: {token}"))
-            .args(Self::curl_args(&api_base, repo, sha, outcome))
-            .status()
-            .context("failed to spawn `curl` (is it installed?)")?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "`curl` to the GitLab Commit Status API exited with status {status}"
-            ))
-        }
-    }
-}
-
-/// Minimal percent-encoding for a GitLab project id path segment (so `group/project`
-/// becomes `group%2Fproject`). Numeric ids pass through unchanged. Encodes the
-/// path-unsafe characters GitLab project paths can contain; ASCII alnum, `-`, `_`, `.`
-/// stay literal.
-fn urlencode(segment: &str) -> String {
-    let mut out = String::with_capacity(segment.len());
-    for byte in segment.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
 /// `nerve verify`: re-run the org's own checks for a captured run in-process, seal +
 /// sign a fresh Verification Receipt, and report its gate decision. Returns the gate's
 /// exit code (0=Passed, 1=Failed, 2=Inconclusive/Error) so the calling CLI arm can
@@ -321,7 +144,14 @@ pub(crate) fn gate(args: GateArgs) -> Result<i32> {
         print_refusal(&receipt, &verification, args.json);
         return Ok(REFUSE_EXIT);
     }
-    let outcome = gate_outcome(&receipt);
+    // L3 (INV-R1/R5): enforce the org's bar that the receipt SIGNED. The overlay borrows
+    // the embedded `merge_bar` + `required_evidence` — never a gate-side policy re-read —
+    // and may only KEEP a pass or DOWNGRADE it (never upgrade). An empty (no-bar) receipt
+    // passes through to `gate_outcome` unchanged.
+    let outcome = enforce_merge_bar(&receipt);
+    // Best-effort L1 decision record: route the bar clearance to the evidence ledger if a
+    // ledger is served (degrades to the no-op sink — never fails the gate).
+    record_gate_decision(&args, &receipt, &outcome);
     let emitter = select_emitter(&args.emit)?;
     if let (Some(repo), Some(sha)) = (args.repo.as_deref(), args.sha.as_deref()) {
         if let Err(err) = emitter.emit(repo, sha, &outcome) {
@@ -344,6 +174,50 @@ pub(crate) fn gate(args: GateArgs) -> Result<i32> {
     }
     print_verified_outcome(&outcome, &verification, args.json);
     Ok(outcome.exit_code)
+}
+
+/// Best-effort L1 routing of the gate's bar decision (`docs/designs/frontier-l3-l6-sigstore.md`
+/// §1 — "Route the decision to L1"). Records a [`PolicyDecisionRecord`] keyed on the
+/// receipt's run + pinned policy version via the served scope's ledger-backed
+/// [`LedgerEvidenceSink`](crate::policy_plane::LedgerEvidenceSink); degrades to the no-op
+/// [`NullEvidenceSink`](crate::policy_plane::NullEvidenceSink) when no ledger is served,
+/// and NEVER fails the gate (INV-R1: the audit trail is evidence, not the admission gate).
+fn record_gate_decision(args: &GateArgs, receipt: &Receipt, outcome: &GateOutcome) {
+    use nerve_core::policy::{Capability, POLICY_SCHEMA_VERSION, PolicyDecisionRecord};
+    let Ok(root) = resolve_root(args.root.clone()) else {
+        return;
+    };
+    let plane = match crate::ledger_store::LedgerStore::for_scope(Some(&root)) {
+        Ok(store) => crate::policy_plane::PolicyPlane::with_ledger(Some(&root), store),
+        Err(_) => crate::policy_plane::PolicyPlane::resolve(Some(&root)),
+    };
+    // Pin the version the RECEIPT signed (INV-R5), not the gate host's live plane.
+    let policy_version = receipt
+        .statement
+        .provenance
+        .policy_version
+        .clone()
+        .unwrap_or_default();
+    let record = PolicyDecisionRecord {
+        schema_version: POLICY_SCHEMA_VERSION,
+        policy_version,
+        session_id: receipt.statement.provenance.run_id.clone(),
+        agent: String::new(),
+        tool: "gate".to_string(),
+        // The gate is an admission decision over the change as a whole; classify it as
+        // the most consequential capability (Exec) — fail-closed labeling.
+        capability: Capability::Exec,
+        // The bar clearance maps to the binary allow/deny the ledger commits.
+        decision: if outcome.exit_code == 0 {
+            "allow"
+        } else {
+            "deny"
+        }
+        .to_string(),
+        reason: outcome.summary.clone(),
+        args_hash: String::new(),
+    };
+    let _ = plane.record_decision(&record);
 }
 
 /// The result of re-verifying a receipt at the gate (INV-R5): the pure self-verification
@@ -426,25 +300,13 @@ fn load_gate_receipt(args: &GateArgs) -> Result<Receipt> {
     }
 }
 
-/// Pick the [`CheckRunEmitter`] for `--emit`: `none` (exit-code-only), `gh` (GitHub
-/// Checks API via `gh`), or `gitlab` (GitLab Commit Status API via `curl`). Every
-/// emitter only mirrors the authoritative exit code — none can fabricate a pass (INV-R1).
-fn select_emitter(emit: &str) -> Result<Box<dyn CheckRunEmitter>> {
-    match emit {
-        "none" => Ok(Box::new(NoopEmitter)),
-        "gh" => Ok(Box::new(GhCheckRunEmitter::default())),
-        "gitlab" => Ok(Box::new(GitLabStatusEmitter)),
-        other => Err(anyhow!(
-            "unknown --emit `{other}` (expected: none, gh, gitlab)"
-        )),
-    }
-}
-
 /// Render a freshly sealed receipt's gate decision and return its exit code (shared by
 /// `verify`). The receipt was just signed in-process, so it is trusted by construction;
 /// the `gate` path re-verifies a *pre-sealed* receipt before trusting it (INV-R5).
 fn report_receipt(receipt: &Receipt, as_json: bool) -> Result<i32> {
-    let outcome = gate_outcome(receipt);
+    // The receipt was just sealed in-process; enforce the bar it co-sealed (L3) so
+    // `nerve verify`'s exit code reflects the org's bar, consistent with `nerve gate`.
+    let outcome = enforce_merge_bar(receipt);
     print_outcome(&outcome, as_json);
     Ok(outcome.exit_code)
 }
@@ -592,12 +454,17 @@ fn resolve_root(root: Option<PathBuf>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::emit::{
+        CheckRunEmitter, GITLAB_DEFAULT_API_BASE, GhCheckRunEmitter, GitLabStatusEmitter,
+        NoopEmitter,
+    };
     use super::*;
     use crate::signer::{LocalEd25519Signer, Signer};
     use nerve_core::receipt::{
         RECEIPT_PREDICATE_TYPE, Receipt, ReceiptProvenance, ReceiptSignature, ReceiptStatement,
         ReplayManifest,
     };
+    use nerve_core::receipt_gate::gate_outcome;
     use nerve_core::verdict::VerdictStatus;
     use std::fs;
     use tempfile::tempdir;
@@ -622,6 +489,8 @@ mod tests {
                 command: None,
             },
             issued_at_ms: 1,
+            merge_bar: nerve_core::policy::MergeBar::default(),
+            required_evidence: Vec::new(),
         }
     }
 
@@ -664,6 +533,51 @@ mod tests {
         LocalEd25519Signer::deterministic_test_key().keyid()
     }
 
+    /// A GENUINELY SIGNED receipt whose statement co-seals a merge bar + the given checks
+    /// (L3). The bar is part of the signed bytes, so `verify_receipt` passes and the gate
+    /// then enforces the embedded bar (INV-R5).
+    fn receipt_with_bar(
+        run_id: &str,
+        verdict: VerdictStatus,
+        checks: &[(&str, VerdictStatus)],
+        required_checks: &[&str],
+    ) -> Receipt {
+        use nerve_core::policy::MergeBar;
+        use nerve_core::receipt::ReceiptCheck;
+        use nerve_core::verdict::CheckKind;
+        let mut statement = statement_for(run_id, verdict);
+        statement.checks = checks
+            .iter()
+            .map(|(name, v)| ReceiptCheck {
+                name: (*name).to_string(),
+                kind: CheckKind::Test,
+                verdict: *v,
+                reproducible: true,
+                evidence_hash: None,
+            })
+            .collect();
+        statement.merge_bar = MergeBar {
+            required_checks: required_checks.iter().map(|s| (*s).to_string()).collect(),
+        };
+        let signer = LocalEd25519Signer::deterministic_test_key();
+        let pae = nerve_core::receipt::dsse_pae(
+            RECEIPT_PREDICATE_TYPE,
+            &nerve_core::receipt::canonical_statement_bytes(&statement),
+        );
+        let (sig, public_key) = signer.sign(&pae);
+        nerve_core::receipt::seal_receipt(
+            statement,
+            ReceiptSignature {
+                payload_type: RECEIPT_PREDICATE_TYPE.to_string(),
+                backend: signer.backend().to_string(),
+                keyid: signer.keyid(),
+                sig,
+                public_key: Some(public_key),
+                bundle: None,
+            },
+        )
+    }
+
     fn write_receipt(root: &std::path::Path, receipt: &Receipt) {
         let dir = root.join(".nerve").join("receipts");
         fs::create_dir_all(&dir).unwrap();
@@ -701,6 +615,93 @@ mod tests {
         // A genuinely signed receipt verifies, so the gate trusts its Passed verdict.
         let code = gate(args_for_path(path, None)).unwrap();
         assert_eq!(code, 0);
+    }
+
+    /// L3 end-to-end: a receipt embedding a MET bar (all required checks Passed) gates 0.
+    #[test]
+    fn gate_with_met_embedded_bar_gates_zero() {
+        let dir = tempdir().unwrap();
+        let receipt = receipt_with_bar(
+            "met",
+            VerdictStatus::Passed,
+            &[
+                ("unit", VerdictStatus::Passed),
+                ("build", VerdictStatus::Passed),
+            ],
+            &["unit", "build"],
+        );
+        let path = write_to_temp(dir.path(), &receipt);
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_eq!(code, 0, "a met embedded bar gates 0");
+    }
+
+    /// L3 end-to-end: a receipt embedding an UNMET bar gates non-zero even though the
+    /// aggregate verdict is Passed — the gate enforces the bar the receipt SIGNED.
+    #[test]
+    fn gate_with_unmet_embedded_bar_gates_nonzero() {
+        let dir = tempdir().unwrap();
+        // The aggregate verdict says Passed, but a required check is present-and-failed.
+        let receipt = receipt_with_bar(
+            "unmet",
+            VerdictStatus::Passed,
+            &[
+                ("unit", VerdictStatus::Passed),
+                ("build", VerdictStatus::Failed),
+            ],
+            &["unit", "build"],
+        );
+        let path = write_to_temp(dir.path(), &receipt);
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_ne!(code, 0, "an unmet embedded bar must not gate a pass");
+        assert_eq!(
+            code, 1,
+            "a present-and-failed required check is a failure (exit 1)"
+        );
+    }
+
+    /// L3 end-to-end: a MISSING required check downgrades a Passed receipt to neutral.
+    #[test]
+    fn gate_with_missing_required_check_gates_neutral() {
+        let dir = tempdir().unwrap();
+        let receipt = receipt_with_bar(
+            "missing",
+            VerdictStatus::Passed,
+            &[("unit", VerdictStatus::Passed)],
+            &["unit", "integration"],
+        );
+        let path = write_to_temp(dir.path(), &receipt);
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_eq!(code, 2, "a missing required check is neutral (exit 2)");
+    }
+
+    /// INV-R5 ORDERING: the wave-7 tamper refusal fires BEFORE bar enforcement — a
+    /// receipt whose statement was edited after signing (even to satisfy the bar) is
+    /// refused first, never silently bar-enforced into a pass.
+    #[test]
+    fn gate_tamper_refusal_fires_before_bar_enforcement() {
+        let dir = tempdir().unwrap();
+        // Seal an honest receipt with an unmet bar, then forge the failing check to Passed
+        // AFTER signing — this breaks the content address, so the gate must REFUSE first.
+        let receipt = receipt_with_bar(
+            "tamper-bar",
+            VerdictStatus::Passed,
+            &[
+                ("unit", VerdictStatus::Passed),
+                ("build", VerdictStatus::Failed),
+            ],
+            &["unit", "build"],
+        );
+        let mut tampered = receipt.clone();
+        tampered.statement.checks[1].verdict = VerdictStatus::Passed; // forge the bar pass
+        let path = write_to_temp(dir.path(), &tampered);
+
+        let v = verify_gate_receipt(&tampered, None);
+        assert!(!v.statement_intact, "editing a check breaks the hash");
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_eq!(
+            code, REFUSE_EXIT,
+            "tamper is refused BEFORE the bar is enforced"
+        );
     }
 
     #[test]

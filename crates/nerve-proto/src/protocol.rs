@@ -77,7 +77,14 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
 // policy / receipt / outcome schema roots. Additive serde-tagged variants and new
 // schema-roots only — a v6 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "13";
+// v14 (trust-substrate L3 merge-bar enforcement): additive `merge_bar` +
+// `required_evidence` fields on `ReceiptStatement` — the org's sealed bar is now
+// CO-SEALED INTO (and signed as part of) the receipt statement so the merge gate
+// enforces the bar the receipt SIGNED, never a host-side policy re-read (INV-R5).
+// Both fields are `skip_serializing_if`-empty, so a receipt sealed without an org
+// bar serializes byte-identically to a v13 receipt (additive-invariance) — no
+// receipt-id churn for existing receipts. A v13 client keeps working.
+pub const RUNTIME_PROTOCOL_VERSION: &str = "14";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";

@@ -29,6 +29,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::policy::{EvidenceRequirement, MergeBar};
 use crate::verdict::{CheckKind, VerdictStatus};
 
 /// On-disk + on-wire receipt schema version. Bumped only for additive,
@@ -164,6 +165,17 @@ pub struct ReceiptStatement {
     pub replay_manifest: ReplayManifest,
     /// Host wall-clock issuance time in ms (display metadata; not part of the id).
     pub issued_at_ms: u64,
+    /// The org's sealed merge bar, **co-sealed into (and signed as part of) this
+    /// statement** at issue time so the gate enforces the bar the receipt SIGNED —
+    /// never a policy re-read from the gate host's disk (INV-R5: pin what is signed).
+    /// Additive + omitted when empty (no `required_checks`), so a receipt sealed
+    /// without an org bar is byte-identical to a pre-L3 receipt (additive-invariance).
+    #[serde(default, skip_serializing_if = "MergeBar::is_empty")]
+    pub merge_bar: MergeBar,
+    /// The org's required-evidence predicates, co-sealed alongside [`Self::merge_bar`]
+    /// (same signature, same portability). Additive + omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_evidence: Vec<EvidenceRequirement>,
 }
 
 /// A portable, signed Verification Receipt — the L4 unit of trust. Wraps the
@@ -218,6 +230,8 @@ mod tests {
                 command: Some("nerve replay".into()),
             },
             issued_at_ms: 1234,
+            merge_bar: MergeBar::default(),
+            required_evidence: Vec::new(),
         }
     }
 
@@ -318,5 +332,41 @@ mod tests {
         let statement = sample_statement();
         let value = serde_json::to_value(&statement).expect("statement json");
         assert_eq!(value["predicate_type"], RECEIPT_PREDICATE_TYPE);
+    }
+
+    #[test]
+    fn empty_merge_bar_and_evidence_are_omitted_for_additive_invariance() {
+        // A statement with no org bar (the empty default) MUST omit both new keys so a
+        // pre-L3 receipt's canonical bytes / content-id are byte-identical (v13→v14
+        // additive-invariance — like every prior wave).
+        let mut statement = sample_statement();
+        statement.merge_bar = MergeBar::default();
+        statement.required_evidence = Vec::new();
+        let value = serde_json::to_value(&statement).expect("statement json");
+        assert!(value.get("merge_bar").is_none(), "empty bar key omitted");
+        assert!(
+            value.get("required_evidence").is_none(),
+            "empty evidence key omitted"
+        );
+        // It still round-trips, with the additive fields falling back to their defaults.
+        let back: ReceiptStatement = serde_json::from_value(value).expect("round-trip");
+        assert!(back.merge_bar.is_empty());
+        assert!(back.required_evidence.is_empty());
+    }
+
+    #[test]
+    fn non_empty_merge_bar_and_evidence_serialize_and_round_trip() {
+        let mut statement = sample_statement();
+        statement.merge_bar = MergeBar {
+            required_checks: vec!["unit".into(), "build".into()],
+        };
+        statement.required_evidence = vec![EvidenceRequirement {
+            kind: "receipt".into(),
+        }];
+        let value = serde_json::to_value(&statement).expect("statement json");
+        assert_eq!(value["merge_bar"]["required_checks"][0], "unit");
+        assert_eq!(value["required_evidence"][0]["kind"], "receipt");
+        let back: ReceiptStatement = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, statement);
     }
 }

@@ -110,6 +110,23 @@ FLOOR
   policy (north-star §3.9) to declarative policy-as-code: what each external agent may read / write /
   egress, what bar a diff must clear to merge, what evidence must exist. Every grant/denial is itself
   an evidenced event in L1 — "allowed" and "passed" both become auditable and replayable.
+  **Merge-bar enforcement (SHIPPED, protocol v14).** `PolicyDoc.merge_bar.required_checks` +
+  `required_evidence` are no longer inert: the in-force bar is **co-sealed into (and signed as part of)
+  the receipt statement** at issue time (`ReceiptStatement.merge_bar` / `.required_evidence`, plus a
+  pinned `provenance.policy_version`), and the merge gate enforces *the bar the receipt SIGNED* via the
+  pure `nerve_core::receipt_gate::enforce_merge_bar` — **never** a policy re-read from the gate host's
+  disk (INV-R5: pin what is signed; a malicious host cannot strip the bar, and the wave-7
+  `verify_receipt` refusal already protects the embedded bar from gate-side tampering). The overlay is
+  **downgrade-only** (INV-R1): a present-and-failed required check downgrades a pass to *failure* (exit
+  1); a missing required check or absent/unknown required evidence downgrades to *neutral* (exit 2,
+  never a fabricated pass); a non-success base verdict is **never** upgraded (the bar report is appended
+  to its summary). Evidence kinds are a CLOSED, fail-closed set `{receipt, replay, ledger, policy}`
+  (unknown = unsatisfied — no threshold/coverage predicates that would drift into a judge). An empty
+  bar is pure pass-through and serializes away, so a receipt sealed without an org bar is byte-identical
+  to a pre-L3 receipt (additive-invariance). **v1 trust assumption (documented follow-up):**
+  `required_checks` are matched **by name** within the co-sealed `checks` of the same signed statement;
+  binding to a content-addressed checkspec-id (so a renamed/stubbed check cannot impersonate the org's
+  real one) is a tracked follow-up.
 - **L4 — Portable Verification Receipt.** A signed, portable manifest (in-toto / DSSE / SLSA / OTel-
   GenAI-embedded): these inputs, this run hash, these reproducible checks + verdicts, this policy
   version, this provenance — **re-verifiable by a third party who trusts none of the participants.**

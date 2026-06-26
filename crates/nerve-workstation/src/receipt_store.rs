@@ -20,6 +20,7 @@
 
 use crate::signer::Signer;
 use anyhow::{Context, Result, anyhow};
+use nerve_core::policy::{EvidenceRequirement, MergeBar};
 use nerve_core::provenance::Run;
 use nerve_core::receipt::{
     LedgerRef, RECEIPT_PREDICATE_TYPE, RECEIPT_SCHEMA_VERSION, Receipt, ReceiptCheck,
@@ -46,6 +47,38 @@ pub(crate) struct IssuedReceipt {
     /// The aggregated org's-own-test verdict carried by the receipt.
     #[allow(dead_code, reason = "receipt identity echoed for announcing callers")]
     pub(crate) verdict: VerdictStatus,
+}
+
+/// The org's sealed merge bar to **co-seal into (and sign as part of)** a receipt
+/// statement at issue time (L3, INV-R5: pin what is signed). The host resolves it from
+/// the in-force policy plane *above the determinism boundary* and passes it in; the
+/// pure `build_statement_with_bar` embeds it. The **empty** default (no required checks
+/// and no required evidence) serializes away, so a receipt issued without an org bar is
+/// byte-identical to a pre-L3 receipt (additive-invariance).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SealedBar {
+    /// The org's required-checks bar (empty = no bar exercised).
+    pub(crate) merge_bar: MergeBar,
+    /// The org's required-evidence predicates (empty = none).
+    pub(crate) required_evidence: Vec<EvidenceRequirement>,
+    /// The content-addressed `policy_version` of the in-force sealed policy, pinned into
+    /// the receipt's provenance **only when** a non-empty bar/evidence is co-sealed. Left
+    /// `None` for the empty bar so the statement stays byte-identical to pre-L3 (the
+    /// `policy_version` key is `skip_serializing_if = Option::is_none`).
+    pub(crate) policy_version: Option<String>,
+}
+
+impl SealedBar {
+    /// The empty bar — co-seals nothing, so the receipt is byte-identical to pre-L3.
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Whether this bar co-seals anything (a non-empty bar or any required evidence).
+    /// An empty bar contributes nothing to the statement (additive-invariance).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.merge_bar.is_empty() && self.required_evidence.is_empty()
+    }
 }
 
 /// A directory of persisted issued receipts (`<dir>/<receipt_id>.json`). Sibling of
@@ -150,10 +183,11 @@ pub(crate) fn issue_receipt_for_run(
     policy_version: Option<String>,
     ledger_ref: Option<LedgerRef>,
     issued_at_ms: u64,
+    bar: SealedBar,
     signer: &dyn Signer,
     store: Option<&ReceiptStore>,
 ) -> Option<IssuedReceipt> {
-    let statement = nerve_core::receipt::build_statement(
+    let statement = nerve_core::receipt::build_statement_with_bar(
         run,
         checks,
         verdict,
@@ -161,6 +195,8 @@ pub(crate) fn issue_receipt_for_run(
         policy_version,
         ledger_ref,
         issued_at_ms,
+        bar.merge_bar,
+        bar.required_evidence,
     );
     let payload = nerve_core::receipt::canonical_statement_bytes(&statement);
     let pae = nerve_core::receipt::dsse_pae(RECEIPT_PREDICATE_TYPE, &payload);
@@ -352,6 +388,7 @@ mod tests {
             Some("policy-1".into()),
             None,
             5000,
+            SealedBar::empty(),
             &signer,
             Some(&store),
         )
@@ -372,6 +409,106 @@ mod tests {
         assert_eq!(verification.verdict, VerdictStatus::Passed);
     }
 
+    /// ADDITIVE-INVARIANCE (v13→v14): a receipt sealed with NO policy (the empty
+    /// `SealedBar`) pins `policy_version = None` and OMITS `merge_bar` /
+    /// `required_evidence`, so its statement bytes + content-id are byte-identical to a
+    /// pre-L3 receipt. Locking it: the empty-bar issue path equals the explicit pre-L3
+    /// `build_statement` path, and the persisted JSON carries none of the new keys.
+    #[test]
+    fn empty_bar_receipt_is_byte_identical_to_pre_l3() {
+        let dir = tempdir().unwrap();
+        let store = ReceiptStore::new(dir.path().join("receipts"));
+        let signer = LocalEd25519Signer::deterministic_test_key();
+        let run = sample_run("invariance");
+
+        let issued = issue_receipt_for_run(
+            &run,
+            vec![passing_check()],
+            VerdictStatus::Passed,
+            Some("toolchain-x".into()),
+            None, // no policy_version pinned (no policy in force)
+            None,
+            5000,
+            SealedBar::empty(),
+            &signer,
+            Some(&store),
+        )
+        .expect("issue persists");
+
+        // The pre-L3 statement (built without the bar fields at all) hashes identically.
+        let pre_l3 = nerve_core::receipt::build_statement(
+            &run,
+            vec![passing_check()],
+            VerdictStatus::Passed,
+            Some("toolchain-x".into()),
+            None,
+            None,
+            5000,
+        );
+        assert_eq!(
+            issued.receipt_id,
+            nerve_core::receipt::statement_id(&pre_l3),
+            "empty-bar receipt id equals the pre-change (pre-L3) value"
+        );
+
+        // The persisted JSON omits both new keys + policy_version (additive-invariance).
+        let loaded = store.load_record(&issued.receipt_id).unwrap();
+        let value = serde_json::to_value(&loaded.statement).unwrap();
+        assert!(value.get("merge_bar").is_none(), "empty bar key omitted");
+        assert!(
+            value.get("required_evidence").is_none(),
+            "empty evidence key omitted"
+        );
+        assert!(
+            value["provenance"].get("policy_version").is_none(),
+            "no policy_version pinned for the no-policy case"
+        );
+    }
+
+    /// A NON-empty `SealedBar` co-seals the bar + pins the policy_version, changing the
+    /// statement bytes (a documented, intentional new-receipt shape — never affects
+    /// existing empty-bar receipts).
+    #[test]
+    fn non_empty_bar_co_seals_bar_and_pins_policy_version() {
+        use nerve_core::policy::{EvidenceRequirement, MergeBar};
+        let dir = tempdir().unwrap();
+        let store = ReceiptStore::new(dir.path().join("receipts"));
+        let signer = LocalEd25519Signer::deterministic_test_key();
+        let bar = SealedBar {
+            merge_bar: MergeBar {
+                required_checks: vec!["unit".into()],
+            },
+            required_evidence: vec![EvidenceRequirement {
+                kind: "receipt".into(),
+            }],
+            policy_version: Some("pv-1".into()),
+        };
+        let issued = issue_receipt_for_run(
+            &sample_run("with-bar"),
+            vec![passing_check()],
+            VerdictStatus::Passed,
+            None,
+            bar.policy_version.clone(),
+            None,
+            1,
+            bar,
+            &signer,
+            Some(&store),
+        )
+        .expect("issue persists");
+
+        let loaded = store.load_record(&issued.receipt_id).unwrap();
+        assert_eq!(loaded.statement.merge_bar.required_checks, vec!["unit"]);
+        assert_eq!(loaded.statement.required_evidence.len(), 1);
+        assert_eq!(
+            loaded.statement.provenance.policy_version.as_deref(),
+            Some("pv-1")
+        );
+        // The co-sealed receipt still verifies (the bar is part of the signed bytes).
+        let v = nerve_core::receipt::verify_receipt(&loaded, ed25519_verify);
+        assert!(v.statement_intact && v.signature_valid);
+    }
+
     #[test]
     fn empty_checks_yield_inconclusive_receipt() {
         let dir = tempdir().unwrap();
@@ -387,6 +524,7 @@ mod tests {
             None,
             None,
             1,
+            SealedBar::empty(),
             &signer,
             Some(&store),
         )
@@ -406,6 +544,7 @@ mod tests {
             None,
             None,
             7,
+            SealedBar::empty(),
             &signer,
             None,
         );
@@ -426,6 +565,7 @@ mod tests {
             None,
             None,
             9,
+            SealedBar::empty(),
             &signer,
             Some(&store),
         )
@@ -457,6 +597,7 @@ mod tests {
                 None,
                 None,
                 ts,
+                SealedBar::empty(),
                 &signer,
                 Some(&store),
             )
