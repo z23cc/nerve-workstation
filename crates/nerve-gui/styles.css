@@ -451,6 +451,21 @@ summary:focus-visible {
   border-color: var(--warn);
 }
 
+.flaky-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  color: var(--ok);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.flaky-badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 0.45; }
   50% { opacity: 1; }

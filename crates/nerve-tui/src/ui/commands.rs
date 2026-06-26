@@ -206,6 +206,66 @@ pub fn format_ledger_verdict(result: &Value) -> (Tone, String) {
     (Tone::Error, format!("ledger TAMPERED — {error}{at}"))
 }
 
+/// How many per-check flaky rows `/flaky` renders (the noisiest first).
+const FLAKY_TOP_N: usize = 8;
+
+/// Render an `outcome.query` result's per-check flaky rates (the L6 "agent wrong
+/// vs test flaky" calibration) into an advisory block. The result Value is the
+/// engine's raw shape: `{ "flaky_rates": [ { "check_name", "kind", "runs",
+/// "flaky_runs", "fail_runs", "flaky_permille" }, … ] }` — but a host may wrap it
+/// under `structuredContent`, so unwrap that defensively (mirrors
+/// [`format_ledger_verdict`]). Rows are sorted by `flaky_permille` DESC and the
+/// top [`FLAKY_TOP_N`] are shown as "<check> (<kind>) — N‰ flaky [f/r runs, x
+/// fail]". This is **observational** (INV-R1): always [`Tone::Info`], never a
+/// pass/fail gate. An empty/absent list yields the "no data yet" hint.
+#[must_use]
+pub fn format_flaky_rates(result: &Value) -> (Tone, String) {
+    let root = result
+        .get("structuredContent")
+        .filter(|v| v.is_object())
+        .unwrap_or(result);
+    let mut rows: Vec<&Value> = root
+        .get("flaky_rates")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return (
+            Tone::Info,
+            "no flaky-rate data yet — run some verifies first".to_string(),
+        );
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(flaky_permille(row)));
+    let lines: Vec<String> = rows
+        .iter()
+        .take(FLAKY_TOP_N)
+        .map(|row| flaky_line(row))
+        .collect();
+    (Tone::Info, lines.join("\n"))
+}
+
+/// The `flaky_permille` field of a flaky-rate row (0 when absent/malformed); the
+/// DESC sort key for [`format_flaky_rates`].
+fn flaky_permille(row: &Value) -> u64 {
+    row.get("flaky_permille")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// Format one flaky-rate row as "<check> (<kind>) — N‰ flaky [f/r runs, x fail]".
+fn flaky_line(row: &Value) -> String {
+    let check = row
+        .get("check_name")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    let kind = row.get("kind").and_then(Value::as_str).unwrap_or("?");
+    let runs = row.get("runs").and_then(Value::as_u64).unwrap_or(0);
+    let flaky = row.get("flaky_runs").and_then(Value::as_u64).unwrap_or(0);
+    let fails = row.get("fail_runs").and_then(Value::as_u64).unwrap_or(0);
+    let permille = flaky_permille(row);
+    format!("{check} ({kind}) — {permille}‰ flaky [{flaky}/{runs} runs, {fails} fail]")
+}
+
 /// A slash command offered by the autocomplete palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -264,6 +324,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         hint: "verify the L1 evidence ledger's tamper-evident chain",
     },
     CommandSpec {
+        name: "flaky",
+        hint: "per-check flaky rates from the verdict corpus (agent-vs-test, advisory)",
+    },
+    CommandSpec {
         name: "theme",
         hint: "cycle accent color",
     },
@@ -312,6 +376,7 @@ pub const HELP_TEXT: &str = "commands:\n  \
 /login [provider] [--device]  how to authenticate; --device is reserved/fail-closed for now\n  \
 /lease [provider] [--refresh]  show broker OAuth lease metadata; --refresh forces broker refresh; token redacted\n  \
 /ledger                    verify the L1 evidence ledger's tamper-evident chain (read-only)\n  \
+/flaky                     per-check flaky rates from the verdict corpus (agent-vs-test, advisory)\n  \
 /wechat login [bot_type] [base_url]  start WeChat QR login (scan-only); scan the QR shown\n  \
 /wechat start [agent] [autonomy] [owner1,owner2,...]  start bridge (default: claude, read_only, empty owners)\n  \
 /wechat stop               stop the WeChat bridge\n  \
@@ -547,6 +612,54 @@ mod tests {
             "ok": false, "error": "PrevMismatch",
         }));
         assert_eq!(no_seq, "ledger TAMPERED — PrevMismatch");
+    }
+
+    #[test]
+    fn flaky_is_in_palette_and_help() {
+        assert!(COMMANDS.iter().any(|c| c.name == "flaky"));
+        assert!(match_commands("/fla").iter().any(|c| c.name == "flaky"));
+        assert!(HELP_TEXT.contains("/flaky"));
+    }
+
+    #[test]
+    fn format_flaky_rates_renders_sorted_advisory_rows() {
+        // Populated corpus: rows sort by flaky_permille DESC and render as advisory
+        // (Info tone, never a gate). Unwraps a `structuredContent` wrapper too.
+        let (tone, block) = format_flaky_rates(&json!({
+            "flaky_rates": [
+                { "check_name": "cargo fmt", "kind": "lint",
+                  "runs": 4, "flaky_runs": 0, "fail_runs": 0, "flaky_permille": 0 },
+                { "check_name": "cargo test", "kind": "test",
+                  "runs": 8, "flaky_runs": 2, "fail_runs": 1, "flaky_permille": 250 },
+            ],
+        }));
+        assert_eq!(tone, Tone::Info);
+        let lines: Vec<&str> = block.lines().collect();
+        // The noisiest check comes first.
+        assert_eq!(
+            lines[0],
+            "cargo test (test) — 250‰ flaky [2/8 runs, 1 fail]"
+        );
+        assert_eq!(lines[1], "cargo fmt (lint) — 0‰ flaky [0/4 runs, 0 fail]");
+        // Nested under structuredContent is unwrapped.
+        let (_, nested) = format_flaky_rates(&json!({
+            "structuredContent": { "flaky_rates": [
+                { "check_name": "clippy", "kind": "lint",
+                  "runs": 3, "flaky_runs": 1, "fail_runs": 0, "flaky_permille": 333 },
+            ] },
+        }));
+        assert!(nested.contains("clippy (lint) — 333‰ flaky [1/3 runs, 0 fail]"));
+    }
+
+    #[test]
+    fn format_flaky_rates_handles_empty_and_absent() {
+        // Empty list and an absent key both yield the advisory "no data yet" hint.
+        let (tone, line) = format_flaky_rates(&json!({ "flaky_rates": [] }));
+        assert_eq!(tone, Tone::Info);
+        assert_eq!(line, "no flaky-rate data yet — run some verifies first");
+        let (tone2, line2) = format_flaky_rates(&json!({}));
+        assert_eq!(tone2, Tone::Info);
+        assert_eq!(line2, "no flaky-rate data yet — run some verifies first");
     }
 
     #[test]

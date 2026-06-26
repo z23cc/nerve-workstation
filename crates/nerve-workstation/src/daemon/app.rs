@@ -321,7 +321,14 @@ mod tests {
         let composer = include_str!("../../../nerve-gui/src/composer.rs");
         let hero_chips = include_str!("../../../nerve-gui/src/hero_chips.rs");
         let topbar = include_str!("../../../nerve-gui/src/topbar.rs");
-        let sidebar = include_str!("../../../nerve-gui/src/sidebar.rs");
+        // The sidebar was split into a module dir; the chrome contract (incl. the
+        // nav SVG glyphs) spans both `mod.rs` and the extracted `icons.rs`.
+        let sidebar = format!(
+            "{}{}",
+            include_str!("../../../nerve-gui/src/sidebar/mod.rs"),
+            include_str!("../../../nerve-gui/src/sidebar/icons.rs"),
+        );
+        let sidebar = sidebar.as_str();
         // Per-turn rendering was split across render.rs + transcript.rs by the
         // reactive-transcript refactor; the chrome contract spans both.
         let render = format!(

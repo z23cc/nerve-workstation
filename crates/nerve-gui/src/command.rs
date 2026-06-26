@@ -137,6 +137,20 @@ pub(crate) fn ledger_verify() -> Value {
     to_value(&RuntimeCommand::LedgerVerify)
 }
 
+/// `outcome.query` — fold the L6 advisory per-check **flaky-rate** calibration
+/// (the design's "agent wrong vs. test flaky?" signal) across the whole verdict
+/// corpus, with no filters. All three optional fields (`agent` / `outcome` /
+/// `limit`) are `None`, and each `skip_serializing_if = "Option::is_none"`, so
+/// the wire is just `{ "kind": "outcome.query" }`. Read-only and advisory
+/// (INV-R1): the `flaky_rates` it returns are observational, never a gate.
+pub(crate) fn outcome_query() -> Value {
+    to_value(&RuntimeCommand::OutcomeQuery {
+        agent: None,
+        outcome: None,
+        limit: None,
+    })
+}
+
 /// `host.clipboard.write_text`.
 pub(crate) fn host_clipboard_write_text(text: String) -> Value {
     to_value(&RuntimeCommand::HostClipboardWriteText { text })
@@ -328,6 +342,12 @@ mod tests {
     #[test]
     fn ledger_verify_matches_literal() {
         assert_eq!(ledger_verify(), json!({ "kind": "ledger.verify" }));
+    }
+
+    #[test]
+    fn outcome_query_matches_literal() {
+        // All filters `None` + `skip_serializing_if` => bare `{ "kind": … }`.
+        assert_eq!(outcome_query(), json!({ "kind": "outcome.query" }));
     }
 
     #[test]
