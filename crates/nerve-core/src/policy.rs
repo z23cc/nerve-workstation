@@ -90,6 +90,7 @@ mod tests {
             }],
             merge_bar: MergeBar {
                 required_checks: vec!["test".into(), "build".into()],
+                expected_checkspec_hash: None,
             },
             required_evidence: vec![EvidenceRequirement {
                 kind: "receipt".into(),
@@ -156,6 +157,12 @@ mod tests {
         let mut diff_evidence = sample_doc();
         diff_evidence.required_evidence.clear();
         assert_ne!(seal_policy(diff_evidence).policy_version, base);
+
+        // Pinning the bar's checkspec identity is part of the sealed (signed) policy body,
+        // so it changes the version; a doc that pins none (sample_doc) seals to `base`.
+        let mut diff_checkspec = sample_doc();
+        diff_checkspec.merge_bar.expected_checkspec_hash = Some("spec-abc".into());
+        assert_ne!(seal_policy(diff_checkspec).policy_version, base);
     }
 
     #[test]

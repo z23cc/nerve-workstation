@@ -4,8 +4,8 @@ Status: **governing (design)** — the invariant-safe design for the three trust
 left unbuilt while L0–L6 were wired (PRs #5–#16). Each was adversarially critiqued against
 INV-R1..R6 (`docs/designs/trust-substrate.md` §4); the designs below incorporate the fixes that critique
 forced. **Read this before opening a build wave on any of them.** **L3 (§1) is now SHIPPED** (protocol
-v14, embed-and-sign refinement); sigstore-keyless (§2) and the L6 ML calibrator (§3) remain unbuilt.
-Date: 2026-06-26.
+v15: embed-and-sign + checkspec-identity binding); sigstore-keyless (§2) and the L6 ML calibrator (§3)
+remain unbuilt. Date: 2026-06-26.
 
 These three are "the frontier" because each carries real **invariant blast radius** — done naively, L3 turns
 the court reporter into a judge (INV-R1), L6 puts ML in the determinism kernel and lets an advisory signal go
@@ -37,7 +37,7 @@ because the seams are missing (they all exist); they are hard because the *disci
 
 ---
 
-## 1. L3 — merge-bar enforcement  ·  **SHIPPED (protocol v14)**  ·  invariant-risk: high (manageable)
+## 1. L3 — merge-bar enforcement  ·  **SHIPPED (protocol v15)**  ·  invariant-risk: high (manageable)
 
 > **Status update.** Shipped as a single green changeset. **Refinement vs. the design below:** rather
 > than have the gate fetch the bar *by* the pinned `policy_version` from a sealed/content-addressed
@@ -49,9 +49,21 @@ because the seams are missing (they all exist); they are hard because the *disci
 > `nerve_core::receipt_gate::enforce_merge_bar(receipt)` therefore needs **no external policy argument**.
 > The `pinned != in-force` drift case in the original design is moot — there is no separate host-side
 > fetch to drift from. Protocol bumped **v13 → v14** (additive `skip_serializing_if`-empty fields, so
-> empty-bar receipts are byte-identical to pre-L3). **v1 trust assumption (follow-up):** `required_checks`
-> match **by name** within the co-sealed `checks`; binding to a content-addressed checkspec-id (the
-> critique's #2 fix) remains a documented follow-up.
+> empty-bar receipts are byte-identical to pre-L3).
+>
+> **Checkspec-identity binding — CLOSED (protocol v15).** The v14 "match `required_checks` **by name**
+> within the co-sealed `checks`" trust assumption (the critique's #2 fix) is now shipped. The bar may pin
+> `MergeBar.expected_checkspec_hash` (the content address of the checkspec it was AUTHORED against —
+> co-sealed into and signed as part of the statement), and the receipt now carries
+> `ReceiptStatement.checkspec_hash` (its copy of the sealed `Verdict.checkspec_hash`, the identity of the
+> checkspec its checks were produced against). `enforce_merge_bar` gates on identity **before**
+> name-matching: when the bar pins an `expected_checkspec_hash`, the receipt's `checkspec_hash` MUST equal
+> it, else the required-check *names* cannot be trusted — a renamed or stubbed (`command:'true'`) check can
+> no longer impersonate the org's real check by reusing its display name. A mismatch (or a receipt that
+> pinned no checkspec) is a **downgrade-only** condition: a success base drops to *neutral* (exit 2), a
+> non-success base is kept verbatim (never upgraded, INV-R1). A bar that pins no expected hash keeps the
+> v14 by-name behavior unchanged. Both fields are additive `Option`/`skip_serializing_if`, so a receipt or
+> bar without them serializes byte-identically to a v14 record (additive-invariance) — no receipt-id churn.
 
 **Goal.** Make `PolicyDoc.merge_bar.required_checks` + `required_evidence` — declared, sealed into
 `policy_version`, served by `policy.get`, today **inert** — actually gate a merge, so a receipt reads `success`
@@ -82,11 +94,16 @@ invented judgment. We attest *the org's bar was cleared by the org's checks*; we
   content-addressed policy the verifier fetches *by that version* — **never** the gate host's live
   `<root>/.nerve/policy-plane.json` (a malicious host could strip the bar). `pinned != in-force` resolves to
   **neutral drift (exit 2)** surfacing both versions; it never silently relaxes.
-- **🔒 Bind check identity to content, not display name (INV-R1 — critique's #2 fix).** `required_checks` must
-  not be satisfiable by a renamed or stubbed (`command:'true'`) check impersonating the org's real one. Match
-  against a stable, content-addressed per-check identity derived from the sealed checkspec — not the free-form
-  `ReceiptCheck.name`. (If only name-matching is initially feasible, the *checkspec hash* the receipt pinned must
-  be the one the bar was authored against — surfaced as drift otherwise.)
+- **🔒 Bind check identity to content, not display name (INV-R1 — critique's #2 fix).** ✅ **SHIPPED (v15).**
+  `required_checks` must not be satisfiable by a renamed or stubbed (`command:'true'`) check impersonating the
+  org's real one. As shipped, the binding is at the **checkspec** grain rather than per-check: the bar pins
+  `MergeBar.expected_checkspec_hash` (the checkspec it was authored against) and the receipt carries
+  `ReceiptStatement.checkspec_hash` (the checkspec its checks were produced against, copied from the sealed
+  `Verdict.checkspec_hash`). The gate refuses to trust the check *names* unless the two match — a mismatch (or an
+  absent receipt checkspec) downgrades to neutral, never a fabricated pass. This is exactly the parenthetical
+  fallback the original design named ("the *checkspec hash* the receipt pinned must be the one the bar was
+  authored against — surfaced as drift otherwise"), now enforced rather than documented. A finer per-check
+  identity remains a possible future refinement, but the impersonation hole is closed.
 - **Closed evidence-kind enum, fail-closed (INV-R3).** `EvidenceRequirement.kind` consumed by the gate is a
   CLOSED set of presence/identity predicates over receipt-resident provenance: `receipt` (exists), `replay`
   (non-empty `replay_manifest.root_hash`), `ledger` (`provenance.ledger_ref.is_some()`), `policy`
@@ -196,7 +213,7 @@ the honest `None` we already ship.
 
 | Item | Value | Inv-risk | Verdict | Recommendation |
 |---|---|---|---|---|
-| **L3 merge-bar enforcement** | **High** — closes the substrate's headline lie (declared bar sits inert) | high (manageable) | **SHIPPED** (embed-and-sign; protocol v14) | **done** — bar co-sealed into + signed in the receipt; pure `enforce_merge_bar` overlay |
+| **L3 merge-bar enforcement** | **High** — closes the substrate's headline lie (declared bar sits inert) | high (manageable) | **SHIPPED** (embed-and-sign + checkspec-identity binding; protocol v15) | **done** — bar co-sealed into + signed in the receipt; pure `enforce_merge_bar` overlay; `required_checks` bound to a content-addressed checkspec identity (by-name impersonation closed) |
 | **Sigstore-keyless** | High (strategic) — real issuer identity vs manual key distribution | high | needs-changes → designed | **build later** (after L3; feature-gated; opt-in) |
 | **L6 ML calibrator** | Low–Medium (late dividend) | high | needs-changes → designed | **keep deferred** (needs a real corpus + the read-side bones) |
 

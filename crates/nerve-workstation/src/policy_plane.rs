@@ -163,8 +163,11 @@ impl PolicyPlane {
     /// what is signed). Returns the in-force merge bar + required evidence; the pinned
     /// `policy_version` is carried **only when** the bar/evidence is non-empty, so an
     /// org that declares no bar leaves the receipt byte-identical to pre-L3
-    /// (additive-invariance). This is the host-boundary resolution the determinism-pure
-    /// `build_statement_with_bar` consumes — never a gate-side policy re-read.
+    /// (additive-invariance). The merge bar carries the org's optional
+    /// `expected_checkspec_hash` verbatim (cloned from the sealed [`PolicyDoc`]), so a
+    /// checkspec-pinning bar set in `policy-plane.json` is co-sealed into — and signed as
+    /// part of — the receipt statement. This is the host-boundary resolution the
+    /// determinism-pure `build_statement_with_bar` consumes — never a gate-side re-read.
     pub(crate) fn sealed_bar(&self) -> crate::receipt_store::SealedBar {
         let bar = crate::receipt_store::SealedBar {
             merge_bar: self.doc.merge_bar.clone(),
@@ -349,6 +352,7 @@ mod tests {
             }],
             merge_bar: MergeBar {
                 required_checks: vec!["test".into(), "build".into()],
+                expected_checkspec_hash: None,
             },
             required_evidence: Vec::new(),
         }
@@ -421,6 +425,27 @@ mod tests {
         assert_ne!(
             plane.policy_version(),
             seal_policy(PolicyDoc::default()).policy_version
+        );
+    }
+
+    #[test]
+    fn sealed_bar_carries_the_expected_checkspec_pin_from_policy() {
+        // The org pins the bar's checkspec identity in policy-plane.json; sealed_bar()
+        // co-seals it into the receipt's bar verbatim and pins the policy version (L3 fix).
+        let dir = tempdir().unwrap();
+        let mut doc = sample_doc();
+        doc.merge_bar.expected_checkspec_hash = Some("spec-abc".into());
+        write_policy_doc(dir.path(), &doc).unwrap();
+        let plane = PolicyPlane::resolve(Some(dir.path()));
+        let bar = plane.sealed_bar();
+        assert_eq!(
+            bar.merge_bar.expected_checkspec_hash.as_deref(),
+            Some("spec-abc"),
+            "the checkspec pin is co-sealed into the bar"
+        );
+        assert!(
+            bar.policy_version.is_some(),
+            "a checkspec-pinning bar is non-empty, so the policy version is pinned"
         );
     }
 

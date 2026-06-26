@@ -251,6 +251,12 @@ pub(crate) fn seal_and_attest(
     }
     let toolchain_digest =
         (!run.inputs.toolchain_digest.is_empty()).then(|| run.inputs.toolchain_digest.clone());
+    // Pin the receipt to the content-addressed checkspec its checks were produced against
+    // (the sealed `Verdict.checkspec_hash`), so a checkspec-pinning merge bar can refuse a
+    // renamed/stubbed check impersonating a required one (frontier §1). An empty/absent
+    // checkspec stays None — byte-identical to a pre-binding receipt (additive-invariance).
+    let checkspec_hash =
+        (!verdict.checkspec_hash.is_empty()).then(|| verdict.checkspec_hash.clone());
     let Some(issued) = issue_receipt_for_run(
         run,
         receipt_checks_for(verdict),
@@ -259,6 +265,7 @@ pub(crate) fn seal_and_attest(
         bar.policy_version.clone(),
         None,
         issued_at_ms,
+        checkspec_hash,
         bar.clone(),
         signer,
         stores.receipt,

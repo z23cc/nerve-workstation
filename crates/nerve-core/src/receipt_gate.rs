@@ -146,12 +146,31 @@ impl BarReport {
 ///   / of an unknown kind** → exit 2 (neutral: the bar was not exercised / incomplete —
 ///   never a fabricated pass).
 ///
+/// **🔒 Checkspec-identity binding (INV-R1 — `frontier-l3-l6-sigstore.md` §1 fix #2).**
+/// Before any name-matching, if the bar pins an `expected_checkspec_hash` the receipt's
+/// own `statement.checkspec_hash` MUST equal it — otherwise a renamed or stubbed
+/// (`command:'true'`) check could impersonate the org's real check by reusing its display
+/// name. A mismatch (or an absent receipt checkspec) means the required-check names cannot
+/// be trusted, so the bar is treated as NOT exercised and the gate downgrades to neutral
+/// (a non-success base is kept, never upgraded). A bar that pins no expected hash keeps the
+/// pre-binding by-name behavior unchanged (backward compatible with v14).
+///
 /// Pure: no `Path`, no `fs`, no clock — a function of the receipt alone (INV-R2).
 #[must_use]
 pub fn enforce_merge_bar(receipt: &Receipt) -> GateOutcome {
     let base = gate_outcome(receipt);
     let bar = &receipt.statement.merge_bar;
     let evidence = &receipt.statement.required_evidence;
+
+    // 🔒 Checkspec-identity gate (downgrade-only, INV-R1). The required-check NAMES are
+    // only trustworthy if the receipt was verified against the exact checkspec the bar was
+    // authored against; a mismatch (or no pinned receipt checkspec) downgrades to neutral.
+    if let Some(expected) = &bar.expected_checkspec_hash {
+        let actual = receipt.statement.checkspec_hash.as_deref();
+        if actual != Some(expected.as_str()) {
+            return checkspec_mismatch_outcome(base, expected, actual);
+        }
+    }
 
     // Empty bar => pure pass-through (today's behavior, no regression).
     if bar.required_checks.is_empty() && evidence.is_empty() {
@@ -189,6 +208,42 @@ pub fn enforce_merge_bar(receipt: &Receipt) -> GateOutcome {
         conclusion: conclusion.to_string(),
         summary: report.summary(),
     }
+}
+
+/// Downgrade-only outcome for a checkspec-identity MISMATCH (INV-R1). The bar pinned a
+/// checkspec the receipt was **not** verified against, so the required-check names cannot
+/// be trusted. A success base is downgraded to neutral (exit 2); a non-success base is
+/// kept verbatim with the mismatch surfaced in its summary — never an upgrade, never a
+/// fabricated pass.
+fn checkspec_mismatch_outcome(
+    base: GateOutcome,
+    expected: &str,
+    actual: Option<&str>,
+) -> GateOutcome {
+    let note = format!(
+        "merge bar authored against checkspec {} but receipt was verified against {} — \
+         required checks cannot be trusted",
+        short_hash(expected),
+        actual.map_or_else(|| "none".to_string(), short_hash),
+    );
+    if base.exit_code != 0 {
+        // Never upgrade a non-success base: keep it, append the mismatch (downgrade-only).
+        return GateOutcome {
+            summary: format!("{} [{}]", base.summary, note),
+            ..base
+        };
+    }
+    GateOutcome {
+        exit_code: 2,
+        conclusion: "neutral".to_string(),
+        summary: note,
+    }
+}
+
+/// First 8 chars of a content address (or the whole string if shorter) for a compact,
+/// human-readable mismatch summary. Char-boundary-safe (hex digests are ASCII).
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(8).collect()
 }
 
 /// Fold the co-sealed bar over the receipt's resident checks + provenance into a
@@ -290,6 +345,7 @@ mod tests {
                     command: None,
                 },
                 issued_at_ms: 1000,
+                checkspec_hash: None,
                 merge_bar: MergeBar::default(),
                 required_evidence: Vec::new(),
             },
@@ -384,6 +440,7 @@ mod tests {
             .collect();
         receipt.statement.merge_bar = MergeBar {
             required_checks: required_checks.into_iter().map(str::to_owned).collect(),
+            expected_checkspec_hash: None,
         };
         receipt.statement.required_evidence = required_evidence
             .into_iter()
@@ -570,6 +627,144 @@ mod tests {
         let out = enforce_merge_bar(&receipt);
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.conclusion, "success");
+    }
+
+    // --- L3 checkspec-identity binding (frontier §1 fix #2) ---
+
+    /// Pin the two sides of the checkspec-identity binding: the bar's
+    /// `expected_checkspec_hash` (what the org authored the bar against) and the receipt's
+    /// own `checkspec_hash` (what its checks were produced against).
+    fn with_checkspec_binding(
+        mut receipt: Receipt,
+        expected: Option<&str>,
+        actual: Option<&str>,
+    ) -> Receipt {
+        receipt.statement.merge_bar.expected_checkspec_hash = expected.map(str::to_owned);
+        receipt.statement.checkspec_hash = actual.map(str::to_owned);
+        receipt
+    }
+
+    #[test]
+    fn checkspec_match_behaves_as_v14_name_matching() {
+        // Bar pins checkspec X; the receipt was verified against X => name-matching
+        // proceeds and a met bar still gates 0 (identical to pre-binding v14 behavior).
+        let receipt = with_checkspec_binding(
+            receipt_with_bar(
+                VerdictStatus::Passed,
+                vec![("unit", VerdictStatus::Passed)],
+                vec!["unit"],
+                vec!["receipt"],
+            ),
+            Some("spec-X"),
+            Some("spec-X"),
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.conclusion, "success");
+        assert!(out.summary.contains("merge bar cleared"), "{}", out.summary);
+    }
+
+    #[test]
+    fn checkspec_mismatch_downgrades_a_pass_to_neutral() {
+        // The receipt's checks were produced against a DIFFERENT checkspec than the bar was
+        // authored against => the required-check names cannot be trusted => neutral (exit
+        // 2), even though the named check "passes" (a stubbed `true` could impersonate it).
+        let receipt = with_checkspec_binding(
+            receipt_with_bar(
+                VerdictStatus::Passed,
+                vec![("unit", VerdictStatus::Passed)],
+                vec!["unit"],
+                vec![],
+            ),
+            Some("spec-real"),
+            Some("spec-stub"),
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(out.conclusion, "neutral");
+        assert!(
+            out.summary.contains("required checks cannot be trusted"),
+            "{}",
+            out.summary
+        );
+        // The short content addresses of both sides are surfaced for the human.
+        assert!(out.summary.contains("spec-rea"), "{}", out.summary);
+        assert!(out.summary.contains("spec-stu"), "{}", out.summary);
+    }
+
+    #[test]
+    fn receipt_without_checkspec_under_a_pinning_bar_is_neutral() {
+        // The bar pins a checkspec but the receipt pinned NONE => cannot prove the checks
+        // ran against the authored checkspec => neutral (never a fabricated pass).
+        let receipt = with_checkspec_binding(
+            receipt_with_bar(
+                VerdictStatus::Passed,
+                vec![("unit", VerdictStatus::Passed)],
+                vec!["unit"],
+                vec![],
+            ),
+            Some("spec-real"),
+            None,
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(out.conclusion, "neutral");
+        assert!(
+            out.summary.contains("verified against none"),
+            "{}",
+            out.summary
+        );
+    }
+
+    #[test]
+    fn bar_without_expected_checkspec_is_unchanged_name_matching() {
+        // No `expected_checkspec_hash` => the checkspec gate is inert and v14 name-matching
+        // governs, regardless of the receipt's own checkspec_hash (backward compatible).
+        let receipt = with_checkspec_binding(
+            receipt_with_bar(
+                VerdictStatus::Passed,
+                vec![("unit", VerdictStatus::Passed)],
+                vec!["unit"],
+                vec!["receipt"],
+            ),
+            None,
+            Some("spec-anything"),
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 0, "no pinned checkspec => by-name only");
+        assert_eq!(out.conclusion, "success");
+    }
+
+    #[test]
+    fn checkspec_mismatch_never_upgrades_a_failed_base() {
+        // NEVER-UPGRADE: a Failed base verdict whose checkspec ALSO mismatches stays exit 1
+        // — the checkspec gate is downgrade-only and can never promote a non-success base.
+        let receipt = with_checkspec_binding(
+            receipt_with_bar(
+                VerdictStatus::Failed,
+                vec![("unit", VerdictStatus::Passed)],
+                vec!["unit"],
+                vec![],
+            ),
+            Some("spec-real"),
+            Some("spec-stub"),
+        );
+        let out = enforce_merge_bar(&receipt);
+        let base = gate_outcome(&receipt);
+        assert_eq!(out.exit_code, base.exit_code, "Failed base exit preserved");
+        assert_ne!(
+            out.exit_code, 0,
+            "a mismatch never fabricates a pass on a Failed base"
+        );
+        assert!(
+            out.summary.starts_with(&base.summary),
+            "base rationale preserved, mismatch appended"
+        );
+        assert!(
+            out.summary.contains("required checks cannot be trusted"),
+            "{}",
+            out.summary
+        );
     }
 
     #[test]
