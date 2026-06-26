@@ -17,10 +17,12 @@
 #     variables:
 #       NERVE_RUN_ID: "$NERVE_RUN_ID"   # the captured Run id from a delegated nerve run
 #
-# NOTE: this gates on the EXIT CODE today, which is a complete merge gate on its
-# own. Posting a GitLab *commit status* / MR badge via the Commit Status API is a
-# follow-up (the equivalent of the GitHub `--emit gh` check-run); until then run
-# this as a `pipeline` job whose success/failure IS the gate.
+# NOTE: this gates on the EXIT CODE, which is a complete merge gate on its own. It
+# ALSO posts a GitLab *commit status* (the `nerve-gate` context, the equivalent of
+# the GitHub `--emit gh` check-run) via the Commit Status API: GitLab injects
+# CI_API_V4_URL + CI_JOB_TOKEN + CI_PROJECT_ID + CI_COMMIT_SHA automatically. The
+# posted status only MIRRORS the exit code — an un-cleared verdict posts `failed`,
+# never `success` (INV-R1) — and the exit code remains authoritative.
 
 .nerve-gate:
   stage: test
@@ -53,8 +55,10 @@
       if [ -n "$NERVE_RERUNS" ]; then VERIFY_ARGS="$VERIFY_ARGS --reruns $NERVE_RERUNS"; fi
       echo "+ nerve $VERIFY_ARGS"
       nerve $VERIFY_ARGS || echo "nerve verify exited non-zero (gate step decides)."
-    # (c) Gate on the sealed Receipt. `--emit none` because the GitLab commit-status
-    #     emitter is a follow-up; the exit code is authoritative and gates the job.
+    # (c) Gate on the sealed Receipt. `--emit gitlab` posts a `nerve-gate` commit
+    #     status (auth: CI_JOB_TOKEN, or set GITLAB_TOKEN as a masked CI variable for a
+    #     PRIVATE-TOKEN) that mirrors the exit code; the exit code remains authoritative
+    #     and gates the job.
     - |
-      echo "+ nerve gate --run $NERVE_RUN_ID --root $NERVE_ROOT --emit none"
-      nerve gate --run "$NERVE_RUN_ID" --root "$NERVE_ROOT" --emit none
+      echo "+ nerve gate --run $NERVE_RUN_ID --root $NERVE_ROOT --emit gitlab --repo $CI_PROJECT_ID --sha $CI_COMMIT_SHA"
+      nerve gate --run "$NERVE_RUN_ID" --root "$NERVE_ROOT" --emit gitlab --repo "$CI_PROJECT_ID" --sha "$CI_COMMIT_SHA"
