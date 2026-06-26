@@ -77,6 +77,18 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // RunInputs + Attestation on Run (RUN_SCHEMA_VERSION 1→2); and the verdict / ledger /
 // policy / receipt / outcome schema roots. Additive serde-tagged variants and new
 // schema-roots only — a v6 client keeps working.
+// v15 (trust-substrate L3 checkspec-identity binding): two additive optional fields
+// closing the v14 "by-name" trust gap (`docs/designs/frontier-l3-l6-sigstore.md` §1).
+// (1) `ReceiptStatement.checkspec_hash` — the content address of the checkspec the
+// receipt's checks were produced against (the receipt's copy of the sealed
+// `Verdict.checkspec_hash`). (2) `MergeBar.expected_checkspec_hash` — the checkspec the
+// org's bar was AUTHORED against. The gate now binds `required_checks` to that identity:
+// a renamed/stubbed (`command:'true'`) check can no longer impersonate the org's real
+// check by reusing its display name — a mismatch DOWNGRADES to neutral (INV-R1, never an
+// upgrade). Both fields are `#[serde(default, skip_serializing_if = "Option::is_none")]`,
+// so a receipt/bar without them serializes byte-identically to a v14 record
+// (additive-invariance) — no receipt-id churn for existing receipts. A v14 client keeps
+// working.
 // v14 (trust-substrate L3 merge-bar enforcement): additive `merge_bar` +
 // `required_evidence` fields on `ReceiptStatement` — the org's sealed bar is now
 // CO-SEALED INTO (and signed as part of) the receipt statement so the merge gate
@@ -84,7 +96,7 @@ pub const RUNTIME_PROTOCOL_NAME: &str = "nerve-runtime";
 // Both fields are `skip_serializing_if`-empty, so a receipt sealed without an org
 // bar serializes byte-identically to a v13 receipt (additive-invariance) — no
 // receipt-id churn for existing receipts. A v13 client keeps working.
-pub const RUNTIME_PROTOCOL_VERSION: &str = "14";
+pub const RUNTIME_PROTOCOL_VERSION: &str = "15";
 pub const RUNTIME_DAEMON_NAME: &str = "nerve";
 pub const RUNTIME_EVENT_METHOD: &str = "runtime/event";
 pub const RUNTIME_INFO_METHOD: &str = "runtime/info";

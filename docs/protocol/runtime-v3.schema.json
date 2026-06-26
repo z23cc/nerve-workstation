@@ -1656,8 +1656,15 @@
       "type": "object"
     },
     "MergeBar": {
-      "description": "The bar a change must clear to merge: the names of the required checks (matched\nagainst the L2 verdict's [`crate::verdict::CheckResult::name`]s). An empty list\nmeans no required checks are declared — the gate exercises no bar.",
+      "description": "The bar a change must clear to merge: the names of the required checks (matched\nagainst the L2 verdict's [`crate::verdict::CheckResult::name`]s). An empty list\nmeans no required checks are declared — the gate exercises no bar.\n\n**Checkspec-identity binding (INV-R1).** Matching `required_checks` purely by\n*display name* lets a renamed or stubbed (`command:'true'`) check impersonate the\norg's real check by reusing its name. To close that hole the org may pin\n`expected_checkspec_hash` to the content address of the checkspec the bar was\nAUTHORED against; the gate then refuses to trust the check NAMES unless the\nreceipt's [`crate::verdict::Verdict::checkspec_hash`] (carried in\n[`crate::receipt::ReceiptStatement::checkspec_hash`]) equals it — a mismatch\n**downgrades** to neutral, never a fabricated pass. Absent (`None`) keeps the\npre-binding by-name behavior (backward compatible).",
       "properties": {
+        "expected_checkspec_hash": {
+          "description": "Content address of the checkspec this bar was authored against (INV-R1). When\n`Some`, the gate binds [`Self::required_checks`] to this identity: the receipt's\npinned `checkspec_hash` MUST equal it, else the required checks cannot be trusted\nand the gate downgrades to neutral. `None` = no binding (by-name only) — and the\nfield is omitted on the wire (`skip_serializing_if`), so a bar without it\nserializes byte-identically to a pre-binding bar (additive-invariance).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "required_checks": {
           "default": [],
           "description": "Names of the checks that must pass for a change to clear the bar.",
@@ -2165,6 +2172,13 @@
             "$ref": "#/$defs/ReceiptCheck"
           },
           "type": "array"
+        },
+        "checkspec_hash": {
+          "description": "Content address of the checkspec the [`Self::checks`] were produced against —\nthe receipt's copy of the sealed [`crate::verdict::Verdict::checkspec_hash`]\n(INV-R1). It binds the borrowed check *names* to a content-addressed checkspec\nidentity so a [`crate::policy::MergeBar::expected_checkspec_hash`]-pinning bar can\nrefuse a renamed/stubbed check impersonating a required one. Additive + omitted\nwhen absent (`None`), so a receipt sealed without a checkspec is byte-identical to\na pre-binding receipt (additive-invariance).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "issued_at_ms": {
           "description": "Host wall-clock issuance time in ms (display metadata; not part of the id).",

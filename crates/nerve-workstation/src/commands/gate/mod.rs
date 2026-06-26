@@ -489,6 +489,7 @@ mod tests {
                 command: None,
             },
             issued_at_ms: 1,
+            checkspec_hash: None,
             merge_bar: nerve_core::policy::MergeBar::default(),
             required_evidence: Vec::new(),
         }
@@ -558,6 +559,7 @@ mod tests {
             .collect();
         statement.merge_bar = MergeBar {
             required_checks: required_checks.iter().map(|s| (*s).to_string()).collect(),
+            expected_checkspec_hash: None,
         };
         let signer = LocalEd25519Signer::deterministic_test_key();
         let pae = nerve_core::receipt::dsse_pae(
@@ -672,6 +674,63 @@ mod tests {
         let path = write_to_temp(dir.path(), &receipt);
         let code = gate(args_for_path(path, None)).unwrap();
         assert_eq!(code, 2, "a missing required check is neutral (exit 2)");
+    }
+
+    /// L3 end-to-end (v15 checkspec-identity binding): a receipt whose bar pins an
+    /// `expected_checkspec_hash` the receipt's own `checkspec_hash` does NOT match gates
+    /// NEUTRAL — the required-check names cannot be trusted, so a renamed/stubbed check
+    /// cannot impersonate the org's real one. The bar + checkspec are co-sealed (signed),
+    /// so the receipt still verifies (NOT a refusal) — the downgrade is the bar overlay.
+    #[test]
+    fn gate_with_checkspec_mismatch_gates_neutral_not_refused() {
+        use nerve_core::policy::MergeBar;
+        use nerve_core::receipt::ReceiptCheck;
+        use nerve_core::verdict::CheckKind;
+        let dir = tempdir().unwrap();
+        // A receipt whose named "unit" check passes, but whose checkspec identity differs
+        // from the one the bar was authored against.
+        let mut statement = statement_for("checkspec-mismatch", VerdictStatus::Passed);
+        statement.checks = vec![ReceiptCheck {
+            name: "unit".to_string(),
+            kind: CheckKind::Test,
+            verdict: VerdictStatus::Passed,
+            reproducible: true,
+            evidence_hash: None,
+        }];
+        statement.checkspec_hash = Some("spec-stub".to_string());
+        statement.merge_bar = MergeBar {
+            required_checks: vec!["unit".to_string()],
+            expected_checkspec_hash: Some("spec-real".to_string()),
+        };
+        let signer = LocalEd25519Signer::deterministic_test_key();
+        let pae = nerve_core::receipt::dsse_pae(
+            RECEIPT_PREDICATE_TYPE,
+            &nerve_core::receipt::canonical_statement_bytes(&statement),
+        );
+        let (sig, public_key) = signer.sign(&pae);
+        let receipt = nerve_core::receipt::seal_receipt(
+            statement,
+            ReceiptSignature {
+                payload_type: RECEIPT_PREDICATE_TYPE.to_string(),
+                backend: signer.backend().to_string(),
+                keyid: signer.keyid(),
+                sig,
+                public_key: Some(public_key),
+                bundle: None,
+            },
+        );
+
+        // The receipt verifies (the bar + checkspec are part of the signed bytes) — so this
+        // is the bar overlay downgrading, NOT a tamper refusal.
+        let v = verify_gate_receipt(&receipt, None);
+        assert!(v.statement_intact && v.signature_valid, "co-sealed + valid");
+
+        let path = write_to_temp(dir.path(), &receipt);
+        let code = gate(args_for_path(path, None)).unwrap();
+        assert_eq!(
+            code, 2,
+            "a checkspec-identity mismatch gates neutral (names untrusted), never a pass"
+        );
     }
 
     /// INV-R5 ORDERING: the wave-7 tamper refusal fires BEFORE bar enforcement — a

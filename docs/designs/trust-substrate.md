@@ -110,7 +110,7 @@ FLOOR
   policy (north-star §3.9) to declarative policy-as-code: what each external agent may read / write /
   egress, what bar a diff must clear to merge, what evidence must exist. Every grant/denial is itself
   an evidenced event in L1 — "allowed" and "passed" both become auditable and replayable.
-  **Merge-bar enforcement (SHIPPED, protocol v14).** `PolicyDoc.merge_bar.required_checks` +
+  **Merge-bar enforcement (SHIPPED, protocol v15).** `PolicyDoc.merge_bar.required_checks` +
   `required_evidence` are no longer inert: the in-force bar is **co-sealed into (and signed as part of)
   the receipt statement** at issue time (`ReceiptStatement.merge_bar` / `.required_evidence`, plus a
   pinned `provenance.policy_version`), and the merge gate enforces *the bar the receipt SIGNED* via the
@@ -123,10 +123,16 @@ FLOOR
   to its summary). Evidence kinds are a CLOSED, fail-closed set `{receipt, replay, ledger, policy}`
   (unknown = unsatisfied — no threshold/coverage predicates that would drift into a judge). An empty
   bar is pure pass-through and serializes away, so a receipt sealed without an org bar is byte-identical
-  to a pre-L3 receipt (additive-invariance). **v1 trust assumption (documented follow-up):**
-  `required_checks` are matched **by name** within the co-sealed `checks` of the same signed statement;
-  binding to a content-addressed checkspec-id (so a renamed/stubbed check cannot impersonate the org's
-  real one) is a tracked follow-up.
+  to a pre-L3 receipt (additive-invariance). **Checkspec-identity binding (SHIPPED, protocol v15).** The
+  v14 "matched **by name**" trust gap is closed: the bar may pin `MergeBar.expected_checkspec_hash` (the
+  content address of the checkspec it was authored against, co-sealed + signed), and the receipt carries
+  `ReceiptStatement.checkspec_hash` (its copy of the sealed `Verdict.checkspec_hash`). `enforce_merge_bar`
+  gates on identity **before** name-matching — when the bar pins an expected checkspec, the receipt's
+  checkspec MUST equal it, else the required-check *names* cannot be trusted and the gate **downgrades** to
+  neutral (a renamed/stubbed `command:'true'` check can no longer impersonate the org's real one). It stays
+  downgrade-only (a non-success base is never upgraded); a bar that pins no expected hash keeps the v14
+  by-name behavior. Both fields are additive `Option`/`skip_serializing_if`, so a receipt/bar without them
+  is byte-identical to a v14 record (no receipt-id churn).
 - **L4 — Portable Verification Receipt.** A signed, portable manifest (in-toto / DSSE / SLSA / OTel-
   GenAI-embedded): these inputs, this run hash, these reproducible checks + verdicts, this policy
   version, this provenance — **re-verifiable by a third party who trusts none of the participants.**

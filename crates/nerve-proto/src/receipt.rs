@@ -165,6 +165,15 @@ pub struct ReceiptStatement {
     pub replay_manifest: ReplayManifest,
     /// Host wall-clock issuance time in ms (display metadata; not part of the id).
     pub issued_at_ms: u64,
+    /// Content address of the checkspec the [`Self::checks`] were produced against —
+    /// the receipt's copy of the sealed [`crate::verdict::Verdict::checkspec_hash`]
+    /// (INV-R1). It binds the borrowed check *names* to a content-addressed checkspec
+    /// identity so a [`crate::policy::MergeBar::expected_checkspec_hash`]-pinning bar can
+    /// refuse a renamed/stubbed check impersonating a required one. Additive + omitted
+    /// when absent (`None`), so a receipt sealed without a checkspec is byte-identical to
+    /// a pre-binding receipt (additive-invariance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkspec_hash: Option<String>,
     /// The org's sealed merge bar, **co-sealed into (and signed as part of) this
     /// statement** at issue time so the gate enforces the bar the receipt SIGNED —
     /// never a policy re-read from the gate host's disk (INV-R5: pin what is signed).
@@ -230,6 +239,7 @@ mod tests {
                 command: Some("nerve replay".into()),
             },
             issued_at_ms: 1234,
+            checkspec_hash: None,
             merge_bar: MergeBar::default(),
             required_evidence: Vec::new(),
         }
@@ -340,6 +350,7 @@ mod tests {
         // pre-L3 receipt's canonical bytes / content-id are byte-identical (v13→v14
         // additive-invariance — like every prior wave).
         let mut statement = sample_statement();
+        statement.checkspec_hash = None;
         statement.merge_bar = MergeBar::default();
         statement.required_evidence = Vec::new();
         let value = serde_json::to_value(&statement).expect("statement json");
@@ -348,23 +359,32 @@ mod tests {
             value.get("required_evidence").is_none(),
             "empty evidence key omitted"
         );
+        assert!(
+            value.get("checkspec_hash").is_none(),
+            "absent checkspec key omitted (v14→v15 additive-invariance)"
+        );
         // It still round-trips, with the additive fields falling back to their defaults.
         let back: ReceiptStatement = serde_json::from_value(value).expect("round-trip");
         assert!(back.merge_bar.is_empty());
         assert!(back.required_evidence.is_empty());
+        assert!(back.checkspec_hash.is_none());
     }
 
     #[test]
     fn non_empty_merge_bar_and_evidence_serialize_and_round_trip() {
         let mut statement = sample_statement();
+        statement.checkspec_hash = Some("spec-abc".into());
         statement.merge_bar = MergeBar {
             required_checks: vec!["unit".into(), "build".into()],
+            expected_checkspec_hash: Some("spec-abc".into()),
         };
         statement.required_evidence = vec![EvidenceRequirement {
             kind: "receipt".into(),
         }];
         let value = serde_json::to_value(&statement).expect("statement json");
         assert_eq!(value["merge_bar"]["required_checks"][0], "unit");
+        assert_eq!(value["merge_bar"]["expected_checkspec_hash"], "spec-abc");
+        assert_eq!(value["checkspec_hash"], "spec-abc");
         assert_eq!(value["required_evidence"][0]["kind"], "receipt");
         let back: ReceiptStatement = serde_json::from_value(value).expect("round-trip");
         assert_eq!(back, statement);

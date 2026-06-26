@@ -121,19 +121,22 @@ pub fn build_statement(
         policy_version,
         ledger_ref,
         issued_at_ms,
+        None,
         MergeBar::default(),
         Vec::new(),
     )
 }
 
 /// As [`build_statement`], but additionally **co-seals the org's merge bar +
-/// required-evidence into the statement** (L3, INV-R5: pin what is signed). The bar
-/// becomes part of the canonical, signed bytes so the merge gate enforces the bar the
-/// receipt SIGNED — never a policy re-read from the gate host's disk. An **empty** bar
-/// (no `required_checks`) + empty evidence serialize away (`skip_serializing_if`), so a
-/// receipt issued without an org bar is byte-identical to a pre-L3 receipt
-/// (additive-invariance). Pure — the host resolves the bar above the boundary and
-/// passes it in.
+/// required-evidence into the statement** (L3, INV-R5: pin what is signed) and pins the
+/// `checkspec_hash` the checks were produced against (INV-R1: bind check names to a
+/// content-addressed checkspec identity). The bar + checkspec become part of the
+/// canonical, signed bytes so the merge gate enforces the bar the receipt SIGNED — never
+/// a policy re-read from the gate host's disk. An **empty** bar (no `required_checks`,
+/// no pinned checkspec) + empty evidence + an absent `checkspec_hash` serialize away
+/// (`skip_serializing_if`), so a receipt issued without an org bar is byte-identical to a
+/// pre-L3 receipt (additive-invariance). Pure — the host resolves the bar + checkspec
+/// above the boundary and passes them in.
 #[allow(clippy::too_many_arguments)] // reason: faithful 1:1 binding of the statement's fields
 #[must_use]
 pub fn build_statement_with_bar(
@@ -144,6 +147,7 @@ pub fn build_statement_with_bar(
     policy_version: Option<String>,
     ledger_ref: Option<LedgerRef>,
     issued_at_ms: u64,
+    checkspec_hash: Option<String>,
     merge_bar: MergeBar,
     required_evidence: Vec<EvidenceRequirement>,
 ) -> ReceiptStatement {
@@ -160,6 +164,7 @@ pub fn build_statement_with_bar(
         verdict,
         replay_manifest: replay_manifest_for(run),
         issued_at_ms,
+        checkspec_hash,
         merge_bar,
         required_evidence,
     }

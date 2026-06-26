@@ -183,6 +183,7 @@ pub(crate) fn issue_receipt_for_run(
     policy_version: Option<String>,
     ledger_ref: Option<LedgerRef>,
     issued_at_ms: u64,
+    checkspec_hash: Option<String>,
     bar: SealedBar,
     signer: &dyn Signer,
     store: Option<&ReceiptStore>,
@@ -195,6 +196,7 @@ pub(crate) fn issue_receipt_for_run(
         policy_version,
         ledger_ref,
         issued_at_ms,
+        checkspec_hash,
         bar.merge_bar,
         bar.required_evidence,
     );
@@ -388,6 +390,7 @@ mod tests {
             Some("policy-1".into()),
             None,
             5000,
+            None,
             SealedBar::empty(),
             &signer,
             Some(&store),
@@ -429,6 +432,7 @@ mod tests {
             None, // no policy_version pinned (no policy in force)
             None,
             5000,
+            None,
             SealedBar::empty(),
             &signer,
             Some(&store),
@@ -460,6 +464,10 @@ mod tests {
             "empty evidence key omitted"
         );
         assert!(
+            value.get("checkspec_hash").is_none(),
+            "absent checkspec key omitted (v14→v15 additive-invariance)"
+        );
+        assert!(
             value["provenance"].get("policy_version").is_none(),
             "no policy_version pinned for the no-policy case"
         );
@@ -477,6 +485,7 @@ mod tests {
         let bar = SealedBar {
             merge_bar: MergeBar {
                 required_checks: vec!["unit".into()],
+                expected_checkspec_hash: None,
             },
             required_evidence: vec![EvidenceRequirement {
                 kind: "receipt".into(),
@@ -491,6 +500,7 @@ mod tests {
             bar.policy_version.clone(),
             None,
             1,
+            None,
             bar,
             &signer,
             Some(&store),
@@ -524,6 +534,7 @@ mod tests {
             None,
             None,
             1,
+            None,
             SealedBar::empty(),
             &signer,
             Some(&store),
@@ -544,6 +555,7 @@ mod tests {
             None,
             None,
             7,
+            None,
             SealedBar::empty(),
             &signer,
             None,
@@ -565,6 +577,7 @@ mod tests {
             None,
             None,
             9,
+            None,
             SealedBar::empty(),
             &signer,
             Some(&store),
@@ -597,6 +610,7 @@ mod tests {
                 None,
                 None,
                 ts,
+                None,
                 SealedBar::empty(),
                 &signer,
                 Some(&store),

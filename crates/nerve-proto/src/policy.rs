@@ -74,22 +74,41 @@ pub struct CapabilityRule {
 /// The bar a change must clear to merge: the names of the required checks (matched
 /// against the L2 verdict's [`crate::verdict::CheckResult::name`]s). An empty list
 /// means no required checks are declared — the gate exercises no bar.
+///
+/// **Checkspec-identity binding (INV-R1).** Matching `required_checks` purely by
+/// *display name* lets a renamed or stubbed (`command:'true'`) check impersonate the
+/// org's real check by reusing its name. To close that hole the org may pin
+/// `expected_checkspec_hash` to the content address of the checkspec the bar was
+/// AUTHORED against; the gate then refuses to trust the check NAMES unless the
+/// receipt's [`crate::verdict::Verdict::checkspec_hash`] (carried in
+/// [`crate::receipt::ReceiptStatement::checkspec_hash`]) equals it — a mismatch
+/// **downgrades** to neutral, never a fabricated pass. Absent (`None`) keeps the
+/// pre-binding by-name behavior (backward compatible).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct MergeBar {
     /// Names of the checks that must pass for a change to clear the bar.
     #[serde(default)]
     pub required_checks: Vec<String>,
+    /// Content address of the checkspec this bar was authored against (INV-R1). When
+    /// `Some`, the gate binds [`Self::required_checks`] to this identity: the receipt's
+    /// pinned `checkspec_hash` MUST equal it, else the required checks cannot be trusted
+    /// and the gate downgrades to neutral. `None` = no binding (by-name only) — and the
+    /// field is omitted on the wire (`skip_serializing_if`), so a bar without it
+    /// serializes byte-identically to a pre-binding bar (additive-invariance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_checkspec_hash: Option<String>,
 }
 
 impl MergeBar {
-    /// Whether the bar declares no required checks (the empty bar exercises nothing).
-    /// Used by [`crate::receipt::ReceiptStatement`]'s additive `skip_serializing_if`
-    /// so a receipt sealed without an org bar serializes byte-identically to a
-    /// pre-L3 receipt (additive-invariance) — the empty `merge_bar` key is omitted.
+    /// Whether the bar declares nothing load-bearing — no required checks AND no pinned
+    /// checkspec identity. Used by [`crate::receipt::ReceiptStatement`]'s additive
+    /// `skip_serializing_if` so a receipt sealed without an org bar serializes
+    /// byte-identically to a pre-L3 receipt (additive-invariance): the all-`None`/empty
+    /// bar omits the `merge_bar` key entirely.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.required_checks.is_empty()
+        self.required_checks.is_empty() && self.expected_checkspec_hash.is_none()
     }
 }
 
@@ -226,6 +245,7 @@ mod tests {
             }],
             merge_bar: MergeBar {
                 required_checks: vec!["unit".into(), "build".into()],
+                expected_checkspec_hash: None,
             },
             required_evidence: vec![EvidenceRequirement {
                 kind: "receipt".into(),
@@ -250,6 +270,39 @@ mod tests {
         let empty = PolicyDoc::default();
         assert_eq!(empty.policy_version, "");
         assert!(empty.capabilities.is_empty());
+    }
+
+    #[test]
+    fn merge_bar_expected_checkspec_is_additive_and_governs_is_empty() {
+        // A bar with no required checks AND no pinned checkspec is empty (its key is
+        // omitted from a receipt statement for additive-invariance) and serializes
+        // byte-identically to a pre-binding bar.
+        let plain = MergeBar {
+            required_checks: vec!["unit".into()],
+            expected_checkspec_hash: None,
+        };
+        let value = serde_json::to_value(&plain).expect("bar json");
+        assert!(
+            value.get("expected_checkspec_hash").is_none(),
+            "None key omitted"
+        );
+        assert!(!plain.is_empty(), "a required check is non-empty");
+        assert!(MergeBar::default().is_empty(), "all-None bar is empty");
+
+        // Pinning a checkspec serializes the field, makes a bar-with-no-checks non-empty,
+        // and round-trips.
+        let pinned = MergeBar {
+            required_checks: Vec::new(),
+            expected_checkspec_hash: Some("deadbeef".into()),
+        };
+        let value = serde_json::to_value(&pinned).expect("bar json");
+        assert_eq!(value["expected_checkspec_hash"], "deadbeef");
+        assert!(
+            !pinned.is_empty(),
+            "a pinned checkspec alone is load-bearing (non-empty)"
+        );
+        let back: MergeBar = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, pinned);
     }
 
     #[test]
