@@ -63,7 +63,12 @@ pub(crate) fn run_verify_flow(root: &Path, run_id: &str, reruns: Option<u32>) ->
         ledger: Some(&ledger_store),
         receipt: Some(&receipt_store),
     };
-    seal_and_attest(&run, &verdict, &stores, &signer, now_ms())
+    // L3 (INV-R5): co-seal the org's in-force merge bar into the receipt statement so the
+    // gate enforces the bar the receipt SIGNED — never a gate-side policy re-read. An
+    // absent/empty policy-plane.json embeds nothing (policy_version stays None), so the
+    // receipt is byte-identical to pre-L3 (no golden churn).
+    let bar = crate::policy_plane::PolicyPlane::resolve(Some(root)).sealed_bar();
+    seal_and_attest(&run, &verdict, &stores, &bar, &signer, now_ms())
         .receipt
         .ok_or_else(|| anyhow!("failed to seal/persist a Verification Receipt for run `{run_id}`"))
 }
@@ -174,5 +179,42 @@ mod tests {
         write_one_check(dir.path(), "true");
         let err = run_verify_flow(dir.path(), "no-such-run", Some(1)).unwrap_err();
         assert!(err.to_string().contains("no-such-run"), "{err}");
+    }
+
+    /// L3 (INV-R5): a run verified under a real `<root>/.nerve/policy-plane.json` co-seals
+    /// the org's merge bar + the pinned `policy_version` into the receipt statement, and
+    /// the bar named matches the co-sealed check (here `smoke`, which passes) so the gate
+    /// clears it. An empty/absent policy embeds nothing (covered elsewhere).
+    #[test]
+    fn verify_embeds_the_in_force_bar_and_policy_version() {
+        use nerve_core::receipt_gate::enforce_merge_bar;
+        let dir = tempdir().unwrap();
+        let run_id = seed_run(dir.path());
+        write_one_check(dir.path(), "true"); // the check is named "smoke" + passes
+
+        // A real policy plane requiring the "smoke" check + a receipt evidence predicate.
+        let nerve_dir = dir.path().join(".nerve");
+        std::fs::create_dir_all(&nerve_dir).unwrap();
+        std::fs::write(
+            nerve_dir.join("policy-plane.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "merge_bar": { "required_checks": ["smoke"] },
+                "required_evidence": [{ "kind": "receipt" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let receipt = run_verify_flow(dir.path(), &run_id, Some(1)).unwrap();
+        // The bar + a non-empty policy_version were embedded into the SIGNED statement.
+        assert_eq!(receipt.statement.merge_bar.required_checks, vec!["smoke"]);
+        assert_eq!(receipt.statement.required_evidence.len(), 1);
+        assert!(
+            receipt.statement.provenance.policy_version.is_some(),
+            "a non-empty policy pins its version"
+        );
+        // The co-sealed bar is met (smoke passed + receipt evidence present) -> gates 0.
+        assert_eq!(enforce_merge_bar(&receipt).exit_code, 0);
     }
 }

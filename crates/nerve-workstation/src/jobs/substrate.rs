@@ -356,8 +356,21 @@ impl JobManager {
             ledger: ledger.as_ref(),
             receipt: receipt.as_ref(),
         };
-        let outcome =
-            crate::verify_runner::seal_and_attest(&run, verdict, &stores, &self.signer(), now_ms());
+        // L3 (INV-R5): co-seal the org's in-force merge bar into the receipt statement so
+        // the gate enforces the bar the receipt SIGNED. An absent/empty policy leaves the
+        // receipt byte-identical to pre-L3 (no churn).
+        let bar = self
+            .policy_plane()
+            .map(|plane| plane.sealed_bar())
+            .unwrap_or_default();
+        let outcome = crate::verify_runner::seal_and_attest(
+            &run,
+            verdict,
+            &stores,
+            &bar,
+            &self.signer(),
+            now_ms(),
+        );
         for record in &outcome.appended {
             self.emit_ledger_appended(record);
         }

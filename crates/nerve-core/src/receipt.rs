@@ -21,6 +21,7 @@
 // Re-export the receipt shapes this module operates on so a kernel consumer builds
 // and verifies receipts through `nerve_core` alone, without its own `nerve-proto`
 // dependency.
+use nerve_proto::policy::{EvidenceRequirement, MergeBar};
 use nerve_proto::provenance::Run;
 pub use nerve_proto::receipt::{
     LedgerRef, RECEIPT_PREDICATE_TYPE, RECEIPT_SCHEMA_VERSION, Receipt, ReceiptCheck,
@@ -112,6 +113,40 @@ pub fn build_statement(
     ledger_ref: Option<LedgerRef>,
     issued_at_ms: u64,
 ) -> ReceiptStatement {
+    build_statement_with_bar(
+        run,
+        checks,
+        verdict,
+        toolchain_digest,
+        policy_version,
+        ledger_ref,
+        issued_at_ms,
+        MergeBar::default(),
+        Vec::new(),
+    )
+}
+
+/// As [`build_statement`], but additionally **co-seals the org's merge bar +
+/// required-evidence into the statement** (L3, INV-R5: pin what is signed). The bar
+/// becomes part of the canonical, signed bytes so the merge gate enforces the bar the
+/// receipt SIGNED — never a policy re-read from the gate host's disk. An **empty** bar
+/// (no `required_checks`) + empty evidence serialize away (`skip_serializing_if`), so a
+/// receipt issued without an org bar is byte-identical to a pre-L3 receipt
+/// (additive-invariance). Pure — the host resolves the bar above the boundary and
+/// passes it in.
+#[allow(clippy::too_many_arguments)] // reason: faithful 1:1 binding of the statement's fields
+#[must_use]
+pub fn build_statement_with_bar(
+    run: &Run,
+    checks: Vec<ReceiptCheck>,
+    verdict: VerdictStatus,
+    toolchain_digest: Option<String>,
+    policy_version: Option<String>,
+    ledger_ref: Option<LedgerRef>,
+    issued_at_ms: u64,
+    merge_bar: MergeBar,
+    required_evidence: Vec<EvidenceRequirement>,
+) -> ReceiptStatement {
     ReceiptStatement {
         predicate_type: RECEIPT_PREDICATE_TYPE.to_string(),
         provenance: ReceiptProvenance {
@@ -125,6 +160,8 @@ pub fn build_statement(
         verdict,
         replay_manifest: replay_manifest_for(run),
         issued_at_ms,
+        merge_bar,
+        required_evidence,
     }
 }
 

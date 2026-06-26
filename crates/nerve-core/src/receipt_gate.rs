@@ -21,6 +21,7 @@
 pub use nerve_proto::receipt::Receipt;
 pub use nerve_proto::verdict::VerdictStatus;
 
+use nerve_proto::policy::{EvidenceRequirement, MergeBar};
 use serde::{Deserialize, Serialize};
 
 /// The tri-state merge-gate decision derived from a receipt's aggregate verdict.
@@ -72,6 +73,193 @@ pub fn gate_outcome(receipt: &Receipt) -> GateOutcome {
     }
 }
 
+/// The result of folding the org's co-sealed merge bar over a receipt's resident data
+/// (L3, INV-R1). Records exactly which required checks were missing or unmet and which
+/// required evidence was absent, plus whether the bar was actually *exercised* — so the
+/// human summary enumerates the org's bar clearance, never a fabricated rationale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BarReport {
+    /// Required check names that did not appear at all in the receipt's checks.
+    missing_checks: Vec<String>,
+    /// Required check names that appeared but did not pass (with their status).
+    failed_checks: Vec<String>,
+    /// Required evidence kinds that were absent or of an unknown (fail-closed) kind.
+    unmet_evidence: Vec<String>,
+}
+
+impl BarReport {
+    /// The bar is fully cleared iff nothing was missing, failed, or unmet.
+    fn is_clear(&self) -> bool {
+        self.missing_checks.is_empty()
+            && self.failed_checks.is_empty()
+            && self.unmet_evidence.is_empty()
+    }
+
+    /// A required check appeared but did not pass (the bar was *exercised* and not met)
+    /// — distinct from an absent check (the bar was not exercised). Drives the
+    /// downgrade direction: a present-and-failed required check is exit 1 (failure);
+    /// anything merely missing/incomplete is exit 2 (neutral) — never a fabricated pass.
+    fn has_exercised_failure(&self) -> bool {
+        !self.failed_checks.is_empty()
+    }
+
+    /// One-line human enumeration of exactly what the bar found, appended to the gate
+    /// summary so a consumer sees the org's bar clearance (or its gaps).
+    fn summary(&self) -> String {
+        if self.is_clear() {
+            return "merge bar cleared: all required checks passed and required evidence present"
+                .to_string();
+        }
+        let mut parts = Vec::new();
+        for name in &self.missing_checks {
+            parts.push(format!("missing required check '{name}'"));
+        }
+        for entry in &self.failed_checks {
+            parts.push(format!("required check {entry}"));
+        }
+        for kind in &self.unmet_evidence {
+            parts.push(format!("required evidence '{kind}' absent"));
+        }
+        format!("merge bar not cleared: {}", parts.join("; "))
+    }
+}
+
+/// Enforce the org's **co-sealed** merge bar (L3) over a signed receipt, returning the
+/// bar-aware merge-gate decision (`docs/designs/frontier-l3-l6-sigstore.md` §1, INV-R1).
+///
+/// **Pin what is signed (INV-R5).** The bar is read from the receipt's embedded
+/// `statement.merge_bar` and `statement.required_evidence` — co-sealed (and signed as
+/// part of) the statement at seal time — never from the gate host's live policy plane.
+/// Because it is in the signed statement, the wave-7 `verify_receipt` refusal already
+/// protects it from gate-side tampering.
+///
+/// **Downgrade-only, court reporter (INV-R1).**
+///
+/// - If the base [`gate_outcome`] is already non-success (exit != 0), it is returned
+///   **unchanged except** the bar report is APPENDED to its summary — never replaced,
+///   never upgraded.
+/// - An empty bar (no `required_checks`) and no `required_evidence` is a pure
+///   pass-through (today's behavior; no regression).
+/// - A success base with a required check **present-and-failed** → exit 1 (failure: the
+///   bar was exercised and not met).
+/// - A success base with a required check **missing** or any required evidence **absent
+///   / of an unknown kind** → exit 2 (neutral: the bar was not exercised / incomplete —
+///   never a fabricated pass).
+///
+/// Pure: no `Path`, no `fs`, no clock — a function of the receipt alone (INV-R2).
+#[must_use]
+pub fn enforce_merge_bar(receipt: &Receipt) -> GateOutcome {
+    let base = gate_outcome(receipt);
+    let bar = &receipt.statement.merge_bar;
+    let evidence = &receipt.statement.required_evidence;
+
+    // Empty bar => pure pass-through (today's behavior, no regression).
+    if bar.required_checks.is_empty() && evidence.is_empty() {
+        return base;
+    }
+
+    let report = build_bar_report(receipt, bar, evidence);
+
+    // A non-success base verdict is NEVER upgraded: keep it, append the bar report so the
+    // org's bar clearance is still surfaced (INV-R1 — downgrade-only).
+    if base.exit_code != 0 {
+        return GateOutcome {
+            summary: format!("{} [{}]", base.summary, report.summary()),
+            ..base
+        };
+    }
+
+    // Base is success. The bar may only KEEP the pass (cleared) or DOWNGRADE it.
+    if report.is_clear() {
+        return GateOutcome {
+            summary: format!("{} [{}]", base.summary, report.summary()),
+            ..base
+        };
+    }
+    let (exit_code, conclusion) = if report.has_exercised_failure() {
+        // A required check present-and-failed: the bar was exercised and not met.
+        (1, "failure")
+    } else {
+        // A required check missing / evidence absent: the bar was not exercised /
+        // incomplete — neutral, never a fabricated pass.
+        (2, "neutral")
+    };
+    GateOutcome {
+        exit_code,
+        conclusion: conclusion.to_string(),
+        summary: report.summary(),
+    }
+}
+
+/// Fold the co-sealed bar over the receipt's resident checks + provenance into a
+/// [`BarReport`] (the pure heart of [`enforce_merge_bar`]).
+fn build_bar_report(
+    receipt: &Receipt,
+    bar: &MergeBar,
+    evidence: &[EvidenceRequirement],
+) -> BarReport {
+    let mut missing_checks = Vec::new();
+    let mut failed_checks = Vec::new();
+    for required in &bar.required_checks {
+        match receipt
+            .statement
+            .checks
+            .iter()
+            .find(|c| &c.name == required)
+        {
+            None => missing_checks.push(required.clone()),
+            Some(check) if check.verdict != VerdictStatus::Passed => {
+                failed_checks.push(format!(
+                    "'{}' did not pass ({})",
+                    required,
+                    verdict_label(check.verdict)
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    let mut unmet_evidence = Vec::new();
+    for requirement in evidence {
+        if !evidence_satisfied(receipt, &requirement.kind) {
+            unmet_evidence.push(requirement.kind.clone());
+        }
+    }
+    BarReport {
+        missing_checks,
+        failed_checks,
+        unmet_evidence,
+    }
+}
+
+/// Whether a required evidence `kind` is satisfied by the receipt's resident provenance.
+/// **Closed, fail-closed enum (INV-R3):** an unknown kind is UNSATISFIED. No threshold /
+/// coverage / "diff touches tested files" predicates (those drift into a judge).
+fn evidence_satisfied(receipt: &Receipt, kind: &str) -> bool {
+    let provenance = &receipt.statement.provenance;
+    match kind {
+        // The receipt itself exists (it is the thing we are gating).
+        "receipt" => true,
+        // A non-empty replay manifest root hash proves the run replays.
+        "replay" => !receipt.statement.replay_manifest.root_hash.is_empty(),
+        // A transparency-ledger pointer commits the run.
+        "ledger" => provenance.ledger_ref.is_some(),
+        // The receipt pinned the in-force policy version.
+        "policy" => provenance.policy_version.is_some(),
+        // Fail-closed: an unrecognized evidence kind is never satisfied.
+        _ => false,
+    }
+}
+
+/// Lowercase display label for a per-check verdict (for the human bar summary).
+fn verdict_label(status: VerdictStatus) -> &'static str {
+    match status {
+        VerdictStatus::Passed => "passed",
+        VerdictStatus::Failed => "failed",
+        VerdictStatus::Inconclusive => "inconclusive",
+        VerdictStatus::Error => "error",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +290,8 @@ mod tests {
                     command: None,
                 },
                 issued_at_ms: 1000,
+                merge_bar: MergeBar::default(),
+                required_evidence: Vec::new(),
             },
             signature: ReceiptSignature {
                 payload_type: "application/vnd.in-toto+json".to_string(),
@@ -165,6 +355,221 @@ mod tests {
         assert_ne!(error.exit_code, 0);
         // Neutral and error share exit 2 but differ in conclusion (RISK §6).
         assert_eq!(inconclusive.exit_code, error.exit_code);
+    }
+
+    // --- L3 merge-bar enforcement overlay (enforce_merge_bar) ---
+
+    use nerve_proto::receipt::ReceiptCheck;
+    use nerve_proto::verdict::CheckKind;
+
+    /// A receipt with the given aggregate verdict, an explicit set of per-check results,
+    /// the co-sealed merge bar, and the required-evidence list — the dial board for the
+    /// enforcement matrix.
+    fn receipt_with_bar(
+        verdict: VerdictStatus,
+        checks: Vec<(&str, VerdictStatus)>,
+        required_checks: Vec<&str>,
+        required_evidence: Vec<&str>,
+    ) -> Receipt {
+        let mut receipt = receipt_with(verdict);
+        receipt.statement.checks = checks
+            .into_iter()
+            .map(|(name, v)| ReceiptCheck {
+                name: name.to_string(),
+                kind: CheckKind::Test,
+                verdict: v,
+                reproducible: true,
+                evidence_hash: None,
+            })
+            .collect();
+        receipt.statement.merge_bar = MergeBar {
+            required_checks: required_checks.into_iter().map(str::to_owned).collect(),
+        };
+        receipt.statement.required_evidence = required_evidence
+            .into_iter()
+            .map(|kind| EvidenceRequirement {
+                kind: kind.to_string(),
+            })
+            .collect();
+        receipt
+    }
+
+    #[test]
+    fn empty_bar_is_pure_passthrough() {
+        // No required checks + no required evidence => identical to gate_outcome.
+        for verdict in [
+            VerdictStatus::Passed,
+            VerdictStatus::Failed,
+            VerdictStatus::Inconclusive,
+            VerdictStatus::Error,
+        ] {
+            let receipt = receipt_with(verdict);
+            assert_eq!(
+                enforce_merge_bar(&receipt),
+                gate_outcome(&receipt),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn met_bar_keeps_the_pass_exit_zero() {
+        // All required checks Passed + required evidence present (replay root non-empty,
+        // and the "receipt" kind is always satisfied) => the pass is kept.
+        let receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![
+                ("unit", VerdictStatus::Passed),
+                ("build", VerdictStatus::Passed),
+            ],
+            vec!["unit", "build"],
+            vec!["receipt", "replay"],
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.conclusion, "success");
+        assert!(out.summary.contains("merge bar cleared"), "{}", out.summary);
+    }
+
+    #[test]
+    fn required_check_present_and_failed_downgrades_to_exit_one() {
+        // The bar was EXERCISED and not met => failure (exit 1), never a kept pass.
+        let receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![
+                ("unit", VerdictStatus::Passed),
+                ("build", VerdictStatus::Failed),
+            ],
+            vec!["unit", "build"],
+            vec![],
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 1);
+        assert_eq!(out.conclusion, "failure");
+        assert!(
+            out.summary.contains("'build' did not pass"),
+            "{}",
+            out.summary
+        );
+    }
+
+    #[test]
+    fn required_check_missing_downgrades_to_neutral_exit_two() {
+        // A required check that does not appear at all => the bar was NOT exercised =>
+        // neutral (exit 2), never a fabricated pass.
+        let receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![("unit", VerdictStatus::Passed)],
+            vec!["unit", "integration"],
+            vec![],
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(out.conclusion, "neutral");
+        assert!(
+            out.summary.contains("missing required check 'integration'"),
+            "{}",
+            out.summary
+        );
+    }
+
+    #[test]
+    fn required_evidence_absent_downgrades_to_neutral_exit_two() {
+        // "ledger" evidence required but the receipt pins no ledger_ref => neutral.
+        let receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![("unit", VerdictStatus::Passed)],
+            vec!["unit"],
+            vec!["ledger"],
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(out.conclusion, "neutral");
+        assert!(
+            out.summary.contains("required evidence 'ledger' absent"),
+            "{}",
+            out.summary
+        );
+    }
+
+    #[test]
+    fn unknown_evidence_kind_is_fail_closed_neutral() {
+        // An unrecognized evidence kind is UNSATISFIED (fail-closed, INV-R3) => neutral.
+        let receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![("unit", VerdictStatus::Passed)],
+            vec!["unit"],
+            vec!["coverage-threshold"],
+        );
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(out.conclusion, "neutral");
+    }
+
+    #[test]
+    fn non_success_base_is_never_upgraded_even_if_bar_satisfied() {
+        // A Failed base verdict whose co-sealed bar IS satisfied stays non-success — the
+        // overlay may only keep/downgrade a pass, never upgrade (INV-R1, downgrade-only).
+        let receipt = receipt_with_bar(
+            VerdictStatus::Failed,
+            vec![("unit", VerdictStatus::Passed)],
+            vec!["unit"],
+            vec!["receipt"],
+        );
+        let out = enforce_merge_bar(&receipt);
+        let base = gate_outcome(&receipt);
+        assert_eq!(out.exit_code, base.exit_code, "base failure exit preserved");
+        assert_eq!(out.conclusion, base.conclusion);
+        assert_ne!(
+            out.exit_code, 0,
+            "a satisfied bar never fabricates a pass on a Failed base"
+        );
+        // The base rationale is preserved and the bar report is APPENDED, not replaced.
+        assert!(out.summary.starts_with(&base.summary), "{}", out.summary);
+        assert!(out.summary.contains("merge bar cleared"), "{}", out.summary);
+    }
+
+    #[test]
+    fn inconclusive_base_with_unmet_bar_stays_neutral_with_appended_report() {
+        // An Inconclusive base (exit 2) keeps its exit; the bar report is appended.
+        let receipt = receipt_with_bar(VerdictStatus::Inconclusive, vec![], vec!["unit"], vec![]);
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(out.conclusion, "neutral");
+        assert!(
+            out.summary.contains("missing required check 'unit'"),
+            "{}",
+            out.summary
+        );
+    }
+
+    #[test]
+    fn enforce_merge_bar_is_deterministic() {
+        let receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![("unit", VerdictStatus::Passed)],
+            vec!["unit"],
+            vec!["receipt"],
+        );
+        assert_eq!(enforce_merge_bar(&receipt), enforce_merge_bar(&receipt));
+    }
+
+    #[test]
+    fn policy_evidence_requires_a_pinned_policy_version() {
+        // "policy" evidence is satisfied iff the receipt pinned a policy_version.
+        let mut receipt = receipt_with_bar(
+            VerdictStatus::Passed,
+            vec![("unit", VerdictStatus::Passed)],
+            vec!["unit"],
+            vec!["policy"],
+        );
+        // No policy_version pinned => neutral.
+        assert_eq!(enforce_merge_bar(&receipt).exit_code, 2);
+        // Pin one => the bar clears.
+        receipt.statement.provenance.policy_version = Some("pv1".to_string());
+        let out = enforce_merge_bar(&receipt);
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.conclusion, "success");
     }
 
     #[test]
