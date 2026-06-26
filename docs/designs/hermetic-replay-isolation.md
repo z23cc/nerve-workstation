@@ -223,8 +223,9 @@ additive, fully-deterministic work that closes the *overclaim* even before any k
 overclaim is closed and the `--require-isolation` lever exists). Next: **(b)+(c)** on Linux to actually
 earn `Hermetic` where CI seals receipts. **(d)** deepens the closure *and* is the "Hermetic anywhere"
 lever (§7.5); **(e)** is a dev nicety, last. The whole ladder is a **cross-platform** target, not a
-Linux lock — see §7 for the per-OS backend kit (permissive primitives, since the cross-platform
-`birdcage` crate is GPL-incompatible) and the portable pinned-image route.
+Linux lock — see §7 for the Linux+macOS backend options (adopt the GPL `birdcage` crate, since Nerve is
+open-source; or write the permissive DIY kit) and the portable pinned-image route for Windows + the
+strongest guarantee.
 
 ---
 
@@ -315,18 +316,48 @@ engine whose network denial is a filter, not namespace isolation) are not equall
 probed `IsolationTier` (INV-R7) stays load-bearing **on top of** any cross-platform crate: the same API
 still resolves to `Hermetic` on Linux and `BestEffort` on macOS. Claim less where we are less sure.
 
-### 7.3 Cross-platform Rust sandbox crates — surveyed, and the license wall
+### 7.3 Cross-platform Rust sandbox crates — surveyed, and the license question
 
 | Crate | Coverage | Mechanism | License | Verdict |
 |---|---|---|---|---|
-| **`birdcage`** (phylum-dev) | Linux + macOS | Landlock (Linux) + Seatbelt/`sandbox-exec` (macOS), unified **FS + network** API — exactly our surface | **GPL-3.0-or-later** | **Cannot link.** This workspace is `MIT OR Apache-2.0`; GPL-3.0 copyleft is incompatible as a linked dependency. Excellent **open reference design**, not a dependency. |
+| **`birdcage`** (phylum-dev) | Linux + macOS | Landlock (Linux) + Seatbelt/`sandbox-exec` (macOS), unified **FS + network** API — exactly our surface | **GPL-3.0-or-later** | **Adoptable — Nerve is open-source and accepts copyleft.** See the license note below. |
 | **`gaol`** (servo) | Linux + macOS + Windows | multiprocess broker | MPL-2.0 | Adds Windows, but self-described "lightly reviewed… not battle-tested" and effectively dormant — unfit for a determinism-critical dependency. |
 
-**Conclusion:** there is no permissively-licensed, maintained, all-three-OS sandbox crate to adopt
-wholesale. Build thin backends from permissive primitives behind the seam, using `birdcage` as the
-design reference (its scope — FS + network only — is precisely ours).
+**License note (decided 2026-06-27).** `birdcage` is `GPL-3.0-or-later`. This workspace is
+`MIT OR Apache-2.0`, and Apache-2.0/MIT are **one-way compatible into GPLv3**, so the combination is
+legal; the consequence is that **the crate that links it — only the `nerve-workstation` binary —
+becomes a GPL-3.0 combined work.** Since Nerve is intentionally open-source, this is **acceptable**, with
+one deliberate mechanic and a clean containment:
 
-### 7.4 The permissive backend kit (all impure, `nerve-workstation`-only, zero `nerve-core` change)
+- **Mechanic:** relicense the `nerve-workstation` binary crate to `GPL-3.0-or-later`. Do **not** keep a
+  `MIT OR Apache-2.0` field on a crate that links GPL — that would misrepresent the artifact.
+- **Containment:** copyleft lands **only on the binary**. The library crates
+  (`nerve-proto`/`nerve-core`/`nerve-runtime`/`nerve-fs`/`nerve-agent`) do not depend on `birdcage`, so
+  they stay `MIT OR Apache-2.0` — the kernel + protocol stay permissively reusable (incl. the WASM GUI's
+  shared `nerve-proto`).
+- **User impact is low:** GPL governs *distribution/linking*, not *use*. An org that **runs** `nerve gate`
+  in CI is unaffected (like git/gcc/bash); only someone redistributing a modified Nerve or embedding it
+  as a library inherits copyleft — the intended behavior for an open trust substrate.
+
+**Two caveats remain regardless of license** (they are technical, not legal): `birdcage` is **Linux +
+macOS only (no Windows)**, and its macOS backend is the same Apple-deprecated Seatbelt, so macOS still
+earns only **`BestEffort`** (§7.2). So `birdcage` covers native Linux+macOS; Windows and the strongest
+cross-platform guarantee still come from §7.5.
+
+**Conclusion — a pure engineering trade, not a license wall:**
+
+| Option | Binary license | Code to write | Coverage |
+|---|---|---|---|
+| **A. Adopt `birdcage`** | becomes `GPL-3.0-or-later` (libraries stay permissive) | **less** — Linux+macOS off-the-shelf | Linux `Hermetic` + macOS `BestEffort`, **no Windows** |
+| **B. Permissive DIY kit** (§7.4) | binary stays `MIT OR Apache-2.0` | more glue | same coverage |
+
+Pick **A** unless keeping the *binary itself* embeddable under permissive terms has value; **B** keeps the
+binary permissive at the cost of writing the glue. Either way, Windows + "Hermetic anywhere" is §7.5.
+
+### 7.4 The permissive backend kit (Option B — all impure, `nerve-workstation`-only, zero `nerve-core` change)
+
+The alternative to adopting GPL `birdcage` (§7.3): write the same FS+net closure from permissively-
+licensed primitives, so the binary stays `MIT OR Apache-2.0`. Same coverage, more glue to maintain.
 
 | OS | FS closure | Network deny | Syscall | Earns | Primitive (license to confirm via `cargo-deny`) |
 |---|---|---|---|---|---|
