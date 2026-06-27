@@ -7,7 +7,7 @@ Date: 2026-06-20
 
 This is the long-term design for turning Nerve Workstation into a **super AI workspace**: a
 deterministic conductor that drives a fleet of heterogeneous AI workers — external agentic CLIs
-(`codex` / `claude` / `gemini`) and in-process providers (xAI-Grok / OpenAI / Anthropic with the full
+(`codex` / `claude`) and in-process providers (xAI-Grok / OpenAI / Anthropic with the full
 Nerve tool surface) — under human approval, all over **one versioned runtime protocol**.
 
 The thesis, stated once: **the conductor is not "another orchestrator," and the orchestration engine
@@ -86,7 +86,7 @@ not request/response, because both substrates already model a live, steerable se
 
 /// What a worker is, and the only place CLI-vs-provider is visible to the engine.
 pub(crate) enum WorkerKind {
-    Cli(&'static str),                         // "codex" | "claude" | "gemini"
+    Cli(&'static str),                         // "codex" | "claude"
     Provider { provider: String, model: String },
 }
 
@@ -155,8 +155,7 @@ pub(crate) trait WorkerSession: Send {
 **`CliWorker` — wraps the existing `LiveDriver`.** `start()` is the existing `run_delegate_live`
 turn-1 + `LiveSessions::register`; `steer()` is `LiveHandle::steer`; `close()`/`interrupt()` are
 `LiveHandle::request_close` (which already fires the session-scoped cancel via `CancelLink`).
-`claude`/`codex` are genuinely steerable (live `DelegateSession`/`CodexSession`); `gemini` is one-shot
-— modeled as a `WorkerSession` whose `steer()` returns `WorkerError::NotSteerable`. The CLI's own
+`claude`/`codex` are genuinely steerable (live `DelegateSession`/`CodexSession`); a one-shot worker (e.g. a remote/MCP worker) is modeled as a `WorkerSession` whose `steer()` returns `WorkerError::NotSteerable`. The CLI's own
 `can_use_tool` permission prompts already route through `delegate_proxy.rs` to the `ApprovalHub`;
 `WorkerEvent::Approval` is the same flow, re-projected. **Credentials never leak**: the env scrub in
 `delegate_runtime.rs` strips `*_KEY`/`*_TOKEN`, so a CLI worker authenticates with its **own** on-disk
@@ -200,7 +199,7 @@ pub struct WorkflowDef {
 }
 
 pub enum WorkerRef {
-    Cli(String),                            // "codex" | "claude" | "gemini"
+    Cli(String),                            // "codex" | "claude"
     Provider { provider: String, model: String },
     Named(String),                          // resolved from a WorkerDef data file (P3, §6)
 }
@@ -425,8 +424,7 @@ from the parent budget; the engine debits the ledger from each node's `Usage` ev
 `AgentEventKind::Usage` / `DelegateUsage` / `TurnResult`), emits `BudgetUpdate`, and on overrun emits
 `FlowDecision{budget_exhausted}` and **cooperatively cancels** every branch via the existing
 `CancelToken` — the same mechanism `CostTelemetryHook` already uses. A buggy hierarchy is therefore
-**self-terminating**: a fork bomb hits the USD ceiling and cancels. Missing usage (the `gemini` recipe
-is honestly UNVERIFIED) is budgeted **worst-case / fail-closed**.
+**self-terminating**: a fork bomb hits the USD ceiling and cancels. Missing usage (e.g. a remote/MCP worker that reports nothing) is budgeted **worst-case / fail-closed**.
 
 A **process-global worker semaphore** (`max_workers` across the *whole* tree, not just per-wave) bounds
 ureq's thread-per-worker pressure before budget catches it.
@@ -438,15 +436,15 @@ ureq's thread-per-worker pressure before budget catches it.
 The `AgentWorker` port makes this a per-leaf **routing decision** encoded in `WorkerRef`, not an
 architectural fork. The division is about **capability**, not plumbing.
 
-**External CLIs (`CliWorker` over `codex`/`claude`/`gemini`)** — use when the subtask wants:
+**External CLIs (`CliWorker` over `codex`/`claude`)** — use when the subtask wants:
 - a **different vendor's full agentic harness** and its own tool ecosystem (codex MCP allowlist,
   claude's own permission model);
 - the worker to authenticate with its **own on-disk login** (credential/quota isolation — env scrub
   strips Nerve's secrets);
 - **process isolation** for a self-contained sub-investigation, or **heterogeneity** for a
-  vote/debate (codex vs claude vs gemini as independent voters).
+  vote/debate (codex vs claude as independent voters).
 - Heavyweight (a subprocess per worker, `NetPolicy::Allow`, 600s timeout). Steerable for
-  claude/codex; one-shot for gemini.
+  claude/codex.
 
 **In-process providers (`ProviderWorker` over Grok / OpenAI / Anthropic via `LlmProvider`)** — use
 when the subtask wants:
@@ -580,7 +578,7 @@ freeze a protocol shape we regret ("versioned or dead", north-star §9).
     `WorkerSession::steer` port through a per-flow live-flow worker registry (`SteerRegistry`,
     analogous to `LiveSessions`); `WorkerSelector { node_id? }` targets a node by id or the only live
     worker. Only `Single`/`Pipeline` frontiers are steerable; a `Parallel` wave, a one-shot worker
-    (`gemini` → `NotSteerable`), a closed/advanced frontier, or an ambiguous unset selector errors
+    (a remote/MCP worker → `NotSteerable`), a closed/advanced frontier, or an ambiguous unset selector errors
     cleanly. The steered turn is recorded into the same ledger (recorded nondeterminism, §5). Pipeline
     edges (`flow → stage-0 → stage-1 → …`) emit at `flow.start`. **Deferred to C3b:** the
     `BudgetLedger` + `FleetBudget` governance.
@@ -681,7 +679,7 @@ exactly what a version bump means — a wording point A/C got slightly loose on)
   like `RuntimeCommand`.
 - **Cost / fork-bomb blowups.** *Mitigation:* `FleetBudget` (global `max_workers` + `remaining_usd`)
   self-cancels via `CancelToken`; default CLI workers non-recursive; `PolicyToolBox` gates each spawn;
-  worst-case/fail-closed budgeting for unverified usage (gemini).
+  worst-case/fail-closed budgeting for unverified usage (a remote/MCP worker).
 - **Approval fatigue / deadlock at fleet scale.** *Mitigation:* per-flow `ApprovalMode` +
   `DecisionMemory` (`AllowAlways`/`DenyAlways`); a per-node **deterministic** approval timeout
   (`APPROVAL_TIMEOUT`) that denies and records in the ledger; consider a per-flow "auto-approve
@@ -689,8 +687,6 @@ exactly what a version bump means — a wording point A/C got slightly loose on)
 - **Protocol over-commitment.** *Mitigation:* C0/C1 ship behind a hidden CLI with **no** protocol; C2
   lands only `Single`+`Parallel`; the `Strategy` enum is additive; resist adding fields until a
   concrete strategy needs them.
-- **`gemini` path is UNVERIFIED** (honest note in `delegate_runtime.rs`). *Mitigation:* keep gemini
-  one-shot, feature-flag it experimental, fail-closed on its budgeting until exercised live.
 
 **Open questions:**
 

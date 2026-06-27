@@ -18,7 +18,7 @@ Related: `architecture-north-star.md` (determinism boundary, seam table, P7 cock
 ## 1. Problem & ambition
 
 The headline direction (2026-06-23) is a **cockpit orchestrating external CLI coding
-agents** (Claude Code, Codex, Gemini) that are handed Nerve's engine as MCP tools. The
+agents** (Claude Code, Codex) that are handed Nerve's engine as MCP tools. The
 engine is therefore a **grounding FEATURE for evidence — not the moat (2026-06-24)** (the moat
 is the deterministic flight-recorder + execution-grounded re-verifier; see
 `docs/designs/trust-substrate.md`), and the bar for it is best-in-class on the axes that

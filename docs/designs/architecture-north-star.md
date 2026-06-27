@@ -14,7 +14,7 @@ seam instead of bolting on a new bespoke entry point. When in doubt, the seam wi
 > validated by an unconstrained adversarial tournament). This section is the binding summary.
 
 > **Nerve is the deterministic flight-recorder + execution-grounded re-verifier for fleets of
-> external coding agents.** It orchestrates the best stochastic agents (Claude Code, Codex, Gemini, …)
+> external coding agents.** It orchestrates the best stochastic agents (Claude Code, Codex, …)
 > as userland through the `delegate.*` cockpit (the **body** / distribution), and its **moat** is that
 > every agent run is captured as a content-addressed, bit-for-bit replayable **Run** and gated by a
 > portable, signed **Verification Receipt** whose verdict is borrowed from the org's own tests — not
@@ -63,7 +63,7 @@ remaining convergence — turning the interactive CLI into a true *transport* cl
 approval round-trips (`session.respond`) — is Session-layer / P6 work, not in-process command routing.
 
 **Direction note (2026-06-23).** The two agent-execution faces are now ranked. The **`delegate.*`
-seam** — drive an external CLI (codex / claude / gemini) as a sandboxed, steerable subprocess — is
+seam** — drive an external CLI (codex / claude) as a sandboxed, steerable subprocess — is
 the **primary, product-facing** path; the **own-engine** face (`agent.run` / `session.*` over
 `nerve-agent`) is **secondary/optional**. Both remain proper protocol vocabulary and both flow through
 `Runtime` (§3.2 holds), so this is a priority/surfacing decision, **not** an invariant change. The
@@ -221,7 +221,7 @@ code 2026-06-19 — the layers the original draft marked ✗ have since landed.)
 | `LlmProvider` | `nerve-agent/provider` | ✅ 3 built-in **+ config-driven** (`ProviderRegistry` + `--provider-config`; `ProviderWire` for the OpenAI-compatible long tail, no code) | promote to a named registry; otherwise done |
 | `ToolBox` | `nerve-agent/provider` | `RuntimeToolBox` | fine (agent↔tools seam is wired) |
 | `AuthStrategy` | `nerve-agent/auth` | 3 providers, staged (`start`/`complete`/`refresh`), driven over `auth.*` protocol | client owns callback capture (§3.7); could be config-driven |
-| **Delegate / external agent CLI (primary product seam)** | `nerve-proto` (`delegate.*`) + `delegate_runtime.rs` | ✅ `RuntimeCommand::Delegate{Start,Steer,Close}` spawns sandboxed **codex / claude / gemini**, streams `DelegateProgress`, approvals via `session.respond`; steerable parked sessions | **multi-agent cockpit** (§8): run several side by side, per-thread agent binding, live agents dashboard, cross-agent context handoff |
+| **Delegate / external agent CLI (primary product seam)** | `nerve-proto` (`delegate.*`) + `delegate_runtime.rs` | ✅ `RuntimeCommand::Delegate{Start,Steer,Close}` spawns sandboxed **codex / claude**, streams `DelegateProgress`, approvals via `session.respond`; steerable parked sessions | **multi-agent cockpit** (§8): run several side by side, per-thread agent binding, live agents dashboard, cross-agent context handoff |
 | Session / Conversation **(own-engine; secondary)** | `nerve-runtime` + `session_manager/` | ✅ `RuntimeCommand::Session*` + `SessionManager` (multi-turn, interrupt, resume, set-model) + `ProtocolApprover` approval round-trip; run as daemon jobs | **demoted** from the product surface (§1); kept for headless/embedded; not featured in the GUI |
 | Skill / AgentDef | `capabilities.rs` | ✅ `Capabilities::discover` loads agent defs **+ skills** (project > global > built-in; `BUILTIN_AGENTS` / `BUILTIN_SKILLS`) | workflow defs; a versioned on-disk schema |
 | Policy / Permission | `policy.rs` | ✅ `PolicyToolBox` outermost gate (invariant 9); `policy.json` global-authoritative + project tighten-only; CLI-interactive / daemon-deny / session-protocol approvers | the orthogonal `SandboxLauncher` containment half (exec) |
@@ -279,7 +279,7 @@ Do not build one plugin system; layer by what is being extended, each with the r
   Run capture, then the Receipt + merge-gate wedge.
 - **P7 — Multi-agent cockpit over external CLIs (the substrate's body; 2026-06-23). ◑ In progress.**
   The product's defining capability is **managing many CLI coding agents at once**: each thread bound
-  to an agent (claude / codex / gemini …), several running concurrently across projects, a live
+  to an agent (claude / codex …), several running concurrently across projects, a live
   "agents" dashboard (status / current task / pending approvals), and **cross-agent context handoff**
   built on the deterministic engine (`build_context` / repomap / scout) plus Nerve-as-MCP-tools.
   The foundation already exists — the `delegate.*` seam + `SandboxLauncher` (P4); remaining work is

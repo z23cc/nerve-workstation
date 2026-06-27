@@ -13,7 +13,7 @@ theses → independent red-team → 3 priority-diverse judges; all three converg
 ## 0. The decision (one paragraph)
 
 > **Nerve is the deterministic flight-recorder + execution-grounded re-verifier for fleets of
-> external coding agents.** It orchestrates the best stochastic agents (Claude Code, Codex, Gemini,
+> external coding agents.** It orchestrates the best stochastic agents (Claude Code, Codex,
 > …) as userland through the `delegate.*` cockpit, and its *moat* is that **every agent run is
 > captured as a content-addressed, bit-for-bit replayable Run, and gated by a portable, signed
 > Verification Receipt** whose verdict is borrowed from the org's own tests — not invented by us.
