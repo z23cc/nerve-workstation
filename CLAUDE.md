@@ -85,6 +85,7 @@ Which tool to reach for:
 | "Where is X defined / who calls it / how is it wired" | `goto_definition`, `find_references`, `call_hierarchy` |
 | Structural match/rewrite text search can't express | `ast_search`, `ast_edit` (tree-sitter `query` mode **or** `$META` pattern mode) |
 | "Where does code about <concept> live" (don't know the name) | `scout` (query → ranked `path:line-range` citations; reuses `build_context` ranking — BM25 + repo-map PageRank + path; deterministic, no LLM) |
+| Fuzzy concept recall when lexical search misses (vocabulary gap) | `semantic_search` (**non-deterministic, advisory**) — only present when a `semantic` embedding MCP server is configured in `--mcp-config`; consumed above the kernel, tagged `deterministic:false`, never feeds the captured `build_context`. Use it to LOCATE, then cite with the deterministic tools. |
 | Edit files | `edit` (`replace`/`patch`/`apply_patch`/`hashline`), `write`, `delete`, `move` |
 | Assemble a working set for a question | `build_context`, then `manage_selection` / `workspace_context` |
 | Read-only history | `git` (`status`/`diff`/`log`/`blame`/`show`) |

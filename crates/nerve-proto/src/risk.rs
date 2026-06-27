@@ -34,18 +34,27 @@ pub struct ToolCapability {
     pub reads_fs: bool,
     pub writes_fs: bool,
     pub network: bool,
+    /// Whether the tool's output is reproducible — same input → same output.
+    /// `false` marks a NON-deterministic capability (LLM calls, embeddings,
+    /// network fetches, wall-clock): its results must never be silently treated
+    /// as part of a bit-for-bit replayable Run (INV-R1/R2). The honest default is
+    /// `false` (unknown ⇒ not assumed reproducible — never over-claim determinism).
+    pub deterministic: bool,
 }
 
 impl Default for ToolCapability {
     /// Most permissive default: highest risk, all surfaces enabled, so an
     /// adapter that hasn't opted into a narrower descriptor is treated as
-    /// fully capable (non-breaking for existing adapters).
+    /// fully capable (non-breaking for existing adapters). `deterministic` is
+    /// `false` by the same worst-case logic — an undeclared, fully-capable tool
+    /// is not assumed reproducible.
     fn default() -> Self {
         Self {
             risk: RiskTier::Exec,
             reads_fs: true,
             writes_fs: true,
             network: true,
+            deterministic: false,
         }
     }
 }

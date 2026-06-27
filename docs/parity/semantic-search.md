@@ -4,6 +4,16 @@
 > `semantic_search` tool were **removed** (no `semantic` cargo feature exists). Semantic recall, if
 > wanted, is now consumed via the MCP-client seam tagged `deterministic:false` — see
 > `docs/designs/trust-substrate.md` (INV-R2) and `docs/designs/code-graph.md`. Kept as a parity record.
+>
+> **Re-entered (2026-06-27) as the consume-via-MCP `semantic_search` tool.** Implemented per the plan above:
+> a workstation-layer `RuntimeToolAdapter` (`crates/nerve-workstation/src/mcp/semantic.rs`), NOT in
+> `nerve-core`. It consumes an external embedding MCP server (configured via the `semantic` key in
+> `--mcp-config`; the server's tool must return `structuredContent.hits = [{ path, score?, ranges?, note? }]`),
+> returns scout-shaped citations tagged **`deterministic: false`** (new `ToolCapability.deterministic` field +
+> an in-band result marker), and is **isolated from `build_context` by construction** — the kernel never calls
+> it, so a captured Run's deterministic context stays bit-for-bit replayable (INV-R1). The old neural stack
+> (fastembed/ONNX/ANN) is NOT rebuilt; any embedding MCP server plugs in. A `SemanticBackend` trait keeps a
+> deterministic test fake swappable for the real backend.
 
 `semantic_search` is available only in native builds compiled with `--features semantic`.
 Default builds do not list the tool and keep the existing on-demand/no-persistent-index behavior.
