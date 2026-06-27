@@ -536,7 +536,7 @@
       ]
     },
     "DelegateAutonomy": {
-      "description": "Autonomy posture handed to a delegated external agent CLI, mapping to each\nvendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`,\ngemini `--approval-mode` (read-only | edit | full). Defaults to the most\nrestricted ([`Self::ReadOnly`]) so an omitted field never grants more than read\naccess.",
+      "description": "Autonomy posture handed to a delegated external agent CLI, mapping to each\nvendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`\n(read-only | edit | full). Defaults to the most\nrestricted ([`Self::ReadOnly`]) so an omitted field never grants more than read\naccess.",
       "oneOf": [
         {
           "const": "read_only",
@@ -1116,7 +1116,7 @@
       "oneOf": [
         {
           "const": "cli",
-          "description": "An external agentic CLI (codex / claude / gemini) subprocess.",
+          "description": "An external agentic CLI (codex / claude) subprocess.",
           "type": "string"
         },
         {
@@ -2920,7 +2920,7 @@
           "type": "object"
         },
         {
-          "description": "Delegate a coding task to an external agent CLI (codex / claude / gemini)\nas a long-lived job. Pure protocol vocabulary: the host job manager drives\nthe subprocess (DA-2); `nerve-core` has no subprocess knowledge. `agent` is\nthe catalog name from `list_agents`; `cwd` defaults to the workspace root;\n`model` overrides the agent's default model. Progress streams back as\n[`crate::RuntimeEvent::DelegateProgress`].",
+          "description": "Delegate a coding task to an external agent CLI (codex / claude)\nas a long-lived job. Pure protocol vocabulary: the host job manager drives\nthe subprocess (DA-2); `nerve-core` has no subprocess knowledge. `agent` is\nthe catalog name from `list_agents`; `cwd` defaults to the workspace root;\n`model` overrides the agent's default model. Progress streams back as\n[`crate::RuntimeEvent::DelegateProgress`].",
           "properties": {
             "agent": {
               "type": "string"
@@ -3483,7 +3483,7 @@
           "type": "object"
         },
         {
-          "description": "Steer a live flow branch with a follow-up message, running one more turn\nagainst the same live worker session (design §4 / Wave C3a). Reuses the C0\n`WorkerSession::steer` port per-worker, exactly as `delegate.steer` does\nfor a single delegated session: the host job manager looks up the live\nworker for `target` in the live-flow worker registry and continues it;\nprogress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a\nlive, steerable branch (a `Single`/`Pipeline` worker still in flight, on a\nsteerable substrate) can be steered; a closed or one-shot worker\n(`gemini`) returns a clear error. `flow_id` is the originating\n[`Self::FlowStart`] job id; `target` selects which branch (by node id, or\nthe only live worker when unset).",
+          "description": "Steer a live flow branch with a follow-up message, running one more turn\nagainst the same live worker session (design §4 / Wave C3a). Reuses the C0\n`WorkerSession::steer` port per-worker, exactly as `delegate.steer` does\nfor a single delegated session: the host job manager looks up the live\nworker for `target` in the live-flow worker registry and continues it;\nprogress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a\nlive, steerable branch (a `Single`/`Pipeline` worker still in flight, on a\nsteerable substrate) can be steered; a closed or one-shot worker\n(a remote/MCP worker) returns a clear error. `flow_id` is the originating\n[`Self::FlowStart`] job id; `target` selects which branch (by node id, or\nthe only live worker when unset).",
           "properties": {
             "flow_id": {
               "type": "string"
@@ -3789,7 +3789,7 @@
           "properties": {
             "agent": {
               "default": "claude",
-              "description": "Delegate agent catalog name (`claude` / `codex` / `gemini`).",
+              "description": "Delegate agent catalog name (`claude` / `codex`).",
               "type": "string"
             },
             "autonomy": {
@@ -4178,7 +4178,7 @@
           "type": "object"
         },
         {
-          "description": "Streaming output fragment from a delegated external agent CLI, scoped to\nits job. `agent` is the catalog name (codex / claude / gemini); `text` is a\nraw stdout/stderr chunk. Additive and job-scoped; the producer is wired in\nDA-2 (this variant only reserves the protocol shape).",
+          "description": "Streaming output fragment from a delegated external agent CLI, scoped to\nits job. `agent` is the catalog name (codex / claude); `text` is a\nraw stdout/stderr chunk. Additive and job-scoped; the producer is wired in\nDA-2 (this variant only reserves the protocol shape).",
           "properties": {
             "agent": {
               "type": "string"
@@ -4203,7 +4203,7 @@
           "type": "object"
         },
         {
-          "description": "A structured, content-addressed step of a *delegated* (external-CLI) agent run —\nthe per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text\ntail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`\njob/node scoping); `event` reuses the in-process `AgentEventKind` shape\n(TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client\nrendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing\nit would be a breaking bump; agents whose tool structure we don't lift, e.g.\ngemini, keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.",
+          "description": "A structured, content-addressed step of a *delegated* (external-CLI) agent run —\nthe per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text\ntail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`\njob/node scoping); `event` reuses the in-process `AgentEventKind` shape\n(TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client\nrendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing\nit would be a breaking bump; agents whose tool structure we don't lift\nkeep the text stream). Broadcast/scoped exactly like `DelegateProgress`.",
           "properties": {
             "event": {
               "$ref": "#/$defs/AgentEventKind"
@@ -5134,7 +5134,7 @@
           "type": "object"
         },
         {
-          "description": "Streaming output fragment from a delegated external agent CLI, scoped to\nits job. `agent` is the catalog name (codex / claude / gemini); `text` is a\nraw stdout/stderr chunk. Additive and job-scoped; the producer is wired in\nDA-2 (this variant only reserves the protocol shape).",
+          "description": "Streaming output fragment from a delegated external agent CLI, scoped to\nits job. `agent` is the catalog name (codex / claude); `text` is a\nraw stdout/stderr chunk. Additive and job-scoped; the producer is wired in\nDA-2 (this variant only reserves the protocol shape).",
           "properties": {
             "agent": {
               "type": "string"
@@ -5159,7 +5159,7 @@
           "type": "object"
         },
         {
-          "description": "A structured, content-addressed step of a *delegated* (external-CLI) agent run —\nthe per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text\ntail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`\njob/node scoping); `event` reuses the in-process `AgentEventKind` shape\n(TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client\nrendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing\nit would be a breaking bump; agents whose tool structure we don't lift, e.g.\ngemini, keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.",
+          "description": "A structured, content-addressed step of a *delegated* (external-CLI) agent run —\nthe per-tool LIVE vocabulary that supplements the opaque `DelegateProgress` text\ntail (§6). `job_id` scopes it to the delegate job (mirrors `Agent`/`FlowNodeAgent`\njob/node scoping); `event` reuses the in-process `AgentEventKind` shape\n(TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client\nrendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing\nit would be a breaking bump; agents whose tool structure we don't lift\nkeep the text stream). Broadcast/scoped exactly like `DelegateProgress`.",
           "properties": {
             "event": {
               "$ref": "#/$defs/AgentEventKind"
@@ -6538,7 +6538,7 @@
       "description": "Which worker runs a [`Step`]. The only place the CLI-vs-provider distinction\nis encoded in the data (design §7); the engine resolves it through the\n`WorkerFactory` to a kind-agnostic `AgentWorker`.",
       "oneOf": [
         {
-          "description": "An external agentic CLI by catalog name (`codex` | `claude` | `gemini`).",
+          "description": "An external agentic CLI by catalog name (`codex` | `claude`).",
           "properties": {
             "kind": {
               "const": "cli",

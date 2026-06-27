@@ -138,7 +138,7 @@ impl AgentWorker for FakeWorker {
 /// A scripted session: turn 1 already ran in `start`. A `steerable` session runs a
 /// follow-up turn on [`Self::steer`] that synthesizes a turn echoing the steer
 /// message; a non-steerable one returns [`WorkerError::NotSteerable`] (modeling a
-/// one-shot worker like `gemini`).
+/// one-shot remote/MCP worker).
 struct ScriptedSession {
     last: TurnResult,
     steerable: bool,
@@ -809,7 +809,7 @@ fn steer_targets_a_specific_node_by_id() {
 
 #[test]
 fn steer_errors_on_a_non_steerable_frontier() {
-    // A one-shot worker (gemini-like) returns NotSteerable.
+    // A one-shot worker (a remote/MCP-like worker) returns NotSteerable.
     let registry = live_frontier("stage-0", ok("t1"), false);
     let ledger = WorkerLedger::new();
     let err = registry

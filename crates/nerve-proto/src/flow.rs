@@ -64,7 +64,7 @@ fn default_max_depth() -> u32 {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkerRef {
-    /// An external agentic CLI by catalog name (`codex` | `claude` | `gemini`).
+    /// An external agentic CLI by catalog name (`codex` | `claude`).
     Cli { name: String },
     /// An in-process provider loop by provider + model.
     Provider { provider: String, model: String },

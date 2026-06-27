@@ -43,7 +43,7 @@ pub(crate) struct FlowArgs {
     /// ask is denied) unless this is set.
     #[arg(long = "allow-all", visible_alias = "yes", short = 'y')]
     allow_all: bool,
-    /// Allow CLI workers (codex/claude/gemini) to be spawned as subprocesses.
+    /// Allow CLI workers (codex/claude) to be spawned as subprocesses.
     /// Off by default — a flow then runs only in-process provider workers, so the
     /// experimental command never spawns an external agent unless asked.
     #[arg(long = "allow-delegate")]

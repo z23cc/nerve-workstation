@@ -272,8 +272,8 @@ impl FlowDeps {
 /// more turn against the branch `target` selects (via the C0 [`WorkerSession::steer`]
 /// port), stream the follow-up turn as node-scoped [`RuntimeEvent::FlowNodeAgent`]
 /// events, and record it into the flow's ledger. A finished flow, a missing/closed
-/// branch, an ambiguous unset selector, or a one-shot worker (`gemini`) errors
-/// cleanly — no live LLM/subprocess is touched here beyond the existing session.
+/// branch, an ambiguous unset selector, or a one-shot worker (a remote/MCP worker)
+/// errors cleanly — no live LLM/subprocess is touched here beyond the existing session.
 pub(crate) fn run_flow_steer(
     flow_id: &str,
     target: &WorkerSelector,

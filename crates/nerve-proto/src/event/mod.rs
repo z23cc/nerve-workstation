@@ -103,7 +103,7 @@ pub enum RuntimeEvent {
         kind: AuthEventKind,
     },
     /// Streaming output fragment from a delegated external agent CLI, scoped to
-    /// its job. `agent` is the catalog name (codex / claude / gemini); `text` is a
+    /// its job. `agent` is the catalog name (codex / claude); `text` is a
     /// raw stdout/stderr chunk. Additive and job-scoped; the producer is wired in
     /// DA-2 (this variant only reserves the protocol shape).
     DelegateProgress {
@@ -117,8 +117,8 @@ pub enum RuntimeEvent {
     /// job/node scoping); `event` reuses the in-process `AgentEventKind` shape
     /// (TurnStarted / ToolStarted / ToolFinished / Usage / …) so existing client
     /// rendering applies unchanged. `DelegateProgress` is RETAINED (additive — removing
-    /// it would be a breaking bump; agents whose tool structure we don't lift, e.g.
-    /// gemini, keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.
+    /// it would be a breaking bump; agents whose tool structure we don't lift
+    /// keep the text stream). Broadcast/scoped exactly like `DelegateProgress`.
     DelegateAgent {
         job_id: String,
         event: AgentEventKind,
@@ -372,7 +372,7 @@ pub enum FlowDecisionKind {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum FlowWorkerKind {
-    /// An external agentic CLI (codex / claude / gemini) subprocess.
+    /// An external agentic CLI (codex / claude) subprocess.
     Cli,
     /// An in-process provider loop over the Nerve tool surface.
     Provider,

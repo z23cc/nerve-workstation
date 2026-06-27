@@ -47,7 +47,7 @@ pub(crate) struct DelegateSessionRecord {
     pub(crate) schema_version: u32,
     /// The session id (also the filename and the `delegate.start` job id).
     pub(crate) session_id: String,
-    /// The catalog agent kind: `claude` / `codex` / `gemini`.
+    /// The catalog agent kind: `claude` / `codex`.
     pub(crate) agent: String,
     /// The served project root the session ran against.
     #[serde(default)]

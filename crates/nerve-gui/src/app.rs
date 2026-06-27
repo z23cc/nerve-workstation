@@ -2,7 +2,7 @@
 //!
 //! The chat backend is, by product direction (2026-06-23), the **local CLI delegate**
 //! path (`delegate.start` + `delegate.steer`) — driving an external agent CLI
-//! (Claude Code / Codex / Gemini). The host-managed runtime session path
+//! (Claude Code / Codex). The host-managed runtime session path
 //! (`session.start` + `session.message`) is a **secondary, optional** engine kept
 //! for headless/embedded use. Both route approvals through `session.respond`, so the
 //! GUI keeps one permission surface. See docs/designs/architecture-north-star.md §1/§8.

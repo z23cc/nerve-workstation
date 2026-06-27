@@ -10,14 +10,9 @@ use nerve_proto::protocol::RuntimeInfo;
 use serde_json::{Value, json};
 
 /// The local agent CLIs the GUI drives over the delegate path: `(id, label)`.
-/// `id` is the catalog name `delegate.start` accepts (claude / codex / gemini);
+/// `id` is the catalog name `delegate.start` accepts (claude / codex);
 /// each runs the user's logged-in CLI, which owns its own model/credentials.
-pub const AGENTS: &[(&str, &str)] = &[
-    ("claude", "Claude Code"),
-    ("codex", "Codex"),
-    // gemini is one-shot (not a parked/steerable session), so it does not fit the
-    // steerable-chat model yet — omitted until one-shot turns are handled.
-];
+pub const AGENTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("codex", "Codex")];
 
 /// The human label for an agent id (falls back to the id).
 pub fn agent_label(id: &str) -> &str {

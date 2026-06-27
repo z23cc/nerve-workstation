@@ -62,8 +62,8 @@ the org's own checks decide the verdict. The merge-gate consumes it at **§L5**.
 ## How the `run-id` is produced
 
 The `run-id` is the **content address of a captured Run** — produced when you run an
-agent through Nerve's delegate seam (`delegate.start`, e.g. a Claude Code / Codex /
-Gemini CLI session). Each delegated run is recorded as a replayable, content-addressed
+agent through Nerve's delegate seam (`delegate.start`, e.g. a Claude Code / Codex
+session). Each delegated run is recorded as a replayable, content-addressed
 Run (trust-substrate.md L0). Capture the resulting id and pass it to this gate; it is
 the thing the Receipt attests.
 

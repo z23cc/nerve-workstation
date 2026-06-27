@@ -1,17 +1,17 @@
 //! Delegation (`delegate.*`) command executors for the [`JobManager`].
 //!
-//! `delegate.start` (DA-2/DA-5a) resolves the agent and either runs a one-shot CLI
-//! (codex/gemini) or starts a live, steerable `claude` session that parks for later
-//! steering; `delegate.steer` / `delegate.close` (DA-5a) route into the live-session
-//! registry by session id. The L0 run-capture seal/emit tail lives in the sibling
-//! [`seal`] module. All executors are `impl JobManager` methods so they reach the
-//! manager's private launcher / live-session registry / served-root resolver directly.
+//! `delegate.start` (DA-5a/5c) resolves the agent and starts a live, steerable
+//! `claude`/`codex` session that parks for later steering; `delegate.steer` /
+//! `delegate.close` (DA-5a) route into the live-session registry by session id. The
+//! L0 run-capture seal/emit tail lives in the sibling [`seal`] module. All executors
+//! are `impl JobManager` methods so they reach the manager's private launcher /
+//! live-session registry / served-root resolver directly.
 
 mod seal;
 
 use super::JobManager;
 use crate::delegate_proxy::{DelegateDecisions, DelegateProxy};
-use crate::delegate_runtime::{self, DelegateAgent, DelegateError, DelegateParser};
+use crate::delegate_runtime::{self, DelegateAgent, DelegateError};
 use crate::delegate_session::DelegateSession;
 use nerve_core::{CancelToken, WorkspaceResolver};
 use nerve_runtime::{DelegateAutonomy, DelegateRole, RuntimeCommand, RuntimeEvent};
@@ -19,12 +19,12 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 impl JobManager {
-    /// Execute a `delegate.*` command. `delegate.start` (DA-2/DA-5a) resolves the
-    /// agent and either runs a one-shot CLI (codex/gemini) or starts a live,
-    /// steerable `claude` session that parks for later steering; `delegate.steer`
-    /// and `delegate.close` (DA-5a) route into the live-session registry by
-    /// session id. A refusing `delegate_launcher` (the default trust context)
-    /// surfaces a clear "delegation is disabled" error instead of spawning.
+    /// Execute a `delegate.*` command. `delegate.start` (DA-5a/5c) resolves the
+    /// agent and starts a live, steerable `claude`/`codex` session that parks for
+    /// later steering; `delegate.steer` and `delegate.close` (DA-5a) route into the
+    /// live-session registry by session id. A refusing `delegate_launcher` (the
+    /// default trust context) surfaces a clear "delegation is disabled" error
+    /// instead of spawning.
     pub(super) fn run_delegate_command(
         &self,
         job_id: &str,
@@ -65,13 +65,12 @@ impl JobManager {
     }
 
     /// Start a delegated run: a `claude` (DA-5a) or `codex` (DA-5c) agent becomes a
-    /// live, steerable session that parks after turn 1; `gemini` stays one-shot
-    /// (DA-2).
+    /// live, steerable session that parks after turn 1.
     ///
     /// DA-6: for a **codex** run, compute the `-c mcp_servers.<name>.enabled=false`
     /// flags from the effective allowlist (per-call `mcp_enable` if present, else the
     /// persisted `[delegate.codex] mcp_enable` config) and thread them into the argv;
-    /// claude/gemini get an empty set and are unaffected.
+    /// claude gets an empty set and is unaffected.
     #[allow(clippy::too_many_arguments)] // reason: one cohesive start call; the agent
     // name, task, cwd, autonomy, model, and per-call mcp allowlist are independent
     // inputs to the spawn, and bundling them into a struct would add indirection
@@ -89,8 +88,8 @@ impl JobManager {
         mcp_enable: Option<Vec<String>>,
         token: &CancelToken,
     ) -> Result<Value, nerve_runtime::RuntimeError> {
-        // DA-7: expand the role preset once, before the live/one-shot split, so both
-        // downstream paths inherit the scout's wrapped task + forced read-only posture.
+        // DA-7: expand the role preset once, up front, so the live session inherits
+        // the scout's wrapped task + forced read-only posture.
         let (task, autonomy) = crate::delegate_roles::apply_role(role, task, autonomy);
         let task = task.as_str();
         let resolved = DelegateAgent::from_name(agent)
@@ -101,46 +100,34 @@ impl JobManager {
         let run_cwd = delegate_runtime::resolve_delegate_cwd(&root, cwd.as_deref())
             .map_err(delegate_error)?;
         // L3↔L1: commit the authorization posture to the evidence ledger once the request
-        // is validated (agent + cwd) and about to launch — both the live and one-shot
-        // paths inherit it, and (mirroring the in-chat path) a rejected request is not
-        // recorded as an authorization on either face.
+        // is validated (agent + cwd) and about to launch — the live session inherits it,
+        // and (mirroring the in-chat path) a rejected request is not recorded as an
+        // authorization on either face.
         self.record_delegate_authorization(job_id, agent, role, autonomy);
         let mcp_disable_flags =
             crate::delegate_codex_mcp::delegate_disable_flags(resolved, mcp_enable);
-        if matches!(resolved, DelegateAgent::Claude | DelegateAgent::Codex) {
-            // Persist a durable record (audit + resume seam, trust-substrate floor) so
-            // the live session survives a daemon restart. Best-effort: a write failure
-            // never blocks the start.
-            if let Ok(store) = crate::delegate_store::DelegateStore::for_scope(Some(&root)) {
-                let record = crate::delegate_store::DelegateSessionRecord::begin(
-                    job_id,
-                    resolved.catalog_name(),
-                    &root,
-                    &run_cwd,
-                    autonomy,
-                    role,
-                    model.clone(),
-                );
-                let _ = store.write_record(&record);
-            }
-            return self.run_delegate_live(
+        // Both supported agents (claude / codex) run as live, steerable sessions.
+        // Persist a durable record (audit + resume seam, trust-substrate floor) so
+        // the live session survives a daemon restart. Best-effort: a write failure
+        // never blocks the start.
+        if let Ok(store) = crate::delegate_store::DelegateStore::for_scope(Some(&root)) {
+            let record = crate::delegate_store::DelegateSessionRecord::begin(
                 job_id,
-                resolved,
+                resolved.catalog_name(),
+                &root,
                 &run_cwd,
                 autonomy,
-                task,
-                model,
-                &mcp_disable_flags,
-                token,
+                role,
+                model.clone(),
             );
+            let _ = store.write_record(&record);
         }
-        self.run_delegate(
+        self.run_delegate_live(
             job_id,
             resolved,
-            agent,
-            task,
             &run_cwd,
             autonomy,
+            task,
             model,
             &mcp_disable_flags,
             token,
@@ -460,96 +447,6 @@ impl JobManager {
     pub(super) fn delegate_root(&self) -> Result<std::path::PathBuf, nerve_runtime::RuntimeError> {
         self.served_root(None)
     }
-
-    /// Spawn the delegated CLI through the streaming launcher, forwarding progress
-    /// and parsing the stream into a [`DelegateOutcome`].
-    #[allow(clippy::too_many_arguments)] // reason: one cohesive spawn call; splitting the
-    // resolved/raw agent name, cwd, autonomy, model, and codex mcp-disable flags into
-    // a struct would add indirection without separating any responsibility.
-    fn run_delegate(
-        &self,
-        job_id: &str,
-        resolved: DelegateAgent,
-        agent_name: &str,
-        task: &str,
-        cwd: &std::path::Path,
-        autonomy: DelegateAutonomy,
-        model: Option<String>,
-        mcp_disable_flags: &[String],
-        token: &CancelToken,
-    ) -> Result<Value, nerve_runtime::RuntimeError> {
-        let invocation = delegate_runtime::build_command(
-            resolved,
-            task,
-            cwd,
-            autonomy,
-            model.as_deref(),
-            mcp_disable_flags,
-        );
-        let policy = delegate_runtime::delegate_policy(cwd);
-        let mut parser = DelegateParser::new(resolved);
-        let emit = Arc::clone(&self.emit);
-        let job = job_id.to_string();
-        let agent_owned = agent_name.to_string();
-        // L0 run capture (best-effort): record the delegated run as a
-        // content-addressed event tape ALONGSIDE the existing — untouched —
-        // DelegateProgress stream. The raw stdout/stderr line is the tape's
-        // `Output` unit; persistence happens at seal and never fails the turn.
-        let root = self.delegate_root().ok().map(|p| p.display().to_string());
-        let mut writer = crate::run_store::RunWriter::begin(job_id, agent_name, root);
-        writer.push(nerve_core::provenance::EventKind::RunStarted {
-            agent: agent_name.to_string(),
-            task: task.to_string(),
-            cwd: Some(cwd.display().to_string()),
-            // L0c pinned inputs (repo-snapshot + toolchain digest) are wired in the
-            // capture path in a follow-up; absent here, so the content address is
-            // unchanged from pre-L0c (None -> skip_serialized).
-            // L0c: pin the run's executed closure (repo snapshot + toolchain digest)
-            // in-band so its content address commits to *what ran*, not just output.
-            inputs: Some(crate::toolchain_pin::resolve_run_inputs(
-                self.delegate_root().ok().as_deref(),
-            )),
-        });
-        writer.push(nerve_core::provenance::EventKind::TurnStarted { turn: 0 });
-        let launch = {
-            let mut on_line = |line: &str| {
-                writer.push(nerve_core::provenance::EventKind::Output {
-                    turn: 0,
-                    text: line.to_string(),
-                });
-                // L0 granularity: index the tools/commands/edits this line carries,
-                // in tape order right after its raw Output (gemini -> empty). Each
-                // lifted kind is ALSO emitted live as a structured `DelegateAgent`
-                // per-tool row (Wave 3) so a client renders it in real time, in
-                // order, alongside the retained `DelegateProgress` text tail.
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                    seal::lift_tool_events_into_tape(resolved, &value, 0, &emit, &job, &mut writer);
-                }
-                if let Some(text) = parser.ingest(line) {
-                    emit(RuntimeEvent::delegate_progress(
-                        job.clone(),
-                        agent_owned.clone(),
-                        text,
-                    ));
-                }
-            };
-            self.delegate_launcher.launch_streaming(
-                &invocation.spec,
-                &policy,
-                &invocation.stdin,
-                token,
-                &mut on_line,
-            )
-        };
-        let output = launch.map_err(|err| delegate_launch_error(agent_name, &err))?;
-        let cancelled = token.is_cancelled();
-        let outcome = parser.finish(agent_name, output.exit_code, output.timed_out);
-        self.seal_delegate_run(job_id, writer, &outcome, !cancelled);
-        if cancelled {
-            return Err(nerve_runtime::RuntimeError::cancelled());
-        }
-        Ok(outcome.to_json())
-    }
 }
 
 /// Map a delegate-runtime caller error (unknown agent / cwd escape) to a protocol
@@ -558,23 +455,9 @@ fn delegate_error(err: DelegateError) -> nerve_runtime::RuntimeError {
     nerve_runtime::RuntimeError::adapter(err.to_string())
 }
 
-/// Render a launcher failure for a delegated spawn. A refusing launcher (the
-/// default daemon trust context) produces a message that points at the lift flag;
-/// any other spawn failure is surfaced verbatim.
-fn delegate_launch_error(agent: &str, err: &anyhow::Error) -> nerve_runtime::RuntimeError {
-    let message = err.to_string();
-    if message.contains("no contained sandbox backend") {
-        return nerve_runtime::RuntimeError::adapter(format!(
-            "delegation is disabled: cannot spawn agent `{agent}` (start the daemon with \
-             --allow-delegate, which requires a non-refusing exec context)"
-        ));
-    }
-    nerve_runtime::RuntimeError::adapter(format!("delegate `{agent}` failed: {message}"))
-}
-
-/// Render a live-session start failure (DA-5a). Like [`delegate_launch_error`], a
-/// refused persistent spawn (the default trust context) points at the lift flag;
-/// any other failure (the child died, a turn stalled) is surfaced verbatim.
+/// Render a live-session start failure (DA-5a). A refused persistent spawn (the
+/// default trust context) points at the lift flag; any other failure (the child
+/// died, a turn stalled) is surfaced verbatim.
 fn delegate_session_error(agent: &str, message: &str) -> nerve_runtime::RuntimeError {
     if message.contains("no contained sandbox backend") {
         return nerve_runtime::RuntimeError::adapter(format!(

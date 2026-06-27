@@ -8,8 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Autonomy posture handed to a delegated external agent CLI, mapping to each
-/// vendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`,
-/// gemini `--approval-mode` (read-only | edit | full). Defaults to the most
+/// vendor's sandbox/permission flag: codex `--sandbox`, claude `--permission-mode`
+/// (read-only | edit | full). Defaults to the most
 /// restricted ([`Self::ReadOnly`]) so an omitted field never grants more than read
 /// access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]

@@ -25,9 +25,8 @@ struct AgentSpec {
     binary: &'static str,
 }
 
-/// The hardcoded external-agent catalog (codex / claude / gemini), mirroring
-/// RepoPrompt CE. Availability is probed at call time; the catalog itself is
-/// static.
+/// The hardcoded external-agent catalog (codex / claude), mirroring RepoPrompt CE.
+/// Availability is probed at call time; the catalog itself is static.
 const AGENT_CATALOG: &[AgentSpec] = &[
     AgentSpec {
         name: "codex",
@@ -36,10 +35,6 @@ const AGENT_CATALOG: &[AgentSpec] = &[
     AgentSpec {
         name: "claude",
         binary: "claude",
-    },
-    AgentSpec {
-        name: "gemini",
-        binary: "gemini",
     },
 ];
 
@@ -61,8 +56,8 @@ const ROLES: &[&str] = &["standard", "scout"];
 pub(crate) fn tool_specs() -> Vec<Value> {
     vec![json!({
         "name": "list_agents",
-        "description": "List external coding agents Nerve can delegate to (codex / claude / \
-            gemini), probing each binary on PATH for availability, plus the worker-as-data \
+        "description": "List external coding agents Nerve can delegate to (codex / claude), \
+            probing each binary on PATH for availability, plus the worker-as-data \
             catalog (`.nerve/workers/*.json`, project > global > built-in) the orchestrator's \
             named workers resolve through. Read-only; does not spawn the agents.",
         "inputSchema": {
@@ -96,7 +91,7 @@ pub(crate) fn handle_tool_call(params: &Value, root: Option<&Path>) -> Option<Va
 /// The C6 worker-as-data catalog for `list_agents`: every discovered [`WorkerDef`]
 /// with its winning source (built-in / global / project), so the catalog reflects
 /// "add any worker is a data change". Sorted by name (the registry sorts) for
-/// deterministic output; the built-in cli{codex|claude|gemini} are always present.
+/// deterministic output; the built-in cli{codex|claude} are always present.
 fn worker_catalog(root: Option<&Path>) -> Vec<Value> {
     WorkerRegistry::discover(root)
         .catalog()
@@ -224,7 +219,7 @@ mod tests {
         let agents = result["agents"].as_array().expect("agents array");
         assert_eq!(agents.len(), AGENT_CATALOG.len());
         let names: Vec<_> = agents.iter().filter_map(|a| a["name"].as_str()).collect();
-        assert_eq!(names, vec!["codex", "claude", "gemini"]);
+        assert_eq!(names, vec!["codex", "claude"]);
         for agent in agents {
             assert!(agent["binary"].is_string());
             assert!(agent["available"].is_boolean());
@@ -245,14 +240,14 @@ mod tests {
     #[test]
     fn list_agents_surfaces_the_worker_catalog_with_sources() {
         // The C6 worker-as-data catalog appears under `workers`, each with its source.
-        // The built-in cli{codex,claude,gemini} are always present (and are cli kind).
+        // The built-in cli{codex,claude} are always present (and are cli kind).
         let result = handle_tool_call(&json!({ "name": "list_agents" }), None).expect("claimed");
         let workers = result["workers"].as_array().expect("workers array");
         let by_name: std::collections::BTreeMap<&str, &str> = workers
             .iter()
             .map(|w| (w["name"].as_str().unwrap(), w["kind"].as_str().unwrap()))
             .collect();
-        for name in ["codex", "claude", "gemini"] {
+        for name in ["codex", "claude"] {
             // Present as a cli worker (don't assume the host's global dir is empty, so
             // assert the entry exists + is a cli kind rather than its exact source).
             assert_eq!(by_name.get(name), Some(&"cli"), "built-in {name} missing");

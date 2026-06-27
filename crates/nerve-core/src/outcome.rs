@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn outcome_record_round_trips_through_json() {
-        let mut record = empty_record("run-x", Some("s".into()), Some("gemini".into()));
+        let mut record = empty_record("run-x", Some("s".into()), Some("claude".into()));
         record = append_label(record, label(0, Outcome::Merged, LabelSource::Human));
         let json = serde_json::to_string(&record).expect("serialize");
         let back: OutcomeRecord = serde_json::from_str(&json).expect("deserialize");

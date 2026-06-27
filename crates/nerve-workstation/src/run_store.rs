@@ -134,17 +134,6 @@ pub(crate) struct SealedRun {
 }
 
 impl RunWriter {
-    /// Begin capturing a run for the given delegated session (`session_id` is the
-    /// `delegate.start` job id) against `agent`, confined to `root`, stamping the
-    /// start time as now (the one-shot path, where capture begins at the spawn).
-    pub(crate) fn begin(
-        session_id: impl Into<String>,
-        agent: impl Into<String>,
-        root: Option<String>,
-    ) -> Self {
-        Self::begin_at(now_ms(), session_id, agent, root)
-    }
-
     /// Begin with an explicit start timestamp — for the live-session path, where the
     /// tape is assembled at close but `started_at_ms` must reflect when turn 1 began.
     /// `started_at_ms` is display metadata only and is never hashed (INV-R2), so this
@@ -348,7 +337,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn sample_writer(store: &RunStore) -> SealedRun {
-        let mut writer = RunWriter::begin("job-7", "codex", Some("/repo".into()));
+        let mut writer = RunWriter::begin_at(0, "job-7", "codex", Some("/repo".into()));
         writer.push(EventKind::RunStarted {
             agent: "codex".into(),
             task: "add a test".into(),

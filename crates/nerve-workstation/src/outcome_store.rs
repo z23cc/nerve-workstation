@@ -608,9 +608,9 @@ mod tests {
         );
         store.write_record(&codex).unwrap();
 
-        let mut gemini = nerve_core::outcome::empty_record("run-b", None, Some("gemini".into()));
-        gemini = nerve_core::outcome::append_label(
-            gemini,
+        let mut claude = nerve_core::outcome::empty_record("run-b", None, Some("claude".into()));
+        claude = nerve_core::outcome::append_label(
+            claude,
             OutcomeLabel {
                 seq: 0,
                 outcome: Outcome::Reverted,
@@ -623,7 +623,7 @@ mod tests {
                 chained_hash: String::new(),
             },
         );
-        store.write_record(&gemini).unwrap();
+        store.write_record(&claude).unwrap();
 
         // Unfiltered: both, summary tallies both dispositions.
         let all = handle_outcome_query(None, None, 100, Some(&store), None);

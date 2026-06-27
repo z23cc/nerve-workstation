@@ -16,8 +16,8 @@
 //!   NOT register branches (steering "one of N concurrent branches" is out of scope
 //!   for C3a — the engine has no single live frontier there).
 //! - [`SteerRegistry::steer`] runs ONE more turn on the looked-up session via the
-//!   C0 [`WorkerSession::steer`] port. A worker that is one-shot (`gemini`) returns
-//!   [`WorkerError::NotSteerable`]; a closed/advanced frontier returns a clear
+//!   C0 [`WorkerSession::steer`] port. A worker that is one-shot (a remote/MCP
+//!   worker) returns [`WorkerError::NotSteerable`]; a closed/advanced frontier returns a clear
 //!   "no live branch" error.
 //! - The steered turn's events + final [`TurnResult`] are recorded into the same
 //!   [`WorkerLedger`](crate::worker::WorkerLedger) as the original turn, so the
@@ -53,7 +53,7 @@ pub(crate) enum SteerError {
     NoLiveBranch(String),
     /// The selector was unset but more than one branch is live (ambiguous).
     Ambiguous(usize),
-    /// The matched worker is one-shot (e.g. `gemini`) or otherwise not steerable.
+    /// The matched worker is one-shot (e.g. a remote/MCP worker) or otherwise not steerable.
     NotSteerable,
     /// The steer turn itself failed mid-flight.
     Turn(String),

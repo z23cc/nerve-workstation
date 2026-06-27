@@ -3,7 +3,7 @@
 //! When the daemon is launched from a macOS GUI (Finder/Dock → launchd) it
 //! inherits launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), not the
 //! user's login-shell `PATH`. The external agent CLIs the delegate seam spawns
-//! (`claude` / `codex` / `gemini`) live in user-local bin directories
+//! (`claude` / `codex`) live in user-local bin directories
 //! (`~/.local/bin`, Homebrew, `~/.cargo/bin`, …) that are absent from that
 //! minimal PATH, so a bare `Command::new("claude")` fails with ENOENT —
 //! surfaced as the opaque `failed to spawn `claude``.

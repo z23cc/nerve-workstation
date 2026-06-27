@@ -126,7 +126,7 @@ pub(crate) struct Chat {
     pub(crate) title: String,
     #[serde(default = "default_chat_backend")]
     pub(crate) backend: String,
-    /// The external CLI agent bound to this thread (claude / codex / gemini),
+    /// The external CLI agent bound to this thread (claude / codex),
     /// captured at first send. Drives the sidebar agent badge.
     #[serde(default = "default_agent")]
     pub(crate) agent: String,

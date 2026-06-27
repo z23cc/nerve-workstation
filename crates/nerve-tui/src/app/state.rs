@@ -99,7 +99,7 @@ pub enum Block {
     Reasoning(String),
     /// A tool call cell (running → ok/error, with framed output).
     Tool(ToolCall),
-    /// Streaming output from a delegated external agent (codex/claude/gemini),
+    /// Streaming output from a delegated external agent (codex/claude),
     /// coalesced per agent (dim, `⟳ delegating → <agent>` header).
     Delegate { agent: String, text: String },
     /// A flow run header (C-TUI §2): `⛓ flow <name> (<strategy>) · <n> nodes`,

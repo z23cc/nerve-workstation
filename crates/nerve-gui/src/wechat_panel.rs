@@ -27,11 +27,7 @@ use serde_json::json;
 const NO_TOKEN: &str = "No daemon token — open the daemon URL or append #token=…";
 /// Cap on the live message log so a long-running bridge does not grow unbounded.
 const LOG_CAP: usize = 200;
-const AGENT_OPTS: &[(&str, &str)] = &[
-    ("claude", "Claude Code"),
-    ("codex", "Codex"),
-    ("gemini", "Gemini CLI"),
-];
+const AGENT_OPTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("codex", "Codex")];
 const AUTO_OPTS: &[(&str, &str)] = &[
     ("read_only", "Read-only"),
     ("edit", "Auto-edit"),

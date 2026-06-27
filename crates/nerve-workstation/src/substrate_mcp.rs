@@ -1,6 +1,6 @@
 //! L5 MCP face of the trust substrate (`docs/designs/trust-substrate.md` §8 L5) — the
-//! six read-only `nerve_*` tools an *external* coding agent (Claude Code, Codex,
-//! Gemini CLI) or CI calls over MCP to inspect its own provenance: enumerate captured runs
+//! six read-only `nerve_*` tools an *external* coding agent (Claude Code, Codex)
+//! or CI calls over MCP to inspect its own provenance: enumerate captured runs
 //! (`nerve_runs`), read a captured run's tape for replay (`nerve_replay`), fetch a
 //! signed Receipt (`nerve_receipt`), ask for a verification verdict (`nerve_verify`),
 //! audit the append-only L1 evidence ledger + its chain integrity (`nerve_ledger`), and

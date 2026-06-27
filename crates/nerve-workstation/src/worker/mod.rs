@@ -14,9 +14,9 @@
 //! C0 is a NEW module that *wraps* the shipped mechanisms — it does not modify the
 //! `delegate_*` / `subagent` / `agent` code paths. [`CliWorker`] reuses the
 //! persistent delegate drivers ([`DelegateSession`](crate::delegate_session)/
-//! [`CodexSession`](crate::delegate_session_codex)) and the gemini one-shot
-//! launcher recipe; [`ProviderWorker`] reuses `SubAgentSpawner::run_at_depth`
-//! under the SAME outermost `PolicyToolBox` gate. Every existing test stays green
+//! [`CodexSession`](crate::delegate_session_codex)); [`ProviderWorker`] reuses
+//! `SubAgentSpawner::run_at_depth` under the SAME outermost `PolicyToolBox` gate.
+//! Every existing test stays green
 //! without edits.
 //!
 //! ## The property the port buys (design §2)
@@ -81,8 +81,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// What a worker is, and the only place the CLI-vs-provider distinction is visible
-/// to the engine (design §2). `Cli` names a delegate agent (`codex`/`claude`/
-/// `gemini`); `Provider` names an in-process `LlmProvider` + model.
+/// to the engine (design §2). `Cli` names a delegate agent (`codex`/`claude`);
+/// `Provider` names an in-process `LlmProvider` + model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum WorkerKind {
@@ -208,7 +208,7 @@ pub(crate) enum WorkerError {
     Turn(String),
     /// The run was cancelled (the supplied [`CancelToken`] fired).
     Cancelled,
-    /// This worker kind does not support steering (e.g. one-shot `gemini`).
+    /// This worker kind does not support steering (e.g. a one-shot remote/MCP worker).
     NotSteerable,
 }
 

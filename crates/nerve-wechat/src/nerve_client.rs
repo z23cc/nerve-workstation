@@ -143,7 +143,7 @@ pub struct DelegateNerve {
 
 impl DelegateNerve {
     /// Spawn `nerve daemon --stdio --root <root> --allow-delegate` and connect.
-    /// `agent` is the delegate catalog name (`claude` / `codex` / `gemini`);
+    /// `agent` is the delegate catalog name (`claude` / `codex`);
     /// `autonomy` is the posture granted to every delegated turn.
     pub fn spawn(
         nerve_bin: &str,

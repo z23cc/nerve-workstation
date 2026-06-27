@@ -186,7 +186,7 @@ fn token_overrun_exhausts_and_cancels() {
 }
 
 /// A zero-usage scripted result: ok, but NO cost and NO tokens — modeling a worker
-/// (gemini / remote / mcp) that reports nothing. Under a token-only budget this MUST
+/// (a remote / mcp worker) that reports nothing. Under a token-only budget this MUST
 /// still be charged the worst case (finding G).
 fn silent(text: &str) -> TurnResult {
     TurnResult {

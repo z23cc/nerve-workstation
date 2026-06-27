@@ -11,7 +11,7 @@ runtime adapters over the **same** engine: an agent-facing **MCP server over std
 **Product direction (sharpened 2026-06-24 — governed by `docs/designs/trust-substrate.md`):** Nerve is
 the **deterministic flight-recorder + execution-grounded re-verifier for fleets of external coding
 agents.** The human-facing runtime is a **cockpit** that orchestrates external CLI agents (Claude Code,
-Codex, Gemini CLI) through the `delegate.*` seam — but the cockpit is the **distribution body**, not
+Codex) through the `delegate.*` seam — but the cockpit is the **distribution body**, not
 the moat. The **moat** is that every agent run is captured as a content-addressed, bit-for-bit
 replayable **Run** and gated by a portable, signed **Verification Receipt** whose verdict is borrowed
 from the org's own tests. **Court reporter, not judge:** Nerve proves *what an agent did, that it is

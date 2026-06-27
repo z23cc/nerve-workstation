@@ -4,8 +4,8 @@
 //! external agent CLI is spawned.
 
 use super::{
-    Arc, Mutex, Value, dispatch, json, output_router, output_router_with_delegate,
-    response_with_id, rpc, runtime_with_file, wait_for_job_event,
+    Arc, Mutex, dispatch, json, output_router, output_router_with_delegate, response_with_id, rpc,
+    runtime_with_file, wait_for_job_event,
 };
 
 #[test]
@@ -81,78 +81,6 @@ fn delegate_start_unknown_agent_is_rejected() {
 }
 
 #[test]
-fn delegate_start_streams_progress_and_returns_outcome() {
-    // A canned gemini stream is replayed through the launcher's default streaming
-    // path; the parser emits DelegateProgress for each assistant chunk and extracts
-    // the final result. gemini is the agent still on the DA-2 one-shot path (codex
-    // and claude take the DA-5 persistent live path), so it exercises `run_delegate`.
-    let fixture = runtime_with_file();
-    let stream = concat!(
-        r#"{"type":"assistant","text":"working"}"#,
-        "\n",
-        r#"{"type":"assistant","text":"the answer"}"#,
-        "\n",
-        r#"{"type":"result","result":"the answer"}"#,
-        "\n",
-    );
-    let (router, output) = output_router_with_delegate(
-        Arc::clone(&fixture.runtime),
-        Arc::new(CannedLauncher::ok(stream)),
-    );
-    dispatch(
-        &router,
-        &output,
-        rpc(
-            json!(1),
-            "runtime/jobs/start",
-            json!({
-                "job_id": "stream-job",
-                "command": {
-                    "kind": "delegate.start",
-                    "agent": "gemini",
-                    "task": "do the thing"
-                }
-            }),
-        ),
-    );
-    wait_for_job_event(&output, "job_completed", "stream-job");
-
-    // DelegateProgress events carried the human-meaningful assistant text.
-    let progress: Vec<String> = output
-        .lock()
-        .expect("output lock")
-        .iter()
-        .filter_map(|value| {
-            let params = value.get("params")?;
-            (params.get("type") == Some(&json!("delegate_progress"))).then(|| {
-                params
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            })
-        })
-        .collect();
-    assert_eq!(progress, vec!["working", "the answer"]);
-
-    let observed = dispatch(
-        &router,
-        &output,
-        rpc(
-            json!(2),
-            "runtime/jobs/get",
-            json!({ "job_id": "stream-job", "include_result": true }),
-        ),
-    );
-    let job = &response_with_id(&observed, json!(2))["result"]["job"];
-    assert_eq!(job["status"], "completed");
-    let result = &job["result"];
-    assert_eq!(result["agent"], "gemini");
-    assert_eq!(result["ok"], true);
-    assert_eq!(result["result"], "the answer");
-}
-
-#[test]
 fn delegate_start_rejects_cwd_escape() {
     let fixture = runtime_with_file();
     let (router, output) = output_router_with_delegate(
@@ -184,44 +112,12 @@ fn delegate_start_rejects_cwd_escape() {
     assert!(message.contains(".."), "{message}");
 }
 
-#[test]
-fn delegate_start_cancel_short_circuits_to_cancelled() {
-    // A canned launcher that flips the cancel token mid-run (as a real kill would
-    // leave it). The job must terminate as `cancelled`, not `completed`, even
-    // though the launcher returned an exit code. Uses gemini, the agent still on the
-    // DA-2 one-shot streaming path.
-    let fixture = runtime_with_file();
-    let (router, output) = output_router_with_delegate(
-        Arc::clone(&fixture.runtime),
-        Arc::new(CannedLauncher::cancelling(
-            r#"{"type":"assistant","text":"partial"}"#,
-        )),
-    );
-    dispatch(
-        &router,
-        &output,
-        rpc(
-            json!(1),
-            "runtime/jobs/start",
-            json!({
-                "job_id": "cancel-delegate",
-                "command": { "kind": "delegate.start", "agent": "gemini", "task": "x" }
-            }),
-        ),
-    );
-    let cancelled = wait_for_job_event(&output, "job_cancelled", "cancel-delegate");
-    assert_eq!(cancelled["params"]["job_id"], "cancel-delegate");
-}
-
 /// A launcher that records the argv it was handed and replays a canned stdout
 /// through the trait's default line-replay streaming path — exercising the
 /// delegate parser without spawning a real process.
 struct CannedLauncher {
     stdout: String,
     exit_code: Option<i32>,
-    /// When set, the launcher cancels this token before returning, simulating a
-    /// run that was interrupted (e.g. by `runtime/jobs/cancel`).
-    cancel_on_run: bool,
     seen: Mutex<Option<crate::sandbox::CommandSpec>>,
 }
 
@@ -230,15 +126,7 @@ impl CannedLauncher {
         Self {
             stdout: stdout.to_string(),
             exit_code: Some(0),
-            cancel_on_run: false,
             seen: Mutex::new(None),
-        }
-    }
-
-    fn cancelling(stdout: &str) -> Self {
-        Self {
-            cancel_on_run: true,
-            ..Self::ok(stdout)
         }
     }
 }
@@ -248,15 +136,12 @@ impl crate::sandbox::SandboxLauncher for CannedLauncher {
         &self,
         spec: &crate::sandbox::CommandSpec,
         _policy: &crate::sandbox::SandboxPolicy,
-        cancel: &nerve_core::CancelToken,
+        _cancel: &nerve_core::CancelToken,
     ) -> anyhow::Result<crate::sandbox::Output> {
         *self.seen.lock().expect("seen lock") = Some(crate::sandbox::CommandSpec {
             command: spec.command.clone(),
             args: spec.args.clone(),
         });
-        if self.cancel_on_run {
-            cancel.cancel();
-        }
         Ok(crate::sandbox::Output {
             exit_code: self.exit_code,
             stdout: self.stdout.clone(),

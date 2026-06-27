@@ -17,7 +17,7 @@ use nerve_runtime::{
 /// CLI worker catalog names the shorthand maps to [`WorkerRef::Cli`]; anything
 /// else (or a `provider:model` spelling) becomes a [`WorkerRef::Provider`].
 /// Mirrors the delegate runtime's catalog names (DA-1/DA-2).
-pub const CLI_AGENTS: &[&str] = &["codex", "claude", "gemini"];
+pub const CLI_AGENTS: &[&str] = &["codex", "claude"];
 
 /// The schema version the shorthand stamps onto a built [`WorkflowDef`] (current
 /// on-disk version is `1`).
@@ -230,7 +230,7 @@ fn provider_step(default_worker: (&str, &str), task: &str) -> Step {
 }
 
 /// Resolve an agent token to a [`WorkerRef`]. The rules (kept simple, documented):
-/// - a known CLI catalog name (`claude`/`codex`/`gemini`) → [`WorkerRef::Cli`];
+/// - a known CLI catalog name (`claude`/`codex`) → [`WorkerRef::Cli`];
 /// - a `provider:model` spelling → [`WorkerRef::Provider`] (split on the FIRST
 ///   colon, so a model id with colons keeps the rest);
 /// - any other bare name → [`WorkerRef::Provider`] on the session's provider with

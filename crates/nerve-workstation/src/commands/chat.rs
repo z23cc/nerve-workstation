@@ -28,8 +28,8 @@ pub(crate) struct ChatArgs {
     /// Named agent / skill definition to start the session with.
     #[arg(long)]
     agent: Option<String>,
-    /// Allow the chat agent to delegate to external agent CLIs (codex/claude/
-    /// gemini) via the `delegate_agent` tool. Off by default; each delegation is
+    /// Allow the chat agent to delegate to external agent CLIs (codex/claude)
+    /// via the `delegate_agent` tool. Off by default; each delegation is
     /// still approval-gated. Forwarded to the spawned daemon as `--allow-delegate`.
     #[arg(long = "allow-delegate")]
     allow_delegate: bool,

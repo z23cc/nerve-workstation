@@ -3,8 +3,7 @@
 //! This wraps the SHIPPED persistent delegate drivers without changing them:
 //! claude/codex run as a live, steerable [`LiveDriver`](crate::delegate_live)
 //! (the same [`DelegateSession`]/[`CodexSession`] the daemon's
-//! `run_delegate_live` registers), and `gemini` runs one-shot through the
-//! [`delegate_runtime`](crate::delegate_runtime) streaming recipe + parser. The
+//! `run_delegate_live` registers). The
 //! approval round-trip reuses [`delegate_proxy`](crate::delegate_proxy) verbatim,
 //! routed to `ctx.approver` (the one [`ApprovalHub`]); a `can_use_tool` ask is
 //! additionally re-projected as a [`WorkerEvent::Approval`] so the engine can
@@ -46,7 +45,7 @@ pub(crate) struct CliWorker {
     agent: DelegateAgent,
     launcher: Arc<dyn SandboxLauncher>,
     /// Pre-computed codex `-c mcp_servers.<n>.enabled=false` pairs (DA-6); empty
-    /// for claude/gemini, which ignore them.
+    /// for claude, which ignores them.
     mcp_disable_flags: Vec<String>,
 }
 
@@ -95,10 +94,7 @@ impl AgentWorker for CliWorker {
         on_event: &mut dyn FnMut(WorkerEvent),
     ) -> Result<Box<dyn WorkerSession>, WorkerError> {
         let cwd = self.run_cwd(ctx)?;
-        match self.agent {
-            DelegateAgent::Gemini => self.start_gemini(task, &cwd, cancel, on_event),
-            _ => self.start_live(task, &cwd, ctx, cancel, on_event),
-        }
+        self.start_live(task, &cwd, ctx, cancel, on_event)
     }
 }
 
@@ -197,56 +193,6 @@ impl CliWorker {
                 Ok((LiveDriver::Claude(session), turn))
             }
         }
-    }
-
-    /// Start `gemini` one-shot through the streaming launcher + [`DelegateParser`]
-    /// (reusing the DA-2 recipe), projecting each parsed line → progress and the
-    /// final outcome → the synthesized step stream.
-    fn start_gemini(
-        &self,
-        task: &WorkerTask,
-        cwd: &std::path::Path,
-        cancel: &CancelToken,
-        on_event: &mut dyn FnMut(WorkerEvent),
-    ) -> Result<Box<dyn WorkerSession>, WorkerError> {
-        let invocation = delegate_runtime::build_command(
-            DelegateAgent::Gemini,
-            &task.prompt,
-            cwd,
-            task.autonomy,
-            task.model.as_deref(),
-            &self.mcp_disable_flags,
-        );
-        let policy = delegate_runtime::delegate_policy(cwd);
-        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
-        let mut on_line = |line: &str| {
-            if let Some(text) = parser.ingest(line) {
-                on_event(WorkerEvent::Progress { text });
-            }
-        };
-        let output = self
-            .launcher
-            .launch_streaming(
-                &invocation.spec,
-                &policy,
-                &invocation.stdin,
-                cancel,
-                &mut on_line,
-            )
-            .map_err(|err| {
-                if cancel.is_cancelled() {
-                    WorkerError::Cancelled
-                } else {
-                    WorkerError::Start(err.to_string())
-                }
-            })?;
-        if cancel.is_cancelled() {
-            return Err(WorkerError::Cancelled);
-        }
-        let outcome = parser.finish("gemini", output.exit_code, output.timed_out);
-        let result = outcome_to_result(&outcome);
-        synthesize_turn_steps(1, &result, on_event);
-        Ok(Box::new(OneShotCliSession { last: result }))
     }
 
     /// Build the proxied-mode approval bridge from `ctx.approver`, wrapping it so a
@@ -409,31 +355,6 @@ impl WorkerSession for LiveCliSession {
 
     fn result(&self) -> TurnResult {
         crate::sync::lock_recover(&self.last).clone()
-    }
-}
-
-/// A one-shot (gemini) worker session: turn 1 already ran in `start`, so there is
-/// nothing live to steer or close.
-struct OneShotCliSession {
-    last: TurnResult,
-}
-
-impl WorkerSession for OneShotCliSession {
-    fn steer(
-        &mut self,
-        _message: &str,
-        _cancel: &CancelToken,
-        _on_event: &mut dyn FnMut(WorkerEvent),
-    ) -> Result<TurnResult, WorkerError> {
-        Err(WorkerError::NotSteerable)
-    }
-
-    fn interrupt(&self) {}
-
-    fn close(&mut self) {}
-
-    fn result(&self) -> TurnResult {
-        self.last.clone()
     }
 }
 

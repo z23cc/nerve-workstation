@@ -27,7 +27,7 @@
 //! This module is FLOW-SCOPED. It governs the engine's own spawn path; it does
 //! NOT touch the shipped `delegate_agent` / `spawn_agent` tool guards (the §8
 //! guard-unification is a deferred cleanup). Budgeting of a worker that reports no
-//! usage (the `gemini` recipe is UNVERIFIED) is WORST-CASE / fail-closed: see
+//! usage (e.g. a remote/MCP worker) is WORST-CASE / fail-closed: see
 //! [`BudgetLedger::debit`].
 
 use super::{BudgetGrant, TurnResult};
@@ -96,7 +96,7 @@ impl BudgetLedger {
     ///
     /// Token spend is the node's input + output (+ cache) tokens. USD spend is the
     /// node's `cost_usd` when reported. **Fail-closed for unverified usage:** a
-    /// worker that reports zero tokens (e.g. the UNVERIFIED `gemini` recipe) still
+    /// worker that reports zero tokens (e.g. a remote/MCP worker) still
     /// counts against `max_workers` (via the [`FleetBudget`]) and, when a per-node
     /// USD limit is set but no cost is reported, is charged the worst-case per-node
     /// ceiling rather than `0` — so a silent worker can never run unbounded.
@@ -192,8 +192,8 @@ impl BudgetLedger {
     /// The USD a node debits: its reported `cost_usd`, or — fail-closed — the
     /// per-node worst-case ceiling when a USD budget is set but the worker reported
     /// no cost (so a silent worker is never free under a budget). The worst case is
-    /// the whole remaining USD budget: a single unverified worker (the `gemini`
-    /// recipe) can therefore consume at most the budget and never run unbounded.
+    /// the whole remaining USD budget: a single silent worker (e.g. a remote/MCP
+    /// worker) can therefore consume at most the budget and never run unbounded.
     fn node_cost(&self, result: &TurnResult) -> f64 {
         match result.cost_usd {
             Some(cost) => cost,
@@ -205,8 +205,8 @@ impl BudgetLedger {
 
     /// The tokens a node debits: its reported input + output + cache usage, or —
     /// fail-closed, MIRRORING [`Self::node_cost`] — the whole token ceiling when a
-    /// token budget is set but the worker reported NO tokens (`gemini` and the
-    /// remote/MCP recipes can report zero usage). Without this worst-case a
+    /// token budget is set but the worker reported NO tokens (a remote/MCP
+    /// worker can report zero usage). Without this worst-case a
     /// zero-usage worker ran FREE under a token-only `BudgetSpec`, defeating the
     /// brake; now a single silent worker can consume at most the budget and the flow
     /// self-cancels rather than running unbounded. An uncapped token budget worst-
@@ -640,8 +640,8 @@ mod tests {
 
     #[test]
     fn no_tokens_reported_is_charged_worst_case_under_a_token_budget() {
-        // Finding G: a worker that reports NO tokens (e.g. the gemini recipe or a
-        // remote/MCP worker) under a TOKEN-only budget must be charged the worst case
+        // Finding G: a worker that reports NO tokens (e.g. a remote/MCP worker)
+        // under a TOKEN-only budget must be charged the worst case
         // (the whole token ceiling), so it can never run free and the flow self-cancels.
         let ledger = BudgetLedger::new(spec(None, Some(1000), None));
         // A zero-usage worker (no cost, no tokens) is charged the full 1000-token

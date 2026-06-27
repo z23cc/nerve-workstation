@@ -226,7 +226,7 @@ pub enum RuntimeCommand {
     /// Remove stored credentials for a provider.
     #[serde(rename = "auth.logout")]
     AuthLogout { provider: String },
-    /// Delegate a coding task to an external agent CLI (codex / claude / gemini)
+    /// Delegate a coding task to an external agent CLI (codex / claude)
     /// as a long-lived job. Pure protocol vocabulary: the host job manager drives
     /// the subprocess (DA-2); `nerve-core` has no subprocess knowledge. `agent` is
     /// the catalog name from `list_agents`; `cwd` defaults to the workspace root;
@@ -435,7 +435,7 @@ pub enum RuntimeCommand {
     /// progress streams back as [`crate::RuntimeEvent::FlowNodeAgent`]. Only a
     /// live, steerable branch (a `Single`/`Pipeline` worker still in flight, on a
     /// steerable substrate) can be steered; a closed or one-shot worker
-    /// (`gemini`) returns a clear error. `flow_id` is the originating
+    /// (a remote/MCP worker) returns a clear error. `flow_id` is the originating
     /// [`Self::FlowStart`] job id; `target` selects which branch (by node id, or
     /// the only live worker when unset).
     #[serde(rename = "flow.steer")]
@@ -541,7 +541,7 @@ pub enum RuntimeCommand {
         /// WeChat user ids permitted to drive the agent (empty = deny all).
         #[serde(default)]
         owners: Vec<String>,
-        /// Delegate agent catalog name (`claude` / `codex` / `gemini`).
+        /// Delegate agent catalog name (`claude` / `codex`).
         #[serde(default = "runtime_command_impl::default_wechat_agent")]
         agent: String,
         /// Autonomy granted to each delegated turn (defaults to read-only).

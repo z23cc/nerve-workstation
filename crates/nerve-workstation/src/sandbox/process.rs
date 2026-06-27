@@ -153,7 +153,7 @@ pub(super) fn spawn_child(
 
 /// Context for a failed spawn. A bare program name that did not resolve on the
 /// (repaired) PATH gets an actionable "not found" hint — the common delegate
-/// failure when an agent CLI (claude/codex/gemini) isn't installed or is off the
+/// failure when an agent CLI (claude/codex) isn't installed or is off the
 /// daemon's PATH — instead of the bare io error.
 fn spawn_error_context(spec: &CommandSpec, unresolved: bool) -> String {
     if unresolved && !spec.command.contains('/') {

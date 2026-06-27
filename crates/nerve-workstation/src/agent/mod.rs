@@ -136,7 +136,7 @@ struct AgentRunArgs {
     #[arg(long = "allow-exec")]
     allow_exec: bool,
     /// Enable the `delegate_agent` tool (default off): let the agent hand a
-    /// subtask to an external coding-agent CLI (codex / claude / gemini). Even
+    /// subtask to an external coding-agent CLI (codex / claude). Even
     /// when enabled, every call is permission-gated (Ask), only the top-level
     /// agent can delegate, and the child runs read-only by default.
     #[arg(long = "allow-delegate")]

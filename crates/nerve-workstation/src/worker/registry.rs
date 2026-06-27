@@ -13,7 +13,7 @@
 //! [`WorkerRegistry::discover`] mirrors [`Capabilities::discover`] verbatim: a
 //! precedence-ordered set of base directories (project `<root>/.nerve` before global
 //! `config_home()`), each holding a `workers/` subdirectory of `<name>.json` files,
-//! falling back to embedded built-in defaults (the bare `cli{codex|claude|gemini}`
+//! falling back to embedded built-in defaults (the bare `cli{codex|claude}`
 //! refs, so existing inline workflows keep working unchanged). The first match wins;
 //! a project def shadows a global one shadows a built-in.
 //!
@@ -38,8 +38,8 @@ use nerve_runtime::{DelegateAutonomy, WorkerRef};
 use serde::Deserialize;
 use std::path::Path;
 
-/// The embedded built-in worker catalog: the three bare CLI agents, so a fresh
-/// install resolves `cli{codex|claude|gemini}` named refs (and inline refs already
+/// The embedded built-in worker catalog: the two bare CLI agents, so a fresh
+/// install resolves `cli{codex|claude}` named refs (and inline refs already
 /// work without the registry). Each is `(name, raw-json)`, consulted only after the
 /// project + global directories — a project may shadow any of them.
 const BUILTIN_WORKERS: &[(&str, &str)] = &[
@@ -47,10 +47,6 @@ const BUILTIN_WORKERS: &[(&str, &str)] = &[
     (
         "claude",
         r#"{ "kind": { "type": "cli", "name": "claude" } }"#,
-    ),
-    (
-        "gemini",
-        r#"{ "kind": { "type": "cli", "name": "gemini" } }"#,
     ),
 ];
 
@@ -79,7 +75,7 @@ pub(crate) struct WorkerDef {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WorkerDefKind {
-    /// An external agentic CLI by catalog name (`codex` | `claude` | `gemini`).
+    /// An external agentic CLI by catalog name (`codex` | `claude`).
     Cli { name: String },
     /// An in-process provider loop by provider + model.
     Provider { provider: String, model: String },
@@ -248,7 +244,7 @@ mod tests {
     #[test]
     fn builtin_cli_workers_resolve_without_any_files() {
         let reg = WorkerRegistry::from_sources(None, None);
-        for name in ["codex", "claude", "gemini"] {
+        for name in ["codex", "claude"] {
             let resolved = reg
                 .resolve(&WorkerRef::Named { name: name.into() })
                 .expect("built-in resolves");
@@ -378,7 +374,6 @@ mod tests {
         assert_eq!(by_name.get("reviewer"), Some(&CapabilitySource::Project));
         assert_eq!(by_name.get("claude"), Some(&CapabilitySource::Project));
         assert_eq!(by_name.get("codex"), Some(&CapabilitySource::BuiltIn));
-        assert_eq!(by_name.get("gemini"), Some(&CapabilitySource::BuiltIn));
     }
 
     #[test]

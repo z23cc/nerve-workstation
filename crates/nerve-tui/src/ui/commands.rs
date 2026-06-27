@@ -68,7 +68,7 @@ pub fn provider_models_tool(provider: &str) -> Option<&'static str> {
 
 /// The agents a `/delegate` command accepts, matching the delegate runtime's
 /// catalog names (DA-1/DA-2). Listed in the hint/help and rejected otherwise.
-pub const DELEGATE_AGENTS: &[&str] = &["codex", "claude", "gemini"];
+pub const DELEGATE_AGENTS: &[&str] = &["codex", "claude"];
 
 /// A parsed `/delegate [scout] <agent> [task...]` argument string: the role, the
 /// validated agent name, plus the rest of the line as the task (empty when none
@@ -367,7 +367,7 @@ pub const HELP_TEXT: &str = "commands:\n  \
 /provider <name> [model]   switch provider (claude|chatgpt|xai)\n  \
 /models                    list the current provider's models\n  \
 /mode [always-ask|write|yolo]  set the approval mode (bare = show current)\n  \
-/delegate <agent> [task]   start a steerable delegate session (codex|claude|gemini)\n  \
+/delegate <agent> [task]   start a steerable delegate session (codex|claude)\n  \
 /delegate scout <agent> <query>  read-only repo explorer → path:line citations\n  \
 /done                      end the active delegate session (alias: /close)\n  \
 /flow <strategy> <agents> <task>  run a fleet (parallel|vote|pipeline) · /flow --file <p.json>\n  \
@@ -485,8 +485,8 @@ mod tests {
         );
         // Agent is lowercased to match the catalog names.
         assert_eq!(
-            parse_delegate("GEMINI refactor").map(|d| d.agent),
-            Ok("gemini".into())
+            parse_delegate("CLAUDE refactor").map(|d| d.agent),
+            Ok("claude".into())
         );
     }
 
@@ -504,7 +504,7 @@ mod tests {
         );
         // Case-insensitive, and the agent is still validated.
         assert_eq!(
-            parse_delegate("SCOUT gemini trace the parser").map(|d| d.role),
+            parse_delegate("SCOUT codex trace the parser").map(|d| d.role),
             Ok(DelegateRole::Scout)
         );
         // `scout` only counts as the role at the FRONT — a task may contain it.

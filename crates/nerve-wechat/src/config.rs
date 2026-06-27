@@ -7,7 +7,7 @@
 //! | `NERVE_WECHAT_BOT_TYPE` | iLink `bot_type` for your bot registration | required |
 //! | `NERVE_WECHAT_OWNERS` | comma-separated WeChat user ids allowed to drive the agent | required (empty denies all) |
 //! | `NERVE_BIN` | the `nerve` binary to spawn the daemon | `nerve` |
-//! | `NERVE_WECHAT_AGENT` | delegate agent (`claude`/`codex`/`gemini`) | `claude` |
+//! | `NERVE_WECHAT_AGENT` | delegate agent (`claude`/`codex`) | `claude` |
 //! | `NERVE_WECHAT_AUTONOMY` | `read_only`/`edit`/`full` granted to delegated turns | `read_only` |
 //! | `NERVE_WECHAT_BASE_URL` | login bootstrap host | iLink default |
 //! | `NERVE_WECHAT_STATE` | path to cache the logged-in session (skips QR on restart; 0o600) | (no persistence) |

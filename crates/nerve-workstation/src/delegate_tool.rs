@@ -3,7 +3,7 @@
 //!
 //! DA-2 wired delegation as a daemon **job** (`delegate.start`); this module adds
 //! the agent-facing **tool** path so the LLM in a chat session can hand a subtask
-//! to an external coding-agent CLI (codex / claude / gemini) mid-turn. It follows
+//! to an external coding-agent CLI (codex / claude) mid-turn. It follows
 //! the [`ExecToolBox`](crate::exec_tool::ExecToolBox) template — wrap an inner
 //! [`ToolBox`], add one tool when enabled, route it through the
 //! [`SandboxLauncher`] — and reuses DA-2's runtime
@@ -241,7 +241,7 @@ struct DelegateArgs {
     timeout_secs: Option<u64>,
     /// DA-6 (codex only): MCP allowlist for this delegated codex run. `Some(list)`
     /// overrides the persisted `[delegate.codex] mcp_enable` config (empty disables
-    /// all); `None` uses the config. Ignored for claude/gemini.
+    /// all); `None` uses the config. Ignored for claude.
     #[serde(default)]
     mcp_enable: Option<Vec<String>>,
 }
@@ -250,7 +250,7 @@ fn delegate_agent_spec() -> ToolSpec {
     ToolSpec {
         name: DELEGATE_AGENT.to_string(),
         description: concat!(
-            "Delegate a subtask to an external coding-agent CLI (codex, claude, or gemini) ",
+            "Delegate a subtask to an external coding-agent CLI (codex or claude) ",
             "spawned as a child process, and read back its result. Use this to hand off a ",
             "self-contained investigation or change to another agent. READ-ONLY by default ",
             "(`autonomy: read_only`): the child may only read the workspace — pass ",
@@ -269,7 +269,7 @@ fn delegate_agent_spec() -> ToolSpec {
             "properties": {
                 "agent": {
                     "type": "string",
-                    "enum": ["codex", "claude", "gemini"],
+                    "enum": ["codex", "claude"],
                     "description": "Which external coding-agent CLI to delegate to."
                 },
                 "task": {
@@ -307,7 +307,7 @@ fn delegate_agent_spec() -> ToolSpec {
                         configured `[mcp_servers.<name>]` to keep enabled (every other is \
                         disabled for a fast start). An empty array disables ALL; omit to use \
                         the persisted `[delegate.codex] mcp_enable` config. Ignored for \
-                        claude/gemini."
+                        claude."
                 }
             },
             "required": ["agent", "task"],
@@ -467,12 +467,12 @@ mod tests {
             .into_iter()
             .find(|spec| spec.name == DELEGATE_AGENT)
             .expect("delegate_agent advertised");
-        // The schema enumerates the three agents and requires agent + task.
+        // The schema enumerates the supported agents and requires agent + task.
         assert_eq!(spec.input_schema["required"], json!(["agent", "task"]));
         assert_eq!(spec.input_schema["additionalProperties"], json!(false));
         assert_eq!(
             spec.input_schema["properties"]["agent"]["enum"],
-            json!(["codex", "claude", "gemini"])
+            json!(["codex", "claude"])
         );
     }
 

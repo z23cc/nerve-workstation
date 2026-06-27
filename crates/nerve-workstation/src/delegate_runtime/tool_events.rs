@@ -55,13 +55,11 @@ pub(crate) fn tool_event_to_agent_event(kind: &EventKind) -> Option<nerve_runtim
 /// Lift the structured tool calls an agent's stream line carries into L0
 /// tool-lifecycle [`EventKind`]s (`tool_started` / `tool_finished`), so a recorded
 /// Run indexes *which* tools ran / files were edited / commands executed — not just
-/// opaque `Output` text. `gemini` returns empty (its stream shape is unverified —
-/// Output-only, the honest partial).
+/// opaque `Output` text.
 pub(crate) fn parse_tool_events(agent: DelegateAgent, value: &Value, turn: u64) -> Vec<EventKind> {
     match agent {
         DelegateAgent::Claude => parse_claude_tool_events(value, turn),
         DelegateAgent::Codex => parse_codex_tool_events(value, turn),
-        DelegateAgent::Gemini => Vec::new(),
     }
 }
 
@@ -368,11 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_and_plain_lines_yield_no_tool_events() {
-        // Gemini is Output-only (unverified stream shape) -> never lifts tool events.
-        let line = serde_json::json!({ "type": "assistant",
-            "message": { "content": [{ "type": "tool_use", "name": "X", "input": {} }] } });
-        assert!(parse_tool_events(DelegateAgent::Gemini, &line, 0).is_empty());
+    fn plain_lines_yield_no_tool_events() {
         // A claude line with no tool blocks (plain assistant text) lifts nothing.
         let text_only = serde_json::json!({ "type": "assistant",
             "message": { "content": [{ "type": "text", "text": "hi" }] } });
@@ -404,7 +398,8 @@ mod tests {
     /// `Output` then its lifted tool events, in tape order. Seals it through a real
     /// store and returns the persisted events' kind tags.
     fn capture_kind_tags(agent: DelegateAgent, stream: &[&str]) -> Vec<String> {
-        let mut writer = crate::run_store::RunWriter::begin("job-1", agent.catalog_name(), None);
+        let mut writer =
+            crate::run_store::RunWriter::begin_at(0, "job-1", agent.catalog_name(), None);
         writer.push(EventKind::RunStarted {
             agent: agent.catalog_name().into(),
             task: "t".into(),
@@ -461,28 +456,5 @@ mod tests {
             ],
             "tool events sit in tape order right after their Output line"
         );
-    }
-
-    #[test]
-    fn captured_gemini_and_plain_stream_yields_no_tool_events() {
-        // Gemini lifts nothing -> its tape is Output-only (UNCHANGED from pre-Wave-2):
-        // no tool_started/tool_finished anywhere.
-        let stream = [
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"X","input":{}}]}}"#,
-            r#"{"type":"result","result":"done"}"#,
-        ];
-        let tags = capture_kind_tags(DelegateAgent::Gemini, &stream);
-        assert_eq!(
-            tags,
-            vec![
-                "run_started",
-                "turn_started",
-                "output",
-                "output",
-                "turn_finished",
-            ],
-            "a gemini/plain tape carries no tool events"
-        );
-        assert!(!tags.iter().any(|t| t.starts_with("tool_")));
     }
 }

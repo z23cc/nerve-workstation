@@ -17,12 +17,9 @@
 //! | claude | read_only | `--permission-mode plan`                      |
 //! | claude | edit      | `--permission-mode acceptEdits`               |
 //! | claude | full      | `--permission-mode bypassPermissions`         |
-//! | gemini | read_only | `--approval-mode plan`                        |
-//! | gemini | edit      | `--approval-mode auto_edit`                   |
-//! | gemini | full      | `--approval-mode yolo`                        |
 //!
-//! codex and claude read the task from **stdin** (so a large task never hits an
-//! argv length limit); gemini takes it as a `-p <task>` argument.
+//! codex and claude both read the task from **stdin** (so a large task never hits
+//! an argv length limit).
 //!
 //! ## Security posture
 //!
@@ -60,10 +57,9 @@ pub(crate) enum DelegateError {
 impl std::fmt::Display for DelegateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownAgent(agent) => write!(
-                f,
-                "unknown delegate agent `{agent}` (known: codex, claude, gemini)"
-            ),
+            Self::UnknownAgent(agent) => {
+                write!(f, "unknown delegate agent `{agent}` (known: codex, claude)")
+            }
             Self::CwdEscape(reason) => write!(f, "delegate cwd rejected: {reason}"),
         }
     }
@@ -72,7 +68,7 @@ impl std::fmt::Display for DelegateError {
 /// The parsed result of a delegated run, independent of which CLI produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DelegateOutcome {
-    /// Catalog agent name (codex / claude / gemini).
+    /// Catalog agent name (codex / claude).
     pub(crate) agent: String,
     /// Whether the agent reported success (no error, non-failure subtype).
     pub(crate) ok: bool,
@@ -126,8 +122,7 @@ impl DelegateOutcome {
 /// [`build_command`] so the caller can stream the task in while spawning the CLI.
 pub(crate) struct DelegateInvocation {
     pub(crate) spec: CommandSpec,
-    /// Text fed to the child's stdin (the task for codex/claude; empty for
-    /// gemini, which takes the task as an argument).
+    /// Text fed to the child's stdin (the task for codex/claude).
     pub(crate) stdin: String,
 }
 
@@ -137,7 +132,6 @@ pub(crate) struct DelegateInvocation {
 pub(crate) enum DelegateAgent {
     Codex,
     Claude,
-    Gemini,
 }
 
 impl DelegateAgent {
@@ -146,7 +140,6 @@ impl DelegateAgent {
         match name {
             "codex" => Ok(Self::Codex),
             "claude" => Ok(Self::Claude),
-            "gemini" => Ok(Self::Gemini),
             other => Err(DelegateError::UnknownAgent(other.to_string())),
         }
     }
@@ -158,7 +151,6 @@ impl DelegateAgent {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
-            Self::Gemini => "gemini",
         }
     }
 }
@@ -169,8 +161,8 @@ impl DelegateAgent {
 ///
 /// DA-6: `mcp_disable_flags` are the pre-computed, sorted `-c
 /// mcp_servers.<name>.enabled=false` pairs for the codex servers this run must skip
-/// (see [`crate::delegate_codex_mcp`]). They apply to the **codex** one-shot recipe
-/// only; claude/gemini ignore them. An empty slice leaves the argv unchanged.
+/// (see [`crate::delegate_codex_mcp`]). They apply to the **codex** recipe only;
+/// claude ignores them. An empty slice leaves the argv unchanged.
 pub(crate) fn build_command(
     agent: DelegateAgent,
     task: &str,
@@ -182,7 +174,6 @@ pub(crate) fn build_command(
     match agent {
         DelegateAgent::Codex => build_codex(task, cwd, autonomy, model, mcp_disable_flags),
         DelegateAgent::Claude => build_claude(task, cwd, autonomy, model),
-        DelegateAgent::Gemini => build_gemini(task, cwd, autonomy, model),
     }
 }
 
@@ -261,48 +252,6 @@ fn build_claude(
             args,
         },
         stdin: task.to_string(),
-    }
-}
-
-/// `gemini -p <task> -o stream-json --approval-mode <A> --skip-trust [-m <m>]`.
-/// gemini takes the task as an argument (not stdin), so stdin is empty.
-///
-/// NOTE (honest partial): the gemini recipe is built from its documented flags
-/// but has **not** been exercised against a live `gemini` CLI (no GEMINI_API_KEY
-/// in this environment). The codex/claude paths are the verified ones.
-fn build_gemini(
-    task: &str,
-    cwd: &Path,
-    autonomy: DelegateAutonomy,
-    model: Option<&str>,
-) -> DelegateInvocation {
-    let approval_mode = match autonomy {
-        DelegateAutonomy::ReadOnly => "plan",
-        DelegateAutonomy::Edit => "auto_edit",
-        DelegateAutonomy::Full => "yolo",
-    };
-    let mut args = vec![
-        "-p".to_string(),
-        task.to_string(),
-        "-o".to_string(),
-        "stream-json".to_string(),
-        "--approval-mode".to_string(),
-        approval_mode.to_string(),
-        "--skip-trust".to_string(),
-    ];
-    if let Some(model) = model {
-        args.push("-m".to_string());
-        args.push(model.to_string());
-    }
-    // gemini has no cwd flag in this recipe; the launcher forces the cwd via the
-    // SandboxPolicy, so confinement is handled there rather than on the argv.
-    let _ = cwd;
-    DelegateInvocation {
-        spec: CommandSpec {
-            command: "gemini".to_string(),
-            args,
-        },
-        stdin: String::new(),
     }
 }
 
@@ -395,7 +344,6 @@ impl DelegateParser {
         match self.agent {
             DelegateAgent::Codex => self.ingest_codex(&value),
             DelegateAgent::Claude => self.ingest_claude(&value),
-            DelegateAgent::Gemini => self.ingest_gemini(&value),
         }
     }
 
@@ -444,30 +392,6 @@ impl DelegateParser {
                 if let Some(usage) = value.get("usage") {
                     self.usage = Some(parse_claude_usage(usage));
                 }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    /// gemini stream-json (UNVERIFIED — see [`build_gemini`]): best-effort mirror
-    /// of the claude shape (assistant content chunks; a final `result`).
-    fn ingest_gemini(&mut self, value: &Value) -> Option<String> {
-        match value.get("type").and_then(Value::as_str) {
-            Some("assistant") | Some("content") => {
-                let text = value
-                    .get("text")
-                    .or_else(|| value.get("content"))
-                    .and_then(Value::as_str)?;
-                Some(text.to_string())
-            }
-            Some("result") => {
-                if let Some(text) = value.get("result").and_then(Value::as_str) {
-                    self.final_result = text.to_string();
-                }
-                // TODO(gemini-verified): once the live stream-json shape is confirmed,
-                // flip self.ok on its error marker here. Today gemini success is
-                // exit-code-driven only (self.ok stays true); see `gemini_outcome_*`.
                 None
             }
             _ => None,
@@ -557,7 +481,7 @@ mod tests {
     fn unknown_agent_is_rejected() {
         let err = DelegateAgent::from_name("rovo").expect_err("unknown agent");
         assert_eq!(err, DelegateError::UnknownAgent("rovo".to_string()));
-        assert!(err.to_string().contains("codex, claude, gemini"));
+        assert!(err.to_string().contains("codex, claude"));
     }
 
     #[test]
@@ -569,10 +493,6 @@ mod tests {
         assert_eq!(
             DelegateAgent::from_name("claude").unwrap(),
             DelegateAgent::Claude
-        );
-        assert_eq!(
-            DelegateAgent::from_name("gemini").unwrap(),
-            DelegateAgent::Gemini
         );
     }
 
@@ -684,7 +604,7 @@ mod tests {
 
     #[test]
     fn mcp_disable_flags_only_apply_to_codex() {
-        // claude/gemini ignore the codex MCP-disable flags entirely.
+        // claude ignores the codex MCP-disable flags entirely.
         let flags = crate::delegate_codex_mcp::disable_flags(&["b".to_string()]);
         let claude = build_command(
             DelegateAgent::Claude,
@@ -698,19 +618,6 @@ mod tests {
             !claude.spec.args.iter().any(|a| a.contains("mcp_servers")),
             "{:?}",
             claude.spec.args
-        );
-        let gemini = build_command(
-            DelegateAgent::Gemini,
-            "t",
-            Path::new("/w"),
-            DelegateAutonomy::ReadOnly,
-            None,
-            &flags,
-        );
-        assert!(
-            !gemini.spec.args.iter().any(|a| a.contains("mcp_servers")),
-            "{:?}",
-            gemini.spec.args
         );
     }
 
@@ -777,35 +684,6 @@ mod tests {
             &[],
         );
         assert!(inv.spec.args.iter().any(|a| a == "bypassPermissions"));
-    }
-
-    #[test]
-    fn gemini_argv_passes_task_as_arg_and_maps_modes() {
-        let inv = build_command(
-            DelegateAgent::Gemini,
-            "summarize",
-            Path::new("/w"),
-            DelegateAutonomy::Full,
-            Some("gemini-2.5-pro"),
-            &[],
-        );
-        assert_eq!(inv.spec.command, "gemini");
-        assert_eq!(
-            inv.spec.args,
-            vec![
-                "-p",
-                "summarize",
-                "-o",
-                "stream-json",
-                "--approval-mode",
-                "yolo",
-                "--skip-trust",
-                "-m",
-                "gemini-2.5-pro",
-            ]
-        );
-        // gemini reads the task from argv, not stdin.
-        assert_eq!(inv.stdin, "");
     }
 
     #[test]
@@ -905,35 +783,6 @@ mod tests {
         let outcome = parser.finish("claude", Some(1), false);
         assert!(!outcome.ok);
         assert_eq!(outcome.result, "boom");
-    }
-
-    #[test]
-    fn gemini_outcome_is_exit_code_driven_today() {
-        // Finding 8: the gemini stream parser never flips `ok` (no verified error
-        // marker yet), so its success is purely exit-code-driven. Pin that contract
-        // so a future verified-shape change is a deliberate, reviewed flip rather
-        // than a silent regression. Do NOT guess gemini's error field here.
-        let result_line = r#"{"type":"result","result":"all done"}"#;
-
-        // exit 0 -> ok, even though the stream carries no success marker.
-        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
-        assert!(parser.ingest(result_line).is_none());
-        let ok = parser.finish("gemini", Some(0), false);
-        assert!(ok.ok, "gemini is ok on a clean exit (exit-code-driven)");
-        assert_eq!(ok.result, "all done");
-
-        // non-zero exit -> not ok (the only failure signal gemini has today).
-        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
-        parser.ingest(result_line);
-        let failed = parser.finish("gemini", Some(1), false);
-        assert!(!failed.ok, "a non-zero exit is never ok");
-
-        // a timeout is likewise never ok.
-        let mut parser = DelegateParser::new(DelegateAgent::Gemini);
-        parser.ingest(result_line);
-        let timed = parser.finish("gemini", None, true);
-        assert!(!timed.ok, "a timed-out run is never ok");
-        assert!(timed.timed_out);
     }
 
     #[test]
